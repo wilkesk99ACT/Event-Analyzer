@@ -2996,6 +2996,37 @@ function analyzeCEV(P, prevEvent) {
     // someone about a bit that did NOT cause the trip is not useful information regardless of
     // how it's phrased. The two flags above (logic/status-driven trip, breaker already open)
     // are the ones that actually inform judgment about THIS trip; this one was just noise.
+
+    // ── Fault-direction element activity — the closest available signal for grid-side vs. ──
+    // ── on-site origin, NOT a location proof ──
+    // A directional element (67 phase/ground OC, or 32/32Q/32V power direction) tells you
+    // which way current or power was flowing relative to the relay's configured polarity —
+    // "forward" toward the utility source, "reverse" toward the site, or the opposite,
+    // DEPENDING ON HOW THIS SPECIFIC RELAY'S CTs/PTs AND direction settings are configured.
+    // The tool has no way to independently confirm that polarity convention from the file
+    // alone, so this is reported as a fact (which element asserted, and when) rather than a
+    // conclusion about where the fault physically is. Confirm the Forward/Reverse convention
+    // against this relay's own settings/one-line before treating it as a location answer.
+    {
+      const dirRe = /^(67[PGQ]?\d|F32[QVGP]?|R32[QVGP]?)/;
+      const msPerSampleDir = 1000 / (freq * (P.eventInfo.samPerCycA || 32));
+      const dirEvents = [];
+      digitalTransitions.forEach(t => {
+        const ms = (tripTransition?.analogSampleIdx != null && t.analogSampleIdx != null)
+          ? (t.analogSampleIdx - tripTransition.analogSampleIdx) * msPerSampleDir : null;
+        if (ms == null || ms < -250 || ms > 250) return; // within ~15 cycles of the trip either way
+        t.changes.forEach(c => { if (c.asserted && dirRe.test(c.label)) dirEvents.push({ label: c.label, ms }); });
+      });
+      if (dirEvents.length) {
+        const uniq = [...new Map(dirEvents.map(e => [e.label, e])).values()];
+        const desc = uniq.map(e => `${tt(e.label, P)}${e.ms != null ? ` (${e.ms >= 0 ? '+' : ''}${e.ms.toFixed(0)} ms rel. to trip)` : ''}`).join(', ');
+        A.investigationFlags.push({
+          severity: 'info',
+          title: 'Directional Element Activity — Check Against This Relay\u2019s Polarity Convention',
+          detail: `${desc} asserted around this event. Directional (67/32) elements indicate which way current or power flowed relative to how THIS relay's CTs/PTs and direction settings are configured — not an inherent "utility" or "site" label. If this relay's forward direction is confirmed to point toward the utility source, a forward-direction assertion is consistent with the disturbance originating upstream; a reverse assertion is consistent with it originating on the site side of this device. Confirm that polarity convention in the relay's own settings/one-line before treating this as a location determination — the tool cannot verify it independently from the file.`,
+        });
+      }
+    }
   }
 
   return A;
