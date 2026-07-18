@@ -3586,6 +3586,9 @@ function zoomHintHTML(kind) {
 
 // Re-invoke the correct chart builder with the current zoom state and swap just the SVG
 // slot's contents — the wrapping card/title (and its event listeners) stay in place.
+function setZoomAll(range) {
+  ['current', 'voltage', 'relevant'].forEach(k => { CHART_ZOOM[k] = range; rerenderZoomChart(k); });
+}
 function rerenderZoomChart(kind) {
   const slot = document.getElementById('chartSlot-' + kind);
   if (!slot || !PARSED || !ANALYSIS) return;
@@ -3626,8 +3629,7 @@ window.addEventListener('mousemove', e => {
   let newStart = startRange.start + dSamples, newEnd = startRange.end + dSamples;
   if (newStart < 0) { newStart = 0; newEnd = len; }
   if (newEnd > geom.totalLen - 1) { newEnd = geom.totalLen - 1; newStart = newEnd - len; }
-  CHART_ZOOM[kind] = { start: Math.round(newStart), end: Math.round(newEnd) };
-  rerenderZoomChart(kind);
+  setZoomAll({ start: Math.round(newStart), end: Math.round(newEnd) });
 });
 window.addEventListener('mouseup', () => {
   if (CHART_DRAG) {
@@ -3668,8 +3670,7 @@ function wireChartInteractivity() {
       newStart = Math.max(0, Math.round(newStart));
       newEnd = Math.min(geom.totalLen - 1, Math.round(newEnd));
       if (newEnd - newStart < 4) return;
-      CHART_ZOOM[kind] = (newStart <= 0 && newEnd >= geom.totalLen - 1) ? null : { start: newStart, end: newEnd };
-      rerenderZoomChart(kind);
+      setZoomAll((newStart <= 0 && newEnd >= geom.totalLen - 1) ? null : { start: newStart, end: newEnd });
     }, { passive: false });
 
     slot.addEventListener('mousedown', e => {
@@ -3678,10 +3679,7 @@ function wireChartInteractivity() {
       slot.style.cursor = 'grabbing';
     });
 
-    slot.addEventListener('dblclick', () => {
-      CHART_ZOOM[kind] = null;
-      rerenderZoomChart(kind);
-    });
+    slot.addEventListener('dblclick', () => setZoomAll(null));
   });
 }
 
