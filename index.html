@@ -2648,6 +2648,30 @@ function analyzeCEV(P, prevEvent) {
       });
     }
 
+    // ── Flag: one phase's voltage near-zero while its current isn't — possible loss of potential ──
+    // A real fault/open conductor shows up in BOTH V and I together on that phase. A dead
+    // voltage channel next to a normal current channel means the voltage MEASUREMENT failed
+    // (blown PT fuse, disconnected VT, bad input) — not an actual system condition.
+    const yV = A.voltages?.yTerminal;
+    if (yV) {
+      const phases = ['A', 'B', 'C'];
+      const vVal = ph => yV[`V${ph}`]?.fault?.secondaryV ?? null;
+      const iVal = ph => A.currents?.[`I${ph}`]?.fault?.secA ?? null;
+      phases.forEach(ph => {
+        const others = phases.filter(p => p !== ph);
+        const v = vVal(ph), i = iVal(ph);
+        const otherVAvg = others.reduce((s, p) => s + (vVal(p) || 0), 0) / others.length;
+        const otherIAvg = others.reduce((s, p) => s + (iVal(p) || 0), 0) / others.length;
+        if (v != null && i != null && otherVAvg > 5 && v < otherVAvg * 0.1 && otherIAvg > 0.05 && i > otherIAvg * 0.4) {
+          A.investigationFlags.push({
+            severity: 'high',
+            title: `Possible Loss of Potential — V${ph} Reads Near-Zero While I${ph} Doesn't`,
+            detail: `V${ph} measures ${v.toFixed(2)} V secondary — near zero, and far below V${others[0]} (${vVal(others[0]).toFixed(2)} V) and V${others[1]} (${vVal(others[1]).toFixed(2)} V). But I${ph} (${i.toFixed(2)} A sec) sits in the same range as the other phases' currents, not similarly collapsed or elevated. A real fault or open conductor on this phase would show up in both channels together — this pattern instead points to a failed voltage measurement (blown PT fuse, disconnected VT, bad relay input) rather than an actual system condition on this phase.`,
+          });
+        }
+      });
+    }
+
     // ── Flag: breaker was already open when this trip was issued ──
     const bkrLabel = ['52A3P', '52A'].find(l => (P.digitalLabels || []).includes(l));
     if (bkrLabel) {
