@@ -2217,7 +2217,18 @@ function analyzeCEV(P, prevEvent) {
     let family = null; // which derived quantity (if any) best explains this trip beyond I/V magnitude
 
     // Classify based on what elements are actually referenced
-    if (hasPhaseOC && hasGroundOC) {
+    if ((hasPhaseOC || hasGroundOC) && (hasOVseq || hasOV || hasUV)) {
+      // BOTH a current element and a voltage element are live in the resolved logic — this
+      // is a combined/supervised condition (typically an AND of both quantities), and titling
+      // it by only one family misrepresents the logic and invites the exact misreading where
+      // someone assumes the visible voltage dip alone was the cause. Name both.
+      const iPart = hasPhaseOC && hasGroundOC ? 'Phase + Ground Overcurrent' : hasPhaseOC ? 'Phase Overcurrent' : 'Ground Overcurrent';
+      const vPart = hasOVseq ? (hasGroundOV && hasNegSeqOV ? 'Zero + Negative Sequence Overvoltage' : hasGroundOV ? 'Zero-Sequence Overvoltage' : 'Negative-Sequence Overvoltage')
+                  : hasOV ? 'Overvoltage' : 'Undervoltage';
+      causeText = `Combined Condition Trip (${vPart} + ${iPart})`;
+      causeDetail = topComment || `The trip logic required both a ${vPart.toLowerCase()} condition and a ${iPart.toLowerCase()} condition simultaneously via ${label}`;
+      if (hasGroundOV || hasNegSeqOV) family = hasGroundOV ? 'zeroSeqV' : 'negSeqV';
+    } else if (hasPhaseOC && hasGroundOC) {
       causeText = 'Overcurrent Trip (Phase + Ground)';
       causeDetail = topComment || 'Phase and ground overcurrent elements asserted via ' + label;
       family = 'groundI';
@@ -2785,6 +2796,67 @@ function analyzeCEV(P, prevEvent) {
     const tIdx = digitalTransitions.indexOf(cause.tripTransition);
     const boundary = tIdx >= 0 ? tIdx : digitalTransitions.length;
 
+    // ══ DETERMINATION EVIDENCE ══
+    // Builds the "proof" behind the headline cause, so the determination doesn't have to be
+    // taken on faith — especially in the common misreading where a visible voltage dip is
+    // assumed to be the cause while the trip logic actually keyed (partly or wholly) on
+    // current. Three lines of evidence, all directly checkable in this record:
+    //   1. Per contributing element: when it asserted relative to the trip, and its measured
+    //      value vs. its own pickup where the settings expose one.
+    //   2. Which element asserted LAST — i.e., the condition whose assertion completed the
+    //      logic and set the moment of the trip.
+    //   3. When undervoltage (27) elements picked up in this record but appear NOWHERE in the
+    //      resolved trip path: say so explicitly. The voltage dip is real, but it's an EFFECT
+    //      of the event (fault current depresses voltage) — the relay's own configured logic
+    //      never consulted those elements for this trip.
+    {
+      const spcE = P.eventInfo.samPerCycA || 32;
+      const msPerE = 1000 / (freq * spcE);
+      const tripSampleIdx = cause.tripTransition?.analogSampleIdx;
+      const measuredEls = [...new Set((cause.causeChain || []).map(c => c.label)
+        .filter(l => /^(27|59|81|5[01]|67)/.test(l)))];
+      const evidence = [];
+      for (const el of measuredEls) {
+        // Last assertion at/before the trip (initial-state assertion counts as "before record").
+        let assertMs = null;
+        for (let i = 0; i <= Math.min(boundary, digitalTransitions.length - 1); i++) {
+          const ch = digitalTransitions[i].changes.find(c => c.label === el);
+          if (ch && ch.asserted && tripSampleIdx != null) {
+            assertMs = (digitalTransitions[i].analogSampleIdx - tripSampleIdx) * msPerE;
+          }
+        }
+        const initiallyOn = (P.initialDigitalState || []).includes(el);
+        const base = el.replace(/[PT]$/, '');
+        const ps = A.protectionStatus.find(p => p.element === base || p.element === el);
+        const vs = A.voltageStatus.find(v => v.element === base || v.element === el);
+        evidence.push({
+          el,
+          assertMs, initiallyOn,
+          measured: ps?.measured ?? vs?.measured ?? null,
+          pickup: ps?.pickup ?? vs?.pickup ?? null,
+          multiple: ps?.multiple ?? null,
+        });
+      }
+      // The condition that completed the logic = the latest assertion at/before the trip.
+      const timed = evidence.filter(e => e.assertMs != null);
+      const completedBy = timed.length ? timed.reduce((a, b) => (a.assertMs >= b.assertMs ? a : b)).el : null;
+
+      // Undervoltage elements that picked up in this record but are absent from the trip path.
+      const chainSet = new Set(measuredEls.map(e => e.replace(/[PT]$/, '')));
+      const uvPickedUp = new Set();
+      digitalTransitions.slice(0, boundary + 1).forEach(t => t.changes.forEach(c => {
+        if (c.asserted && /^27/.test(c.label) && !chainSet.has(c.label.replace(/[PT]$/, ''))) uvPickedUp.add(c.label.replace(/T$/, ''));
+      }));
+
+      if (evidence.length) {
+        cause.evidence = {
+          items: evidence,
+          completedBy,
+          uninvolvedUV: [...uvPickedUp],
+        };
+      }
+    }
+
     // ── Flag: trip resolved to internal logic/status bits, not a measured protection element ──
     if (cause.isNonProtection) {
       const bits = [...new Set([...(cause.negElements || []), cause.immediateCause].filter(Boolean))];
@@ -3080,6 +3152,45 @@ function buildLogicTreeSection(P, A) {
     </div>`;
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// DETERMINATION EVIDENCE — the checkable proof behind the headline cause
+// ══════════════════════════════════════════════════════════════════════
+// Answers "how do we know it was X and not Y" directly from the record: per contributing
+// element, when it asserted relative to the trip and how far past its own pickup the measured
+// quantity was; which element's assertion completed the logic; and — the specific misreading
+// this exists to prevent — an explicit statement when undervoltage elements picked up during
+// the event but the relay's own trip logic never consulted them.
+function buildEvidenceBlock(P, cause) {
+  const ev = cause?.evidence;
+  if (!ev || !ev.items?.length) return '';
+  const rows = ev.items.map(it => {
+    const timing = it.assertMs != null
+      ? (Math.abs(it.assertMs) < 0.5 ? 'asserted at the trip instant' : `asserted ${Math.abs(it.assertMs).toFixed(0)} ms before the trip`)
+      : (it.initiallyOn ? 'already asserted at record start' : 'assertion time not captured in this record');
+    const meas = it.measured && it.pickup
+      ? ` — measured <b>${it.measured}</b> vs. pickup <b>${it.pickup}</b>${it.multiple ? ` (<b>${it.multiple}×</b> pickup)` : ''}`
+      : '';
+    const completed = ev.completedBy === it.el
+      ? ` <span style="color:var(--red);font-weight:700;">← last to assert; completed the trip logic</span>`
+      : '';
+    return `<li style="margin-bottom:5px;"><span style="font-family:var(--mono);color:var(--text);">${tt(it.el, P)}</span> ${timing}${meas}${completed}</li>`;
+  }).join('');
+  const uvNote = ev.uninvolvedUV?.length
+    ? `<p style="font-size:12px;color:var(--text-dim);line-height:1.6;margin-top:8px;">
+        The phase voltages did dip during this event — undervoltage element${ev.uninvolvedUV.length > 1 ? 's' : ''}
+        <span style="font-family:var(--mono);">${ev.uninvolvedUV.join(', ')}</span> picked up — but
+        ${ev.uninvolvedUV.length > 1 ? 'they appear' : 'it appears'} <b>nowhere in the resolved trip logic</b> above.
+        The dip is an effect of the event (fault current depresses voltage), not the input the relay tripped on:
+        the elements the trip logic actually consulted are exactly the ones listed here, each verifiable against
+        the equations in the diagram and the Equations tab.</p>`
+    : '';
+  return `<div style="background:var(--card);border:1px solid var(--card-border);border-radius:8px;padding:12px 16px;margin-bottom:16px;">
+    <div style="font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Why this determination — evidence from this record</div>
+    <ul style="font-size:12px;color:var(--text-dim);line-height:1.6;padding-left:18px;margin:0;">${rows}</ul>
+    ${uvNote}
+  </div>`;
+}
+
 function renderBanner() {
   const el = document.getElementById('tripBanner');
   const cause = ANALYSIS.tripCause;
@@ -3231,6 +3342,7 @@ function renderBanner() {
         </div>
         ${cause.crossEvent ? '<div style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:4px;background:var(--yellow-dim);color:var(--yellow);font-size:11px;font-weight:600;margin-bottom:10px;border:1px solid #5c4506"><span>🔗</span> CROSS-EVENT: Condition started in a prior event record</div>' : ''}
         <p style="color:${cause.isEventReport ? '#bfdbfe' : '#fecaca'};font-size:13px;margin-bottom:16px;line-height:1.6;">${cause.causeDetail}</p>
+        ${buildEvidenceBlock(PARSED, cause)}
         ${buildLogicTreeSection(PARSED, ANALYSIS) || seqHTML}
         <div class="trip-timing">
           <div class="timing-chip"><span class="label">${cause.isEventReport ? 'Timer Delay:' : 'Total Timer Delay:'}</span> <span class="value">${totalCycles} cycles (${totalMs.toFixed(0)} ms)</span></div>
