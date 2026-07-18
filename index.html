@@ -660,11 +660,11 @@ body.dragging-file #drop-overlay { display: flex; }
 .legend-swatch { display: inline-block; width: 14px; height: 14px; background: var(--bg2); }
 
 .sv-legend {
-  display: flex; flex-wrap: wrap; gap: 4px 10px;
-  font-size: 9.5px; line-height: 1.4; color: var(--text-muted);
-  padding: 6px 4px 2px; border-top: 1px solid var(--card-border); margin-top: 8px;
+  display: flex; flex-wrap: wrap; gap: 6px 14px;
+  font-size: 12px; line-height: 1.5; color: var(--text-dim);
+  padding: 8px 4px 2px; border-top: 1px solid var(--card-border); margin-top: 8px;
 }
-.sv-legend-item b { color: var(--text-dim); font-family: var(--mono); }
+.sv-legend-item b { color: var(--text); font-family: var(--mono); }
 .sv-legend-eq { color: var(--accent); font-family: var(--mono); }
 
 .sv-card {
@@ -4923,12 +4923,18 @@ function buildSVFlagsChart(P, A, compact) {
   // the chart and still fit comfortably in a normal screenshot alongside it.
   const freqForLegend = P.eventInfo?.freq || 60;
   const legendHTML = `<div class="sv-legend">${labels.map(l => {
-    const el = explainElementBit(l, P, freqForLegend);
-    const short = el ? el.short : (getSVTooltip(l, P) || l);
     const svM = l.match(/^SV(\d+)T?$/);
     const sv = svM ? (P.svSettings || []).find(s => s.num === parseInt(svM[1])) : null;
-    const eq = sv ? ` <span class="sv-legend-eq">[${sv.equation.split('#')[0].trim()}]</span>` : '';
-    return `<span class="sv-legend-item"><b>${l}</b>: ${short}${eq}</span>`;
+    let short;
+    if (sv) {
+      const comment = sv.equation.includes('#') ? sv.equation.split('#')[1].trim() : '';
+      short = comment || `Logic variable ${sv.label}`;
+    } else {
+      const el = explainElementBit(l, P, freqForLegend);
+      short = el ? el.short : (getSVTooltip(l, P) || l);
+    }
+    const eq = sv ? `<span class="sv-legend-eq">[${sv.equation.split('#')[0].trim()}]</span> ` : '';
+    return `<span class="sv-legend-item"><b>${l}</b>: ${eq}${short}</span>`;
   }).join('')}</div>`;
 
   const tripTransition = cause.tripTransition;
