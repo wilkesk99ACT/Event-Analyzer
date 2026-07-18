@@ -332,7 +332,7 @@ body.dragging-file #drop-overlay { display: flex; }
   flex-shrink: 0;
 }
 
-/* ── Branching logic tree ── */
+/* ── Branching logic tree (left-to-right causal diagram) ── */
 .logic-tree-block {
   margin: 14px 0;
   padding: 12px 14px;
@@ -340,41 +340,29 @@ body.dragging-file #drop-overlay { display: flex; }
   border: 1px solid var(--card-border);
   border-radius: 8px;
 }
-.logic-tree-header {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 4px;
-  flex-wrap: wrap;
-}
-.logic-tree-title {
-  font-family: var(--mono);
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--accent);
-}
-.logic-tree-comment {
-  font-size: 11px;
-  color: var(--text-muted);
-}
 .logic-tree-other {
   font-size: 10.5px;
   color: var(--text-muted);
-  margin-top: 6px;
+  margin-top: 8px;
   font-style: italic;
 }
-.logic-tree-body {
-  margin-top: 8px;
+/* overflow-x scrolls a wide diagram; overflow-y stays visible so hover tooltips popping
+   upward out of a box aren't clipped by this same container. Extra top padding gives those
+   tooltips room to render before hitting the wrapper's own top edge. */
+.logic-tree-wrap {
   overflow-x: auto;
+  overflow-y: visible;
+  padding-top: 34px;
+  margin-top: -34px;
 }
-.logic-node {
-  display: inline-flex;
-  flex-direction: column;
+.logic-tree-canvas {
+  position: relative;
+}
+.logic-box {
+  position: absolute;
+  display: flex;
   align-items: center;
-  vertical-align: top;
-}
-.logic-leaf {
-  padding: 6px 11px;
+  justify-content: center;
   border-radius: 6px;
   border: 1px solid var(--card-border);
   background: var(--bg2);
@@ -382,38 +370,51 @@ body.dragging-file #drop-overlay { display: flex; }
   font-size: 11.5px;
   color: var(--text-muted);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 8px;
 }
-.logic-leaf.is-true {
+.logic-box.is-true {
   border-color: var(--green);
   background: var(--green-dim);
   color: var(--green);
   font-weight: 600;
 }
+.logic-sv-box {
+  border-style: solid;
+  border-width: 1.5px;
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.logic-sv-box.is-true {
+  border-color: var(--red);
+  background: var(--red-dim);
+  color: var(--red);
+}
+.logic-final-box {
+  border-color: var(--red);
+  background: var(--red-dim);
+  color: var(--red);
+  font-weight: 700;
+}
 .logic-group-label {
+  position: absolute;
   font-size: 9px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-muted);
-  margin-bottom: 5px;
-  text-align: center;
+  white-space: nowrap;
+  background: var(--card);
+  padding: 0 4px;
 }
 .logic-group-label.is-true { color: var(--red); }
-.logic-and-children, .logic-or-children {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  padding: 8px 10px 6px;
-  border-radius: 7px;
-}
-.logic-and-children { border: 1px dashed var(--card-border); }
-.logic-or-children { flex-direction: column; border-left: 2px solid var(--card-border); padding-left: 12px; }
-.logic-or-children.has-live { border-left-color: var(--red); }
-.logic-prefix {
-  font-size: 9.5px;
+.logic-modifier-badge {
+  position: absolute;
+  font-size: 9px;
   font-family: var(--mono);
   color: var(--yellow);
-  margin-bottom: 3px;
-  text-align: center;
+  white-space: nowrap;
 }
 
 .trip-timing {
@@ -648,8 +649,7 @@ body.dragging-file #drop-overlay { display: flex; }
   content: attr(title);
   position: absolute;
   bottom: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
+  left: 0;
   background: #1a2744;
   color: var(--text);
   border: 1px solid var(--accent);
@@ -659,7 +659,7 @@ body.dragging-file #drop-overlay { display: flex; }
   font-family: var(--sans);
   font-weight: 400;
   white-space: pre-wrap;
-  max-width: 350px;
+  max-width: 300px;
   min-width: 150px;
   z-index: 1000;
   box-shadow: 0 4px 20px rgba(0,0,0,0.5);
@@ -1525,24 +1525,56 @@ function analyzeCEV(P, prevEvent) {
   // without needing to re-run any logic — it just walks this plain object. AND nodes always
   // keep both children (an AND's OTHER side is exactly the context that's easy to miss in a
   // flat description — e.g. a supervisory condition like "AND 52A" — so it's never collapsed).
-  function bakeLogicTree(node, isAsserted) {
-    if (!node) return null;
+  //
+  // Crucially, this does NOT stop at an SV reference (e.g. "SV28T") and treat it as an opaque
+  // leaf — it looks up THAT SV's own equation and substitutes its whole (recursively baked)
+  // tree in its place, tagged as an 'SVNODE' so the UI can still show the SV's own name as a
+  // labeled point in the diagram. The result is ONE continuous tree reaching all the way from
+  // the ultimate field/measured leaves through every intermediate SV to the top trip equation,
+  // rather than a series of disconnected per-SV cards the reader has to mentally re-link.
+  // `visited` guards against a (rare, mis-configured) SV equation that references itself,
+  // directly or via a cycle, which would otherwise recurse forever.
+  function svEquationInfo(num) {
+    const sv = svSettings.find(s => s.num === num);
+    if (!sv) return null;
+    const eq = sv.equation.split('#')[0].trim();
+    if (eq === 'NA' || !eq) return null;
+    const comment = sv.equation.includes('#') ? sv.equation.split('#').slice(1).join('#').trim() : '';
+    return { label: sv.label, comment, ast: parseEq(tokenizeEq(eq)), equationText: eq, pickupDelay: sv.pickupDelay };
+  }
+
+  function bakeFullLogicTree(node, isAsserted, visited, depth) {
+    if (!node || depth > 14) return { op: 'VAR', name: node ? '(too deep)' : '?', value: false };
     switch (node.op) {
-      case 'VAR': return { op: 'VAR', name: node.name, value: !!isAsserted(node.name) };
+      case 'VAR': {
+        const svm = node.name.match(/^SV(\d+)T?$/);
+        if (svm) {
+          const num = parseInt(svm[1]);
+          if (!visited.has(num)) {
+            const info = svEquationInfo(num);
+            if (info) {
+              const nextVisited = new Set(visited); nextVisited.add(num);
+              const child = bakeFullLogicTree(info.ast, isAsserted, nextVisited, depth + 1);
+              return { op: 'SVNODE', label: info.label, comment: info.comment, value: !!isAsserted(node.name), child };
+            }
+          }
+        }
+        return { op: 'VAR', name: node.name, value: !!isAsserted(node.name) };
+      }
       case 'NOT': {
-        const c = bakeLogicTree(node.c, isAsserted);
+        const c = bakeFullLogicTree(node.c, isAsserted, visited, depth);
         return { op: 'NOT', value: !c.value, child: c };
       }
       case 'REDGE': case 'FEDGE': {
-        const c = bakeLogicTree(node.c, isAsserted);
+        const c = bakeFullLogicTree(node.c, isAsserted, visited, depth);
         return { op: node.op, value: c.value, child: c };
       }
       case 'AND': {
-        const l = bakeLogicTree(node.l, isAsserted), r = bakeLogicTree(node.r, isAsserted);
+        const l = bakeFullLogicTree(node.l, isAsserted, visited, depth), r = bakeFullLogicTree(node.r, isAsserted, visited, depth);
         return { op: 'AND', value: l.value && r.value, children: [l, r] };
       }
       case 'OR': {
-        const l = bakeLogicTree(node.l, isAsserted), r = bakeLogicTree(node.r, isAsserted);
+        const l = bakeFullLogicTree(node.l, isAsserted, visited, depth), r = bakeFullLogicTree(node.r, isAsserted, visited, depth);
         return { op: 'OR', value: l.value || r.value, children: [l, r] };
       }
       default: return { op: '?', value: false };
@@ -2361,44 +2393,26 @@ function analyzeCEV(P, prevEvent) {
         !digitalTransitions.some(t => t.changes.some(c => c.label === ne)));
 
       // ── Branching logic tree ──
-      // Rather than flattening everything into one linear path, bake out the actual AND/OR
-      // structure so the UI can show BOTH sides of an AND (e.g. a supervisory condition like
-      // "AND 52A" that's easy to miss when only the winning leaf is shown) with each side's
-      // real true/false state at the moment of the trip. Built in two parts: (1) the ONE
-      // top-level OR branch that actually fired (siblings are just independent, unrelated trip
-      // conditions — noted as a count, not expanded, to avoid drowning the real path in
-      // unrelated alternatives), and (2) each SV's own equation along the resolved chain,
-      // which is where AND/OR structure most often actually matters.
-      let logicTrees = [];
+      // ONE unified tree from the ultimate leaf conditions all the way to the trip equation —
+      // any SV reference encountered is substituted with that SV's own equation (recursively),
+      // so an AND's easy-to-miss other side (e.g. "AND 52A") shows up right in context no
+      // matter how many SV layers deep it lives, instead of being split across separate cards.
+      let logicTree = null, logicTreeOtherBranchCount = 0;
       if (tripAst && stateAtTripSnapshot) {
         const isAssertedAtTrip = name => stateAtTripSnapshot.has(name);
         const branches = splitTopOr(tripAst);
         const winningBranch = branches.find(b => astContainsToken(b, immediateCause)) || branches[0];
         if (winningBranch) {
-          logicTrees.push({
-            title: `${P.tripEquationName || 'TR'} (trip equation)`,
-            equationText: astToStr(winningBranch),
-            tree: bakeLogicTree(winningBranch, isAssertedAtTrip),
-            otherBranchCount: Math.max(0, branches.length - 1),
-          });
-        }
-        for (const step of (classified.svPath || [])) {
-          if (step.ast) {
-            logicTrees.push({
-              title: step.label,
-              equationText: step.equationText || (step.equation || '').split('#')[0].trim(),
-              comment: step.comment || '',
-              tree: bakeLogicTree(step.ast, isAssertedAtTrip),
-              otherBranchCount: 0,
-            });
-          }
+          logicTree = bakeFullLogicTree(winningBranch, isAssertedAtTrip, new Set(), 0);
+          logicTreeOtherBranchCount = Math.max(0, branches.length - 1);
         }
       }
 
       A.tripCause = {
         causeText, causeDetail, immediateCause, causeChain, tripTransition,
         crossEvent: isCrossEvent, family, isNonProtection, negElements: negElements || [],
-        negElementsNeverTransitioned: neverTransitioned, logicTrees,
+        negElementsNeverTransitioned: neverTransitioned,
+        logicTree, logicTreeOtherBranchCount, finalLabel: tripBitUsed,
       };
     } else {
       const causeText = 'Trip Detected (cause element not captured in digital data)';
@@ -2597,68 +2611,11 @@ function analyzeCEV(P, prevEvent) {
       }
     }
 
-    // ── Flag: other protection-family elements picked up nearby but weren't part of this trip ──
-    // Purpose: catch the specific misread the user is worried about — someone sees a familiar
-    // element (e.g. undervoltage) sitting right next to the trip in the timeline and assumes
-    // that's "the cause" without checking whether it was actually wired into the trip logic.
-    // To keep this genuinely useful rather than a wall of noise: reset bits (...R) are excluded
-    // entirely (a reset is the OPPOSITE of a pickup — including them was actively misleading),
-    // each candidate is checked against the full baked logic tree (not just the flattened
-    // chain labels) so nothing already show above gets restated, and every element gets a
-    // concrete timing + a specific, plain-language reason it isn't what tripped this event.
-    function treeHasToken(node, name) {
-      if (!node) return false;
-      if (node.op === 'VAR') return node.name === name;
-      if (node.child) return treeHasToken(node.child, name);
-      if (node.children) return node.children.some(c => treeHasToken(c, name));
-      return false;
-    }
-    const shownInTrees = new Set();
-    for (const lt of (cause.logicTrees || [])) {
-      (function walk(n) { if (!n) return; if (n.op === 'VAR') shownInTrees.add(n.name); if (n.child) walk(n.child); if (n.children) n.children.forEach(walk); })(lt.tree);
-    }
-    const seenInChain = new Set([...(cause.causeChain || []).map(c => c.label), ...shownInTrees]);
-    const protectionFamilyRe = /^(27|59|81|5[01]|67)[A-Z]*\d+[A-Z]?$/;
-    const boundaryMs = tripTransition && tripTransition.analogSampleIdx != null
-      ? tripTransition.analogSampleIdx * (1000 / ((P.eventInfo.freq || 60) * (P.eventInfo.samPerCycA || 32))) : null;
-    const decoyCandidates = new Map(); // label -> transition index where it was asserted
-    digitalTransitions.slice(0, boundary + 1).forEach((t, ti) => {
-      for (const c of t.changes) {
-        if (c.asserted && protectionFamilyRe.test(c.label) && !/R$/.test(c.label) && !seenInChain.has(c.label)) {
-          decoyCandidates.set(c.label, ti);
-        }
-      }
-    });
-    if (decoyCandidates.size) {
-      const stateAtTrip = timeline[Math.min(boundary, timeline.length - 1)];
-      const isAssertedAtTrip = name => stateAtTrip.has(name);
-      const msPerSample = 1000 / ((P.eventInfo.freq || 60) * (P.eventInfo.samPerCycA || 32));
-      const explained = [...decoyCandidates.entries()].map(([el, ti]) => {
-        const baseName = el.replace(/T$/, '');
-        const transition = digitalTransitions[ti];
-        const timing = (transition?.analogSampleIdx != null && boundaryMs != null)
-          ? `${(boundaryMs - transition.analogSampleIdx * msPerSample).toFixed(0)} ms before this trip`
-          : 'earlier in this record';
-        let reason = `it isn't referenced anywhere in this relay's trip logic at all — its pickup here is unrelated to why the relay tripped`;
-        for (const sv of svSettings) {
-          const eqRaw = sv.equation.split('#')[0];
-          if (new RegExp('\\b' + el + '\\b').test(eqRaw) || new RegExp('\\b' + baseName + '\\b').test(eqRaw)) {
-            const ast = parseEq(tokenizeEq(eqRaw));
-            const blocking = findBlockingSibling(ast, el, isAssertedAtTrip) || findBlockingSibling(ast, baseName, isAssertedAtTrip);
-            reason = blocking
-              ? `it's only wired into the trip through ${sv.label}, which also requires ${blocking} — and that read false at the moment of the trip, so this branch never activated`
-              : `it's referenced in ${sv.label}, but that logic never evaluated true at the moment of the trip`;
-            break;
-          }
-        }
-        return `<b>${tt(el, P)}</b> picked up ${timing}. It's not what tripped this event: ${reason}.`;
-      });
-      A.investigationFlags.push({
-        severity: 'medium',
-        title: 'Something Else Also Changed Nearby — Don\u2019t Mistake It For The Cause',
-        detail: `${explained.join(' ')}`,
-      });
-    }
+    // Note: an earlier version of this flag also listed OTHER protection elements that
+    // happened to change state nearby without being part of the trip logic. Removed — telling
+    // someone about a bit that did NOT cause the trip is not useful information regardless of
+    // how it's phrased. The two flags above (logic/status-driven trip, breaker already open)
+    // are the ones that actually inform judgment about THIS trip; this one was just noise.
   }
 
   return A;
@@ -2679,60 +2636,145 @@ function badge(asserted, label) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// BRANCHING LOGIC TREE — renders A.tripCause.logicTrees (built in analyzeCEV)
+// BRANCHING LOGIC TREE — renders A.tripCause.logicTree (built in analyzeCEV)
 // ══════════════════════════════════════════════════════════════════════
-// Unlike the old single-path sequence diagram, this shows BOTH sides of every AND — the
-// side that's easy to overlook (a supervisory condition like "AND 52A") is drawn right next
-// to the side that changed, each colored by its own true/false state at the trip instant.
-function collectFlatChildren(node, op) {
-  if (node.op === op) return [...collectFlatChildren(node.children[0], op), ...collectFlatChildren(node.children[1], op)];
+// Left-to-right causal diagram: the earliest/deepest leaf conditions sit at the left, AND/OR
+// groups converge rightward through brace+line connectors (no box of their own — only real
+// signals get boxes), continuing through any nested SV logic, and terminating in the final
+// trip box on the right. This replaces the old stack of disconnected per-step cards.
+const LOGIC_COL_W = 190, LOGIC_ROW_H = 40, LOGIC_BOX_W = 152, LOGIC_BOX_H = 28, LOGIC_MARGIN = 18;
+
+// Strip NOT/R_TRIG/F_TRIG wrapper nodes out of the tree shape entirely, folding them into a
+// `.modifiers` label list attached to the real node underneath (VAR/SVNODE/AND/OR). This keeps
+// the layout engine simple — it only ever has to deal with 4 node shapes — while still
+// preserving the modifier as a small badge drawn on the resulting box.
+function unwrapLogicModifiers(node) {
+  if (!node) return node;
+  const mods = [];
+  let n = node;
+  while (n.op === 'NOT' || n.op === 'REDGE' || n.op === 'FEDGE') {
+    mods.push(n.op === 'NOT' ? 'NOT' : n.op === 'REDGE' ? '\u2191 R_TRIG' : '\u2193 F_TRIG');
+    n = n.child;
+  }
+  const result = Object.assign({}, n, { value: node.value, modifiers: mods });
+  if (result.op === 'AND' || result.op === 'OR') {
+    result.children = result.children.map(unwrapLogicModifiers);
+  } else if (result.op === 'SVNODE') {
+    result.child = unwrapLogicModifiers(result.child);
+  }
+  return result;
+}
+
+function logicCollectFlat(node, op) {
+  if (node.op === op) return [...logicCollectFlat(node.children[0], op), ...logicCollectFlat(node.children[1], op)];
   return [node];
 }
 
-function renderLogicTreeNode(node, P) {
-  if (!node) return '';
-  switch (node.op) {
-    case 'VAR':
-      return `<div class="logic-node"><div class="logic-leaf ${node.value ? 'is-true' : ''}">${tt(node.name, P)}</div></div>`;
-    case 'NOT':
-      return `<div class="logic-node"><div class="logic-prefix">NOT</div>${renderLogicTreeNode(node.child, P)}</div>`;
-    case 'REDGE':
-      return `<div class="logic-node"><div class="logic-prefix">↑ R_TRIG</div>${renderLogicTreeNode(node.child, P)}</div>`;
-    case 'FEDGE':
-      return `<div class="logic-node"><div class="logic-prefix">↓ F_TRIG</div>${renderLogicTreeNode(node.child, P)}</div>`;
-    case 'AND': {
-      const flat = collectFlatChildren(node, 'AND');
-      return `<div class="logic-node">
-        <div class="logic-group-label ${node.value ? 'is-true' : ''}">ALL required (AND)</div>
-        <div class="logic-and-children">${flat.map(c => renderLogicTreeNode(c, P)).join('')}</div>
-      </div>`;
-    }
-    case 'OR': {
-      const flat = collectFlatChildren(node, 'OR');
-      const hasLive = flat.some(c => c.value);
-      return `<div class="logic-node">
-        <div class="logic-group-label ${node.value ? 'is-true' : ''}">ANY of these (OR)</div>
-        <div class="logic-or-children ${hasLive ? 'has-live' : ''}">${flat.map(c => renderLogicTreeNode(c, P)).join('')}</div>
-      </div>`;
-    }
-    default: return '';
+function logicAssignDepth(node, depth, maxRef) {
+  node.depth = depth;
+  maxRef.v = Math.max(maxRef.v, depth);
+  if (node.op === 'SVNODE') { logicAssignDepth(node.child, depth + 1, maxRef); return; }
+  if (node.op === 'AND' || node.op === 'OR') {
+    const flat = logicCollectFlat(node, node.op);
+    node._flat = flat;
+    flat.forEach(c => logicAssignDepth(c, depth + 1, maxRef));
+  }
+}
+
+function logicAssignRows(node, counter) {
+  if (node.op === 'VAR') { node.row = counter.v++; return; }
+  if (node.op === 'SVNODE') { logicAssignRows(node.child, counter); node.row = node.child.row; return; }
+  if (node.op === 'AND' || node.op === 'OR') {
+    const flat = node._flat || logicCollectFlat(node, node.op);
+    flat.forEach(c => logicAssignRows(c, counter));
+    node.row = flat.reduce((s, c) => s + c.row, 0) / flat.length;
   }
 }
 
 function buildLogicTreeSection(P, A) {
-  const trees = A?.tripCause?.logicTrees;
-  if (!trees || !trees.length) return '';
-  return trees.map((lt, i) => `
+  const rawTree = A?.tripCause?.logicTree;
+  if (!rawTree) return '';
+  const root = unwrapLogicModifiers(rawTree);
+  const maxRef = { v: 0 };
+  logicAssignDepth(root, 0, maxRef);
+  logicAssignRows(root, { v: 0 });
+  const maxDepth = maxRef.v;
+
+  // x/y helpers — "final" (synthetic trip box) sits one column to the right of depth 0.
+  const xOf = d => LOGIC_MARGIN + (maxDepth - d) * LOGIC_COL_W;
+  const yOf = row => LOGIC_MARGIN + row * LOGIC_ROW_H;
+  const finalX = xOf(-1), finalY = yOf(root.row);
+
+  let boxesHTML = '', linesHTML = '';
+  const trueColor = 'var(--green)', falseColor = 'var(--card-border)';
+
+  function modifierBadge(node, x, y) {
+    if (!node.modifiers || !node.modifiers.length) return '';
+    return `<div class="logic-modifier-badge" style="left:${x}px;top:${y - 15}px;">${node.modifiers.join(' · ')}</div>`;
+  }
+
+  function renderNode(node) {
+    const x = xOf(node.depth), y = yOf(node.row);
+    if (node.op === 'VAR') {
+      boxesHTML += `<div class="logic-box logic-leaf-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${tt(node.name, P)}</div>`;
+      boxesHTML += modifierBadge(node, x, y);
+      return;
+    }
+    if (node.op === 'SVNODE') {
+      const cx = xOf(node.child.depth) + LOGIC_BOX_W, cy = yOf(node.child.row) + LOGIC_BOX_H / 2;
+      const ny = y + LOGIC_BOX_H / 2;
+      linesHTML += `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${ny}" stroke="${node.child.value ? trueColor : falseColor}" stroke-width="1.5"/>`;
+      boxesHTML += `<div class="logic-box logic-sv-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${tt(node.label, P)}</div>`;
+      boxesHTML += modifierBadge(node, x, y);
+      renderNode(node.child);
+      return;
+    }
+    if (node.op === 'AND' || node.op === 'OR') {
+      const flat = node._flat;
+      const childX = xOf(node.depth + 1);
+      const bracketX = childX + LOGIC_BOX_W + (LOGIC_COL_W - LOGIC_BOX_W) * 0.4;
+      const ys = flat.map(c => yOf(c.row) + LOGIC_BOX_H / 2);
+      const topY = Math.min(...ys), botY = Math.max(...ys);
+      const outY = y + LOGIC_BOX_H / 2, outX = x + LOGIC_BOX_W;
+      if (flat.length > 1) linesHTML += `<line x1="${bracketX}" y1="${topY}" x2="${bracketX}" y2="${botY}" stroke="var(--text-muted)" stroke-width="1.5"/>`;
+      flat.forEach(c => {
+        const cy = yOf(c.row) + LOGIC_BOX_H / 2;
+        linesHTML += `<line x1="${xOf(c.depth) + LOGIC_BOX_W}" y1="${cy}" x2="${bracketX}" y2="${cy}" stroke="${c.value ? trueColor : falseColor}" stroke-width="1.5"/>`;
+      });
+      linesHTML += `<line x1="${bracketX}" y1="${outY}" x2="${outX}" y2="${outY}" stroke="${node.value ? trueColor : falseColor}" stroke-width="1.5"/>`;
+      const labelY = (topY + botY) / 2;
+      boxesHTML += `<div class="logic-group-label ${node.value ? 'is-true' : ''}" style="left:${bracketX + 6}px;top:${labelY - 8}px;">${node.op === 'AND' ? 'ALL required (AND)' : 'ANY of these (OR)'}</div>`;
+      boxesHTML += modifierBadge(node, x, y);
+      flat.forEach(renderNode);
+      return;
+    }
+  }
+
+  renderNode(root);
+
+  // Final synthetic "trip" box, one column right of the root.
+  const rootOutX = xOf(root.depth) + LOGIC_BOX_W, rootOutY = yOf(root.row) + LOGIC_BOX_H / 2;
+  linesHTML += `<line x1="${rootOutX}" y1="${rootOutY}" x2="${finalX}" y2="${finalY + LOGIC_BOX_H / 2}" stroke="${trueColor}" stroke-width="2"/>`;
+  boxesHTML += `<div class="logic-box logic-final-box" style="left:${finalX}px;top:${finalY}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${tt(A.tripCause.finalLabel || 'TRIP', P)}</div>`;
+
+  const otherCount = A.tripCause.logicTreeOtherBranchCount || 0;
+  const totalW = finalX + LOGIC_BOX_W + LOGIC_MARGIN;
+  // Compute actual height from the max row assigned across the tree (rows are set during
+  // logicAssignRows; internal AND/OR nodes get the AVERAGE of their children, which can be
+  // fractional and less than a deep child's row, so walk the tree for the true max).
+  const maxRowSeen = Math.max(root.row, (function findMaxRow(n){ if(n.op==='VAR') return n.row; if(n.op==='SVNODE') return Math.max(n.row, findMaxRow(n.child)); if(n.op==='AND'||n.op==='OR') return Math.max(n.row, ...n._flat.map(findMaxRow)); return n.row; })(root));
+  const totalHeight = yOf(maxRowSeen) + LOGIC_BOX_H + LOGIC_MARGIN + 16;
+
+  return `
     <div class="logic-tree-block">
-      <div class="logic-tree-header">
-        <span class="logic-tree-title">${tt(lt.title, P)}</span>
-        ${lt.comment ? `<span class="logic-tree-comment">— ${lt.comment}</span>` : ''}
+      <div class="logic-tree-wrap" style="height:${totalHeight}px;">
+        <div class="logic-tree-canvas" style="width:${totalW}px;height:${totalHeight}px;">
+          <svg width="${totalW}" height="${totalHeight}" style="position:absolute;left:0;top:0;pointer-events:none;">${linesHTML}</svg>
+          ${boxesHTML}
+        </div>
       </div>
-      <div class="logic-tree-body">${renderLogicTreeNode(lt.tree, P)}</div>
-      ${lt.otherBranchCount ? `<div class="logic-tree-other">+ ${lt.otherBranchCount} other independent trip condition${lt.otherBranchCount === 1 ? '' : 's'} in this same equation, unrelated to this event (not shown)</div>` : ''}
-    </div>
-    ${i < trees.length - 1 ? '<div style="text-align:center;color:var(--text-muted);font-size:15px;margin:-4px 0 2px;">↓ feeds into</div>' : ''}
-  `).join('');
+      ${otherCount ? `<div class="logic-tree-other">+ ${otherCount} other independent trip condition${otherCount === 1 ? '' : 's'} in this same equation, unrelated to this event (not shown)</div>` : ''}
+    </div>`;
 }
 
 function renderBanner() {
