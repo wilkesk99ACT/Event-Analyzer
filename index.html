@@ -659,6 +659,13 @@ body.dragging-file #drop-overlay { display: flex; }
 .legend-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display: inline-block; }
 .legend-swatch { display: inline-block; width: 14px; height: 14px; background: var(--bg2); }
 
+.sv-legend {
+  display: flex; flex-wrap: wrap; gap: 4px 10px;
+  font-size: 9.5px; line-height: 1.4; color: var(--text-muted);
+  padding: 6px 4px 2px; border-top: 1px solid var(--card-border); margin-top: 8px;
+}
+.sv-legend-item b { color: var(--text-dim); font-family: var(--mono); }
+
 .sv-card {
   padding: 14px;
   background: var(--bg);
@@ -4898,14 +4905,27 @@ function buildSVFlagsChart(P, A, compact) {
   const msPerSample = 1000 / ((P.eventInfo.freq || 60) * samplesPerCycle);
   const totalMs = (data.length - 1) * msPerSample;
 
-  // Same de-dup + ordering as the sequence diagram, capped to keep the panel readable.
+  // Same de-dup + ordering as the sequence diagram. Every bit in the resolved chain is shown —
+  // no length cap. The bit directly responsible for the trip (immediateCause, e.g. "SV14T")
+  // and the final trip/ER label (e.g. "TRIP3P" or "ER") are guaranteed to be present even if
+  // the chain summary didn't already include them under that exact name.
   const seen = new Set();
-  const labels = cause.causeChain
+  let labels = cause.causeChain
     .map(c => c.label)
-    .filter(l => { if (seen.has(l)) return false; seen.add(l); return true; })
-    .slice(0, 6);
+    .filter(l => { if (seen.has(l)) return false; seen.add(l); return true; });
+  const mustInclude = [cause.immediateCause, cause.causeChain[cause.causeChain.length - 1]?.label].filter(Boolean);
+  mustInclude.forEach(l => { if (!labels.includes(l)) labels.push(l); });
 
   const rows = labels.map(label => ({ label, intervals: computeAssertIntervals(P, label, totalMs, msPerSample) }));
+
+  // Small, plain-text legend for every bit shown above — compact enough to sit directly under
+  // the chart and still fit comfortably in a normal screenshot alongside it.
+  const freqForLegend = P.eventInfo?.freq || 60;
+  const legendHTML = `<div class="sv-legend">${labels.map(l => {
+    const el = explainElementBit(l, P, freqForLegend);
+    const short = el ? el.short : (getSVTooltip(l, P) || l);
+    return `<span class="sv-legend-item"><b>${l}</b>: ${short}</span>`;
+  }).join('')}</div>`;
 
   const tripTransition = cause.tripTransition;
   // Use analogSampleIdx here too (not tripTransition.timeMs) so the TRIP marker lands
@@ -4927,11 +4947,11 @@ function buildSVFlagsChart(P, A, compact) {
       marginTop: 12, marginBottom: 24,
       rowH: 30, numVGrid: 8, fontSize: 12, totalMs, startMs, endMs, triggerMs, tripMs, cursorMs, compact: true, bg: 'var(--card)',
     });
-    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">SV / Trip Chain Flags${zoomHintHTML('svflags')}</div><div class="chart-svg-slot" id="chartSlot-svflags">${svg}</div></div>`;
+    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">SV / Trip Chain Flags${zoomHintHTML('svflags')}</div><div class="chart-svg-slot" id="chartSlot-svflags">${svg}</div>${legendHTML}</div>`;
   }
 
   const svg = renderBooleanFlagsSVG(rows, { totalMs, triggerMs, tripMs, marginLeft: 110 });
-  return `<div class="card blue-accent"><div class="card-header">🔗 SV / Trip Chain Flags</div>${svg}
+  return `<div class="card blue-accent"><div class="card-header">🔗 SV / Trip Chain Flags</div>${svg}${legendHTML}
     <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Boolean state of each element in the resolved trip-cause chain, reconstructed from digital transitions across the full record.</div>
   </div>`;
 }
