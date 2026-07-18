@@ -691,6 +691,7 @@ body.dragging-file #drop-overlay { display: flex; }
   cursor: help;
   border-bottom: 1px dotted var(--text-muted);
 }
+.has-tip.bit-click { cursor: pointer; }
 .has-tip:hover {
   color: var(--accent);
   border-bottom-color: var(--accent);
@@ -805,6 +806,17 @@ body.dragging-file #drop-overlay { display: flex; }
       </div>
       <button class="btn" onclick="toggleHelp(true)">Help</button>
       <button class="btn" onclick="resetApp()">New Files</button>
+    </div>
+  </div>
+
+  <!-- Bit detail modal — opened by clicking any relay-bit label -->
+  <div id="bitModal" class="help-overlay" style="display:none" onclick="if(event.target===this) hideBitDetail()">
+    <div class="help-modal" style="max-width:520px;">
+      <div class="help-modal-header">
+        <span id="bitModalTitle">Relay Bit</span>
+        <button class="btn" onclick="hideBitDetail()">Close</button>
+      </div>
+      <div class="help-modal-body" id="bitModalBody"></div>
     </div>
   </div>
 
@@ -1073,8 +1085,67 @@ const TOOLTIPS = {
 };
 
 // Generate tooltip for SV elements dynamically from parsed data
+// ══════════════════════════════════════════════════════════════════════
+// GENERIC FALLBACK DECODER — for the long tail of bits not worth hand-writing
+// individually (89-series switch monitoring alone spans hundreds of point names
+// across different switch schemes). Uses standard ANSI device-number and SEL
+// naming conventions to produce a best-effort, honestly-hedged explanation
+// rather than leaving the bit with no tooltip at all.
+// ══════════════════════════════════════════════════════════════════════
+const ANSI_DEVICE_MEANING = {
+  '25': 'Synchronism check', '27': 'Undervoltage', '32': 'Directional power',
+  '50': 'Instantaneous/definite-time overcurrent', '51': 'Time-overcurrent (inverse or definite time)',
+  '55': 'Power factor', '59': 'Overvoltage', '67': 'Directional overcurrent',
+  '78': 'Vector shift / out-of-step', '79': 'Automatic reclosing', '81': 'Frequency',
+};
+const PHASE_LETTER_MEANING = {
+  A: 'Phase A', B: 'Phase B', C: 'Phase C', G: 'Ground/residual', N: 'Neutral',
+  Q: 'Negative-sequence', P: 'Maximum/composite phase', V: 'Voltage-polarized',
+};
+const SUFFIX_STATE_MEANING = {
+  P: 'pickup — the instantaneous measured condition, before any intentional time delay',
+  T: 'timed out — the intentional delay has expired; this is what actually feeds trip/output logic',
+  R: 'reset — the associated timer has reset back to zero',
+  S: 'started — the associated timer is currently running but has not yet timed out',
+};
+
+function genericBitExplain(label) {
+  // Numbered protection element with an ANSI-style prefix: 50A1P, 51G2T, 67Q3P, 81D1T, etc.
+  let m = label.match(/^(2[57]|32|5[015]|59|67|78|81)([ABCGNQPV])?(\d)?([PTRS])?$/);
+  if (m) {
+    const [, dev, ph, num, suf] = m;
+    const parts = [];
+    if (ANSI_DEVICE_MEANING[dev]) parts.push(`${ANSI_DEVICE_MEANING[dev]} element (ANSI ${dev})`);
+    if (ph && PHASE_LETTER_MEANING[ph]) parts.push(PHASE_LETTER_MEANING[ph]);
+    if (num) parts.push(`level/element ${num}`);
+    if (parts.length) {
+      let text = parts.join(', ');
+      if (suf && SUFFIX_STATE_MEANING[suf]) text += ` — ${SUFFIX_STATE_MEANING[suf]}`;
+      return text;
+    }
+  }
+  // Directional decision bits: DIRxx, FDIRx (forward), RDIRx (reverse)
+  m = label.match(/^(F|R)?DIR([A-Z]{1,2})$/);
+  if (m) {
+    const dirWord = m[1] === 'F' ? 'Forward-direction' : m[1] === 'R' ? 'Reverse-direction' : 'Directional';
+    return `${dirWord} decision element for the "${m[2]}" quantity — indicates which way current or power is flowing, relative to this relay's configured polarity, feeding a directional (32/67) protection element.`;
+  }
+  if (/^89/.test(label)) return `Disconnect/isolation switch position or scheme-status point (ANSI 89) — reports the physical state of a switch, not a measured protection quantity. The specific switch is defined in this relay's configuration.`;
+  if (/^79/.test(label)) return `Automatic reclosing (ANSI 79) status point — part of this device's reclose sequence/lockout logic.`;
+  if (/^RTD/.test(label)) return `RTD (temperature sensor) input status — a resistance-temperature-detector input wired to this relay for thermal monitoring.`;
+  if (/^TH/.test(label)) return `Thermal-model status point — part of the relay's thermal overload protection model, not a directly measured quantity.`;
+  if (/^(HIF|AFS)/.test(label)) return `High-impedance/arcing-fault detection status point — part of the relay's harmonic-based fault-detection algorithm.`;
+  if (/^(RMB|TMB)\d/.test(label)) return `Remote/transmit communications bit — carries a status point over a data link (e.g. to another relay, RTU, or SCADA); not a locally measured electrical quantity.`;
+  if (/^(LT|LB|RB|VB|SG)\d/.test(label)) return `User-programmable general-purpose logic/status bit. Its specific meaning is assigned by this relay's own configuration rather than a standard protection function — check this site's settings/logic documentation for what it represents here.`;
+  if (/^(TLED|T\d\d_LED|PB\d)/.test(label)) return `Front-panel target LED or pushbutton status point.`;
+  if (/^(IN|OUT)\d/.test(label)) return `Physical digital input/output point on this device. Its field-wiring meaning (what's actually connected) is site-configured.`;
+  if (/^(TUTC|TSNTP|PTP|TIRIG)/.test(label)) return `Time-synchronization status point (e.g. IRIG-B, PTP, or SNTP) — reflects whether this relay's clock is synced to an external source, not an electrical quantity.`;
+  return null;
+}
+
+
 function getSVTooltip(label, parsed) {
-  if (!parsed) return TOOLTIPS[label] || null;
+  if (!parsed) return TOOLTIPS[label] || genericBitExplain(label) || null;
   const svMatch = label.match(/^SV(\d+)(T?)$/);
   if (svMatch) {
     const num = parseInt(svMatch[1]);
@@ -1089,15 +1160,20 @@ function getSVTooltip(label, parsed) {
       return `${comment || eqShort}\nPU: ${sv.pickupDelay} cyc | DO: ${sv.dropoutDelay} cyc`;
     }
   }
-  return TOOLTIPS[label] || null;
+  return TOOLTIPS[label] || genericBitExplain(label) || null;
 }
 
-// Wrap a label in a tooltip span
+// Wrap a label in a tooltip span. Virtually every label gets SOME explanation now (a specific
+// one from TOOLTIPS, a pattern-based one from genericBitExplain, or — as an absolute last
+// resort — an honest "not in this tool's reference" note) rather than silently having none.
+// Clickable: opens a larger, plain-language detail popup (showBitDetail) rather than relying
+// on hover alone, which doesn't work on touch and is easy to miss.
 function tt(label, parsed) {
-  const tip = getSVTooltip(label, parsed) || TOOLTIPS[label];
-  if (!tip) return label;
+  const tip = getSVTooltip(label, parsed)
+    || `Relay word bit "${label}" — a Boolean status point recorded by this device. Its specific meaning isn't in this tool's built-in reference; check the relay's settings/logic documentation.`;
   const escaped = tip.replace(/"/g, '&quot;').replace(/\n/g, '&#10;');
-  return `<span class="has-tip" title="${escaped}">${label}</span>`;
+  const jsSafe = label.replace(/'/g, "\\'");
+  return `<span class="has-tip bit-click" title="${escaped}" onclick="event.stopPropagation(); showBitDetail('${jsSafe}');">${label}</span>`;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -5133,6 +5209,61 @@ function selectEvent(idx) {
 function toggleHelp(show) {
   const el = document.getElementById('helpModal');
   if (el) el.style.display = show ? 'flex' : 'none';
+}
+
+// Best-effort lookup of this bit's state in the currently loaded event: state at the trip
+// instant if a trip has been resolved, otherwise the last known state anywhere in the record.
+function currentBitState(label) {
+  if (!PARSED) return null;
+  const tripSampleIdx = ANALYSIS?.tripCause?.tripTransition?.analogSampleIdx;
+  let state = (PARSED.initialDigitalState || []).includes(label);
+  let seen = (PARSED.initialDigitalState || []).includes(label);
+  let asOf = 'at the start of this record';
+  for (const t of (PARSED.digitalTransitions || [])) {
+    if (tripSampleIdx != null && t.analogSampleIdx > tripSampleIdx) break;
+    const c = t.changes.find(c => c.label === label);
+    if (c) { state = c.asserted; seen = true; asOf = tripSampleIdx != null ? 'at the moment of the trip' : 'at this point in the record'; }
+  }
+  return seen ? { state, asOf } : null;
+}
+
+function showBitDetail(label) {
+  const modal = document.getElementById('bitModal');
+  const titleEl = document.getElementById('bitModalTitle');
+  const bodyEl = document.getElementById('bitModalBody');
+  if (!modal || !bodyEl) return;
+  titleEl.textContent = label;
+
+  const desc = getSVTooltip(label, PARSED)
+    || `This bit isn't in the tool's built-in reference. Its meaning will need to be checked against the relay's settings/logic documentation.`;
+  const svMatch = label.match(/^SV(\d+)(T?)$/);
+  const sv = svMatch && PARSED ? (PARSED.svSettings || []).find(s => s.num === parseInt(svMatch[1])) : null;
+  const state = currentBitState(label);
+
+  let html = `<p style="line-height:1.6;">${desc.replace(/\n/g, '<br>')}</p>`;
+  html += `<div style="background:var(--bg2);border-radius:6px;padding:10px 12px;margin-top:12px;font-size:12.5px;line-height:1.6;">
+    <div><b style="color:var(--green);">When asserted (ON):</b> the condition described above is present/true.</div>
+    <div style="margin-top:4px;"><b style="color:var(--text-muted);">When de-asserted (OFF):</b> that condition is not currently present — this is simply the absence of the described state, not a separate event on its own.</div>
+  </div>`;
+  if (sv) {
+    const eqClean = sv.equation.split('#')[0].trim();
+    html += `<div style="margin-top:12px;font-size:12px;">
+      <div style="color:var(--text-dim);margin-bottom:4px;">Equation (${sv.label}):</div>
+      <div style="font-family:var(--mono);background:var(--bg2);border-radius:6px;padding:8px 10px;word-break:break-word;">${eqClean}</div>
+      <div style="color:var(--text-muted);margin-top:4px;">Pickup: ${sv.pickupDelay} cycles (${(sv.pickupDelay/(PARSED.eventInfo?.freq||60)*1000).toFixed(0)} ms) &nbsp;|&nbsp; Dropout: ${sv.dropoutDelay} cycles</div>
+    </div>`;
+  }
+  if (state) {
+    html += `<div style="margin-top:12px;font-size:12px;color:var(--text-dim);">
+      In this event: <b style="color:${state.state ? 'var(--green)' : 'var(--text-muted)'};">${state.state ? 'ASSERTED' : 'de-asserted'}</b> ${state.asOf}.
+    </div>`;
+  }
+  bodyEl.innerHTML = html;
+  modal.style.display = 'flex';
+}
+function hideBitDetail() {
+  const modal = document.getElementById('bitModal');
+  if (modal) modal.style.display = 'none';
 }
 
 function resetApp() {
