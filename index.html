@@ -387,14 +387,12 @@ body.dragging-file #drop-overlay { display: flex; }
   margin-top: 8px;
   font-style: italic;
 }
-/* overflow-x scrolls a wide diagram; overflow-y stays visible so hover tooltips popping
-   upward out of a box aren't clipped by this same container. Extra top padding gives those
-   tooltips room to render before hitting the wrapper's own top edge. */
+/* overflow-x scrolls a wide diagram; overflow-y stays visible (not auto) so it never adds its
+   own vertical scrollbar — the wrap and canvas heights are computed to match exactly, and
+   tooltip clearance is baked into the layout's vertical offset rather than added via padding. */
 .logic-tree-wrap {
   overflow-x: auto;
   overflow-y: visible;
-  padding-top: 34px;
-  margin-top: -34px;
 }
 .logic-tree-canvas {
   position: relative;
@@ -650,6 +648,17 @@ body.dragging-file #drop-overlay { display: flex; }
 .tl-bit.deassert { background: #1a1a2e; color: var(--text-muted); }
 
 /* ── SV Chain ── */
+.tab-legend {
+  display: flex; flex-wrap: wrap; gap: 6px 18px;
+  font-size: 11px; color: var(--text-dim);
+  background: var(--card); border: 1px solid var(--card-border); border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 14px;
+  align-items: center;
+}
+.tab-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display: inline-block; }
+.legend-swatch { display: inline-block; width: 14px; height: 14px; background: var(--bg2); }
+
 .sv-card {
   padding: 14px;
   background: var(--bg);
@@ -830,6 +839,21 @@ body.dragging-file #drop-overlay { display: flex; }
           indicates how many other, unrelated trip conditions exist in the same equation but weren't part
           of this event.</li>
         </ul>
+        <h3>Frequently Asked Questions</h3>
+        <p><b>How is this different from just opening the file in QuickSet or SynchroWAVe?</b><br>
+        QuickSet shows how the relay is configured; SynchroWAVe shows what was recorded. Neither
+        automatically connects the two for a specific event. This tool does that connection
+        automatically — matching the recorded data against the relay's own pickups, timers, and
+        logic for the event in front of you, which otherwise has to be done manually, equation
+        by equation.</p>
+        <p><b>Should I act on a diagnostic flag?</b><br>
+        Flags are informational, not instructions — they call out something worth a closer look
+        (e.g. a trip driven by internal logic, an already-open breaker, or a likely failed
+        voltage-sensing channel) without telling you what to do about it.</p>
+        <p><b>Why do some boxes show a condition that's false?</b><br>
+        A false box is only ever shown when it's structurally necessary — e.g. every side of an
+        AND, or a set of conditions that all had to fail together to explain a NOT. It's never
+        shown just for reference.</p>
         <h3>Using the Tabs</h3>
         <p>The tabs below the summary give you the underlying evidence behind the headline
         determination. None of this data is new — it all comes from the same CEV file QuickSet
@@ -2900,7 +2924,7 @@ function buildLogicTreeSection(P, A) {
 
   // x/y helpers — "final" (synthetic trip box) sits one column to the right of depth 0.
   const xOf = d => LOGIC_MARGIN + (maxDepth - d) * LOGIC_COL_W;
-  const yOf = row => LOGIC_MARGIN + row * LOGIC_ROW_H;
+  const yOf = row => LOGIC_MARGIN + 22 + row * LOGIC_ROW_H;
   const finalX = xOf(-1), finalY = yOf(root.row);
 
   let boxesHTML = '', linesHTML = '';
@@ -4367,6 +4391,11 @@ function renderContent() {
         Step-by-step sequence of digital state changes decoded from the CEV event record.
         Each entry shows exactly which relay word bits changed and when.
       </p>
+      <div class="tab-legend">
+        <span><span class="legend-dot" style="background:var(--red);box-shadow:0 0 6px rgba(248,113,113,0.5)"></span> Trip event</span>
+        <span><span class="tl-bit assert" style="padding:2px 6px;">▲ bit</span> Asserted (turned ON) at this step</span>
+        <span><span class="tl-bit deassert" style="padding:2px 6px;">▼ bit</span> De-asserted (turned OFF) at this step</span>
+      </div>
       <div class="timeline">`;
 
   // Show initial state summary
@@ -4474,6 +4503,12 @@ function renderContent() {
 
   // ── SV Logic ──
   html += `<div class="tab-panel" id="panel-sv">
+    <div class="tab-legend">
+      <span><span class="legend-swatch" style="border-left:3px solid var(--red);"></span> Left border / name in red = this SV is part of the trip equation chain</span>
+      <span><span class="legend-swatch" style="border-left:3px solid var(--accent);"></span> Left border / name in accent color = active elsewhere in the record, not part of this trip</span>
+      <span><span style="color:var(--yellow)">PU</span> = pickup delay (how long the condition must hold before this SV asserts)</span>
+      <span><span style="color:var(--text-muted)">DO</span> = dropout delay (how long it must clear before de-asserting)</span>
+    </div>
     <div class="card red-accent"><div class="card-header">🔗 SVs in Trip Equation</div>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:14px;">
         These SVs are directly referenced in the trip equation (${P.tripEquationName || 'TR'}). Each one's pickup delay determines how long the input condition must persist before the trip path activates.
