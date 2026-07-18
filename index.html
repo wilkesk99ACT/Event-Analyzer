@@ -3447,14 +3447,22 @@ function renderMagnitudeChartSVG(traces, opts) {
       }
 
       const clamp = bx => Math.max(marginLeft + 2, Math.min(marginLeft + plotW - boxW - 2, bx));
-      // Candidates: right/left of the trip line first (keeps the box near the point it
-      // describes whenever there's room), then the plot's far left/right edges as a fallback
-      // for when the trip instant itself is too busy on both sides to fit the box.
-      const candidateXs = [clamp(x + 9), clamp(x - boxW - 9), clamp(marginLeft + 4), clamp(marginLeft + plotW - boxW - 4)];
+      // Step outward from the trip line, alternating right/left, and take the FIRST position
+      // that actually fits without overlapping data — i.e. as close to the trip instant as
+      // possible, only moving further away when a nearer spot genuinely doesn't have room.
+      // (Picking whichever spot has the MOST slack anywhere on the chart, tried earlier, kept
+      // launching the box off to a distant flat stretch even when a closer position would have
+      // fit just fine — closeness should win as long as it's actually clear.)
+      const rightBase = x + 9, leftBase = x - boxW - 9;
+      const step = 16;
       let best = null;
-      for (const bx of candidateXs) {
-        const c = clearanceAt(bx);
-        if (!best || c.score > best.score) best = Object.assign({ bx }, c);
+      for (let d = 0; d <= plotW; d += step) {
+        for (const bx of [clamp(rightBase + d), clamp(leftBase - d)]) {
+          const c = clearanceAt(bx);
+          if (!best || c.score > best.score) best = Object.assign({ bx }, c);
+          if (c.score >= 0) { best = Object.assign({ bx }, c); break; }
+        }
+        if (best && best.score >= 0) break;
       }
       const boxX = best.bx;
       const boxY = best.useTop
