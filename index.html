@@ -743,6 +743,8 @@ body.dragging-file #drop-overlay { display: flex; }
 .evt-btn .evt-type.event { background: var(--yellow-dim); color: var(--yellow); }
 .evt-btn .evt-time { font-family: var(--mono); font-size: 11px; }
 .evt-btn .evt-delta { font-size: 10px; color: var(--text-muted); }
+.evt-btn .evt-cause { font-size: 10px; color: var(--accent); border-left: 1px solid var(--card-border); padding-left: 6px; margin-left: 2px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.evt-pattern-note { display: block; width: 100%; white-space: normal; font-size: 11.5px; color: var(--yellow); background: var(--yellow-dim); border: 1px solid #5c4506; border-radius: 6px; padding: 6px 10px; margin-top: 8px; line-height: 1.5; }
 
 /* Multi-event combined timeline */
 .combined-tl-header {
@@ -931,7 +933,7 @@ body.dragging-file #drop-overlay { display: flex; }
   </div>
 
   <!-- Event Selector (shown when multiple files loaded) -->
-  <div id="eventSelector" style="display:none; background:var(--bg2); border-bottom:1px solid var(--card-border); padding:8px 16px; overflow-x:auto; white-space:nowrap;"></div>
+  <div id="eventSelector" style="display:none; background:var(--bg2); border-bottom:1px solid var(--card-border); padding:8px 16px;"></div>
 
   <!-- Trip Cause Banner -->
   <div class="trip-banner" id="tripBanner"></div>
@@ -3280,6 +3282,38 @@ function analyzeCEV(P, prevEvent) {
         });
       }
     }
+
+    // ── Sequence voltage present with LOW current — several possible explanations, not one ──
+    // A bolted fault produces sequence voltage AND elevated current together. This signature —
+    // sequence voltage without elevated current — is genuinely ambiguous from the recorded data
+    // alone. More than one real condition produces it: a physically separated conductor (no
+    // closed path to drive current), a disturbance that originated electrically elsewhere and
+    // simply didn't require this point to carry current, or — especially at a DER site — local
+    // inverters riding through / momentarily curtailing output in response to a voltage
+    // disturbance seen at THIS site without anything being broken here at all. Distinguishing
+    // between these needs context this tool doesn't have (correlation with nearby sites,
+    // whether a subsequent reclose held). So this flag deliberately does NOT name a most-likely
+    // cause or suggest a specific action — it names the ambiguity itself.
+    const mentionsSeqV = /3V0|ZERO.?SEQ|NEG.?SEQ|SEQUENCE VOLT/i.test(cause.causeDetail || '');
+    if (cause.family === 'zeroSeqV' || cause.family === 'negSeqV' || cause.family === 'zeroSeqV+negSeqV' || mentionsSeqV) {
+      const phaseIs = ['A', 'B', 'C'].map(ph => ({
+        fault: A.currents?.[`I${ph}`]?.fault?.secA ?? 0,
+        pre: A.currents?.[`I${ph}`]?.preFault?.secA ?? 0,
+      }));
+      const maxFaultI = Math.max(...phaseIs.map(x => x.fault));
+      const maxPreI = Math.max(...phaseIs.map(x => x.pre));
+      const closedNow = !bkrLabel || timeline[Math.min(boundary, timeline.length - 1)].has(bkrLabel);
+      // "Low current" = fault-window current isn't meaningfully above whatever was already
+      // flowing before the event, and small in absolute terms — i.e. no real fault current
+      // developed even though the sequence-voltage element operated.
+      if (closedNow && maxFaultI < Math.max(maxPreI * 1.5, 2)) {
+        A.investigationFlags.push({
+          severity: 'medium',
+          title: 'Sequence Voltage Without Elevated Current',
+          detail: `Trip resolved to a sequence-voltage element (${cause.immediateCause ? tt(cause.immediateCause, P) : 'zero/negative-sequence overvoltage'}); phase current stayed low throughout (max ${maxFaultI.toFixed(2)} A sec, vs. ${maxPreI.toFixed(2)} A sec pre-event) — not fault-level. Consistent with: an open/separated conductor, a disturbance originating elsewhere on the system, or (at a DER site) local inverters curtailing output in response to a voltage disturbance.`,
+        });
+      }
+    }
   }
 
   return A;
@@ -5339,21 +5373,57 @@ function renderEventSelector() {
 
   const firstTs = getTimestampMs(ALL_EVENTS[0].parsed.timestamp);
 
-  sel.innerHTML = '<span style="font-size:11px;color:var(--text-muted);margin-right:8px;font-weight:600;">EVENTS:</span>' +
-    ALL_EVENTS.map((evt, i) => {
-      const ts = evt.parsed.timestamp;
-      const evtType = evt.parsed.eventInfo.eventType || 'Event';
-      const isTrip = /trip/i.test(evtType);
-      const deltaMs = getTimestampMs(ts) - firstTs;
-      const deltaStr = i === 0 ? '' : `+${deltaMs < 1000 ? deltaMs + 'ms' : (deltaMs/1000).toFixed(1) + 's'}`;
-      const timeStr = `${String(ts.hour).padStart(2,'0')}:${String(ts.min).padStart(2,'0')}:${String(ts.sec).padStart(2,'0')}.${ts.msec}`;
-      return `<button class="evt-btn ${i === CURRENT_IDX ? 'active' : ''}" onclick="selectEvent(${i})">
-        <span class="evt-type ${isTrip ? 'trip' : 'event'}">${i + 1}</span>
-        <span>${evtType}</span>
-        <span class="evt-time">${timeStr}</span>
-        ${deltaStr ? `<span class="evt-delta">${deltaStr}</span>` : ''}
-      </button>`;
-    }).join('');
+  const buttons = ALL_EVENTS.map((evt, i) => {
+    const ts = evt.parsed.timestamp;
+    const evtType = evt.parsed.eventInfo.eventType || 'Event';
+    const isTrip = /trip/i.test(evtType);
+    const deltaMs = getTimestampMs(ts) - firstTs;
+    const deltaStr = i === 0 ? '' : `+${deltaMs < 1000 ? deltaMs + 'ms' : deltaMs < 60000 ? (deltaMs / 1000).toFixed(1) + 's' : (deltaMs / 60000).toFixed(1) + 'm'}`;
+    const timeStr = `${String(ts.hour).padStart(2, '0')}:${String(ts.min).padStart(2, '0')}:${String(ts.sec).padStart(2, '0')}.${ts.msec}`;
+    const cause = evt.analysis?.tripCause?.causeText || '';
+    return `<button class="evt-btn ${i === CURRENT_IDX ? 'active' : ''}" onclick="selectEvent(${i})">
+      <span class="evt-type ${isTrip ? 'trip' : 'event'}">${i + 1}</span>
+      <span>${evtType}</span>
+      <span class="evt-time">${timeStr}</span>
+      ${deltaStr ? `<span class="evt-delta">${deltaStr}</span>` : ''}
+      ${cause ? `<span class="evt-cause">${cause}</span>` : ''}
+    </button>`;
+  }).join('');
+
+  // Recurring-cause detection: the same resolved cause appearing more than once across this
+  // loaded sequence is worth calling out — it's the difference between "one-off event" and
+  // "an ongoing condition", which changes how it should be investigated.
+  const causeCounts = {};
+  ALL_EVENTS.forEach(evt => {
+    const c = evt.analysis?.tripCause?.causeText;
+    if (c) causeCounts[c] = (causeCounts[c] || 0) + 1;
+  });
+  const recurring = Object.entries(causeCounts).filter(([, n]) => n > 1);
+  let patternNote = recurring.length
+    ? `<div class="evt-pattern-note">🔁 ${recurring.map(([c, n]) => `"${c}" × ${n}`).join(' · ')} in this sequence — an ongoing condition, not an isolated event.</div>`
+    : '';
+
+  // Real fault current recurring at multiple reclose/re-energization points: some event types
+  // are named by the phases + ground involved in what was detected (e.g. "BCG", "CAG") — that
+  // naming itself, combined with genuinely elevated absolute current, is a reliable signal
+  // independent of comparing against this specific event's own pre-fault window (which, right
+  // at a reclose-into-fault, can itself already be mid-disturbance and not a clean baseline).
+  // One instance could be coincidence; the same real-current signature recurring across
+  // multiple, separately-named events is objective, stronger evidence of a persisting
+  // condition on this circuit than any single event's signature offers alone.
+  const realFaultEvents = ALL_EVENTS.filter(evt => {
+    const cur = evt.analysis;
+    const evtType = evt.parsed.eventInfo?.eventType || '';
+    if (!/^[ABC]{1,2}G?$/.test(evtType) && !/^[ABC]{2}G$/.test(evtType)) return false;
+    const maxI = Math.max(...['A', 'B', 'C'].map(p => cur?.currents?.[`I${p}`]?.fault?.secA || 0));
+    return maxI > 20; // clearly fault-level current, not load — robust regardless of this event's own pre-fault baseline
+  });
+  if (realFaultEvents.length >= 2) {
+    const types = realFaultEvents.map(e => e.parsed.eventInfo.eventType);
+    patternNote += `<div class="evt-pattern-note">⚠ Real, elevated fault current recorded at ${realFaultEvents.length} separate reclose points in this sequence (${types.join(', ')})${new Set(types).size > 1 ? ' — different phases each time' : ''}. Recurring across independent attempts points to a persisting condition on this circuit.</div>`;
+  }  sel.innerHTML = `<div style="display:flex;align-items:center;gap:4px;overflow-x:auto;white-space:nowrap;padding-bottom:2px;">
+    <span style="font-size:11px;color:var(--text-muted);font-weight:600;flex-shrink:0;">EVENTS:</span>${buttons}
+  </div>${patternNote}`;
 }
 
 function selectEvent(idx) {
