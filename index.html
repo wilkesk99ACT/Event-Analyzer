@@ -830,7 +830,47 @@ body.dragging-file #drop-overlay { display: flex; }
           indicates how many other, unrelated trip conditions exist in the same equation but weren't part
           of this event.</li>
         </ul>
-        <h3>Investigating a Trip</h3>
+        <h3>Using the Tabs</h3>
+        <p>The tabs below the summary give you the underlying evidence behind the headline
+        determination. None of this data is new — it all comes from the same CEV file QuickSet
+        or SynchroWAVe would open — but it's pre-cross-referenced against the relay's own
+        settings and against each other, which normally has to be done by hand.</p>
+        <ul>
+          <li><b>📍 Event Timeline</b> — every digital bit that changed, in order, with exact
+          timing. Unlike a raw digital plot, each entry is already labeled with what it means,
+          so you can scan the sequence of events without reading relay-word bit names.</li>
+          <li><b>🔌 Voltages</b> — pre-fault vs. fault voltage on every phase and terminal, with
+          percent change already computed and color-flagged, plus every voltage protection
+          element's pickup compared directly against the measured value for this event.
+          QuickSet shows you the pickup setting; SynchroWAVe shows you the waveform. This puts
+          the two side by side automatically, for this specific event.</li>
+          <li><b>〰️ Currents</b> — the same pre/fault comparison for every current channel,
+          with the percent change flagged so a large step (fault current) or a near-zero
+          change (no real current flowing) stands out immediately.</li>
+          <li><b>🛡️ Protection</b> — every overcurrent element's pickup, measured value, and
+          multiple-of-pickup, computed for this event rather than left for you to calculate by
+          hand from the settings sheet.</li>
+          <li><b>🩺 Diagnostics</b> — physical consistency checks that cross-reference sequence
+          voltage against sequence current (e.g. zero-sequence voltage vs. zero-sequence
+          current). A real, sustained sequence voltage should show up roughly proportionally in
+          the matching current; a large sustained gap points to a CT wiring issue, a grounding
+          transformer problem, or an open phase — a check neither QuickSet nor SynchroWAVe
+          performs on its own.</li>
+          <li><b>🔗 SV Logic</b> — every internal SV (timer/logic variable) used in the trip
+          equation, with its pickup/dropout delay and equation shown directly, split out from
+          every other active SV in the relay. This is the same information buried in the
+          settings file, surfaced specifically for the SVs that mattered to this event.</li>
+          <li><b>📊 Frequency</b> — frequency protection elements' pickups and measured values
+          for this event, in the same pickup-vs-measured format as the other protection tabs.</li>
+          <li><b>📋 Equations</b> — the raw SELogic text for the trip, unconditional trip,
+          fault, and reclose-initiate equations, for anyone who wants to verify the tool's
+          resolution against the relay's own settings directly.</li>
+        </ul>
+        <p>In short: QuickSet tells you how the relay is <i>configured</i>; SynchroWAVe shows
+        you what was <i>recorded</i>. This tool's tabs exist to connect those two — showing,
+        for this specific event, exactly how the recorded data relates to the relay's own
+        configured pickups, timers, and logic — which is the step that otherwise has to be done
+        manually, equation by equation.</p>
         <ol>
           <li><b>Start with the headline cause</b> at the top of the page — this is the fully resolved
           determination, not a raw relay-word name.</li>
