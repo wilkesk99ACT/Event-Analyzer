@@ -3410,33 +3410,29 @@ function renderMagnitudeChartSVG(traces, opts) {
   // Trigger / trip markers, matching SynchroWAVe's dashed reference lines
   let markers = '';
   const markerFont = opts.compact ? 8 : 9;
-  if (opts.triggerIdx != null && opts.triggerIdx >= 0 && opts.triggerIdx < n) {
-    const x = xScale(opts.triggerIdx);
-    markers += `<line x1="${x.toFixed(1)}" y1="${marginTop}" x2="${x.toFixed(1)}" y2="${marginTop + plotH}" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4,3"/>`;
-    if (!opts.compact) markers += `<text x="${(x + 4).toFixed(1)}" y="${marginTop + 11}" font-size="${markerFont}" fill="#f59e0b">TRIG</text>`;
-  }
-  if (opts.tripIdx != null && opts.tripIdx >= 0 && opts.tripIdx < n) {
-    const x = xScale(opts.tripIdx);
-    markers += `<line x1="${x.toFixed(1)}" y1="${marginTop}" x2="${x.toFixed(1)}" y2="${marginTop + plotH}" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="2,3"/>`;
-    if (!opts.compact) markers += `<text x="${(x + 4).toFixed(1)}" y="${marginTop + 23}" font-size="${markerFont}" fill="#ef4444">TRIP</text>`;
+  function drawMarker(idx, lineColor, dashArr, label) {
+    if (idx == null || idx < 0 || idx >= n) return '';
+    const x = xScale(idx);
+    let out = `<line x1="${x.toFixed(1)}" y1="${marginTop}" x2="${x.toFixed(1)}" y2="${marginTop + plotH}" stroke="${lineColor}" stroke-width="1.5" stroke-dasharray="${dashArr}"/>`;
+    if (!opts.compact && label) out += `<text x="${(x + 4).toFixed(1)}" y="${marginTop + 23}" font-size="${markerFont}" fill="${lineColor}">${label}</text>`;
 
-    // Data-value box: a single boxed legend at the trip instant listing every trace's exact
-    // value (color swatch + label + value), mirroring SynchroWAVe's cursor readout box —
-    // read the whole trip point at a glance instead of tracing each line back to the axis.
+    // Data-value box: a single boxed legend at this instant listing every trace's exact value
+    // (color swatch + label + value), mirroring SynchroWAVe's cursor readout box — read the
+    // whole point at a glance instead of tracing each line back to the axis.
     const dotR = opts.compact ? 2 : 2.6;
     const boxFont = opts.compact ? 8.5 : 10.5;
     const rowH = opts.compact ? 12.5 : 15.5;
     const padX = opts.compact ? 6 : 8, padY = opts.compact ? 5 : 7;
     const swatch = opts.compact ? 7 : 8.5;
     const rows = traces.map(t => {
-      const v = t.values[opts.tripIdx];
+      const v = t.values[idx];
       return (v == null || !isFinite(v)) ? null
         : { color: t.color, label: t.label, dotY: yScale(v), text: (Math.abs(v) < 10 ? v.toFixed(3) : v.toFixed(2)) + (opts.yUnit ? ' ' + opts.yUnit : '') };
     }).filter(Boolean);
 
     let dots = '';
     traces.forEach(t => {
-      const v = t.values[opts.tripIdx];
+      const v = t.values[idx];
       if (v == null || !isFinite(v)) return;
       dots += `<circle cx="${x.toFixed(1)}" cy="${yScale(v).toFixed(1)}" r="${dotR}" fill="${t.color}" stroke="var(--bg2)" stroke-width="1"/>`;
     });
@@ -3447,10 +3443,9 @@ function renderMagnitudeChartSVG(traces, opts) {
       const boxH = rows.length * rowH + padY * 2;
 
       // Find real clearance for a candidate box x-position: look at what the traces actually
-      // do across that specific horizontal span (not just near the trip line — a bump right at
-      // the trip instant is often exactly when the trace is busiest, so the only genuinely
-      // clear band can be well before or after it), and return the best of placing above vs.
-      // below that span's data.
+      // do across that specific horizontal span (not just near this instant — a bump right at
+      // it is often exactly when the trace is busiest, so the only genuinely clear band can be
+      // well before or after it), and return the best of placing above vs. below that span's data.
       function clearanceAt(bx) {
         const idxStart = Math.max(0, Math.floor((bx - marginLeft) / plotW * (n - 1)));
         const idxEnd = Math.min(n - 1, Math.ceil((bx + boxW - marginLeft) / plotW * (n - 1)));
@@ -3472,12 +3467,9 @@ function renderMagnitudeChartSVG(traces, opts) {
       }
 
       const clamp = bx => Math.max(marginLeft + 2, Math.min(marginLeft + plotW - boxW - 2, bx));
-      // Step outward from the trip line, alternating right/left, and take the FIRST position
-      // that actually fits without overlapping data — i.e. as close to the trip instant as
-      // possible, only moving further away when a nearer spot genuinely doesn't have room.
-      // (Picking whichever spot has the MOST slack anywhere on the chart, tried earlier, kept
-      // launching the box off to a distant flat stretch even when a closer position would have
-      // fit just fine — closeness should win as long as it's actually clear.)
+      // Step outward from this instant, alternating right/left, and take the FIRST position
+      // that actually fits without overlapping data — i.e. as close as possible, only moving
+      // further away when a nearer spot genuinely doesn't have room.
       const rightBase = x + 9, leftBase = x - boxW - 9;
       const step = 16;
       let best = null;
@@ -3495,8 +3487,8 @@ function renderMagnitudeChartSVG(traces, opts) {
         : Math.max(marginTop + 4, Math.min(marginTop + plotH - boxH - 4, best.dataMaxY + 6));
 
       // Connect each row to the exact point it's measuring — not just a single generic line to
-      // the trip instant, but one per trace, from that row's position in the box to that
-      // trace's own dot. Leaves from whichever box edge faces the trip line.
+      // this instant, but one per trace, from that row's position in the box to that trace's
+      // own dot. Leaves from whichever box edge faces this instant.
       const edgeX = (boxX + boxW / 2 < x) ? boxX + boxW : boxX;
       let leaders = '';
       rows.forEach((r, i) => {
@@ -3511,10 +3503,18 @@ function renderMagnitudeChartSVG(traces, opts) {
         rowsSvg += `<text x="${(boxX + padX + swatch + 5).toFixed(1)}" y="${ry.toFixed(1)}" font-size="${boxFont}" fill="var(--text-dim)">${r.label}</text>`;
         rowsSvg += `<text x="${(boxX + boxW - padX).toFixed(1)}" y="${ry.toFixed(1)}" text-anchor="end" font-size="${boxFont}" font-weight="600" fill="${r.color}">${r.text}</text>`;
       });
-      markers += leaders + `<rect x="${boxX.toFixed(1)}" y="${boxY.toFixed(1)}" width="${boxW.toFixed(1)}" height="${boxH.toFixed(1)}" fill="rgba(6,9,15,0.94)" stroke="var(--card-border)" stroke-width="1" rx="4"/>${rowsSvg}`;
+      out += leaders + `<rect x="${boxX.toFixed(1)}" y="${boxY.toFixed(1)}" width="${boxW.toFixed(1)}" height="${boxH.toFixed(1)}" fill="rgba(6,9,15,0.94)" stroke="var(--card-border)" stroke-width="1" rx="4"/>${rowsSvg}`;
     }
-    markers += dots;
+    out += dots;
+    return out;
   }
+  if (opts.triggerIdx != null && opts.triggerIdx >= 0 && opts.triggerIdx < n) {
+    const x = xScale(opts.triggerIdx);
+    markers += `<line x1="${x.toFixed(1)}" y1="${marginTop}" x2="${x.toFixed(1)}" y2="${marginTop + plotH}" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4,3"/>`;
+    if (!opts.compact) markers += `<text x="${(x + 4).toFixed(1)}" y="${marginTop + 11}" font-size="${markerFont}" fill="#f59e0b">TRIG</text>`;
+  }
+  markers += drawMarker(opts.tripIdx, '#ef4444', '2,3', 'TRIP');
+  markers += drawMarker(opts.cursorIdx, '#38bdf8', '0', '');
 
   // Trace polylines
   let polylines = '';
@@ -3567,11 +3567,13 @@ const BANNER_CHART_MARGIN_RIGHT = 100; // must fit the magnitude charts' legend
 const CHART_ZOOM = {};
 const CHART_GEOM = {};
 let CHART_DRAG = null;
+let CURSOR_IDX = null;   // full-record sample index of the draggable measurement cursor, or null (hidden)
+let CURSOR_DRAG = null;  // { kind } while actively dragging the cursor line
+const ZOOM_KINDS = ['current', 'voltage', 'relevant', 'svflags'];
 
 function resetChartZoom() {
-  CHART_ZOOM.current = null;
-  CHART_ZOOM.voltage = null;
-  CHART_ZOOM.relevant = null;
+  ZOOM_KINDS.forEach(k => { CHART_ZOOM[k] = null; });
+  CURSOR_IDX = null;
 }
 
 // Small title-bar hint/badge — shows a static hint on the full view, and a "reset" affordance
@@ -3587,7 +3589,11 @@ function zoomHintHTML(kind) {
 // Re-invoke the correct chart builder with the current zoom state and swap just the SVG
 // slot's contents — the wrapping card/title (and its event listeners) stay in place.
 function setZoomAll(range) {
-  ['current', 'voltage', 'relevant'].forEach(k => { CHART_ZOOM[k] = range; rerenderZoomChart(k); });
+  ZOOM_KINDS.forEach(k => { CHART_ZOOM[k] = range; rerenderZoomChart(k); });
+}
+function setCursorAll(idxFull) {
+  CURSOR_IDX = idxFull;
+  ZOOM_KINDS.forEach(k => rerenderZoomChart(k));
 }
 function rerenderZoomChart(kind) {
   const slot = document.getElementById('chartSlot-' + kind);
@@ -3596,6 +3602,7 @@ function rerenderZoomChart(kind) {
   if (kind === 'current') html = buildCurrentMagChart(PARSED, ANALYSIS, true);
   else if (kind === 'voltage') html = buildVoltageMagChart(PARSED, ANALYSIS, true);
   else if (kind === 'relevant') html = buildRelevantQuantityChart(PARSED, ANALYSIS, true);
+  else if (kind === 'svflags') html = buildSVFlagsChart(PARSED, ANALYSIS, true);
   if (!html) return;
   // The builder returns the whole wrapper (title + slot) — pull just the slot's inner content
   // back out rather than replacing the wrapper itself (which would also blow away the title's
@@ -3610,11 +3617,28 @@ function rerenderZoomChart(kind) {
   slot.style.cursor = CHART_ZOOM[kind] ? 'grab' : 'default';
 }
 
+function idxFromClientX(kind, clientX) {
+  const geom = CHART_GEOM[kind];
+  const slot = document.getElementById('chartSlot-' + kind);
+  if (!geom || !slot) return null;
+  const rect = slot.getBoundingClientRect();
+  const svgX = (clientX - rect.left) / rect.width * geom.viewW;
+  const plotW = geom.viewW - geom.marginLeft - geom.marginRight;
+  if (svgX < geom.marginLeft || svgX > geom.marginLeft + plotW) return null;
+  const frac = Math.max(0, Math.min(1, (svgX - geom.marginLeft) / plotW));
+  return geom.startIdx + Math.round(frac * (geom.endIdx - geom.startIdx));
+}
+
 // Registered ONCE at module scope (not per-render) — mousemove/mouseup on `window` would
 // otherwise accumulate a new listener every time an event is (re)loaded, since each of those
 // calls rebuilds the banner's DOM but a window-level listener isn't part of that subtree and
 // so never gets garbage-collected on its own.
 window.addEventListener('mousemove', e => {
+  if (CURSOR_DRAG) {
+    const idx = idxFromClientX(CURSOR_DRAG.kind, e.clientX);
+    if (idx != null) setCursorAll(idx);
+    return;
+  }
   if (!CHART_DRAG) return;
   const { kind, startClientX, startRange } = CHART_DRAG;
   const slot = document.getElementById('chartSlot-' + kind);
@@ -3637,14 +3661,16 @@ window.addEventListener('mouseup', () => {
     if (slot) slot.style.cursor = CHART_ZOOM[CHART_DRAG.kind] ? 'grab' : 'default';
   }
   CHART_DRAG = null;
+  CURSOR_DRAG = null;
 });
 
-// Attach scroll-to-zoom / drag-to-pan / double-click-to-reset to each of the three interactive
-// banner charts. Safe to call after every render — the slots themselves are fresh DOM nodes
-// each time (the banner's innerHTML was just fully replaced), so there's nothing stale to
-// double-bind here; only the WINDOW-level handlers above need the "registered once" guard.
+// Attach scroll-to-zoom / drag-to-pan-or-move-cursor / double-click-to-reset to each of the
+// four interactive banner charts. Safe to call after every render — the slots themselves are
+// fresh DOM nodes each time (the banner's innerHTML was just fully replaced), so there's
+// nothing stale to double-bind here; only the WINDOW-level handlers above need the
+// "registered once" guard.
 function wireChartInteractivity() {
-  ['current', 'voltage', 'relevant'].forEach(kind => {
+  ZOOM_KINDS.forEach(kind => {
     const slot = document.getElementById('chartSlot-' + kind);
     if (!slot) return;
     slot.style.cursor = CHART_ZOOM[kind] ? 'grab' : 'default';
@@ -3674,8 +3700,19 @@ function wireChartInteractivity() {
       setZoomAll((newStart <= 0 && newEnd >= geom.totalLen - 1) ? null : { start: newStart, end: newEnd });
     }, { passive: false });
 
+    // Dragging near the existing cursor line moves it; dragging elsewhere pans (if zoomed);
+    // a plain click on empty space (not zoomed, no cursor nearby) plants the cursor there and
+    // starts dragging it immediately, so click-and-drag from anywhere works in one motion.
     slot.addEventListener('mousedown', e => {
-      if (!CHART_ZOOM[kind]) return; // nothing to pan when showing the full record
+      const geom = CHART_GEOM[kind];
+      const idx = idxFromClientX(kind, e.clientX);
+      if (idx == null) return;
+      const nearCursor = CURSOR_IDX != null && geom && Math.abs(idx - CURSOR_IDX) * ((slot.getBoundingClientRect().width) / Math.max(1, geom.endIdx - geom.startIdx)) < 10;
+      if (nearCursor || !CHART_ZOOM[kind]) {
+        CURSOR_DRAG = { kind };
+        setCursorAll(idx);
+        return;
+      }
       CHART_DRAG = { kind, startClientX: e.clientX, startRange: { ...CHART_ZOOM[kind] } };
       slot.style.cursor = 'grabbing';
     });
@@ -3694,11 +3731,12 @@ function sliceChartWindow(kind, fullTraces, tripIdxFull, triggerIdxFull, msPerSa
   const slicedTraces = fullTraces.map(t => ({ label: t.label, color: t.color, values: t.values.slice(startIdx, endIdx + 1) }));
   const tripIdx = (tripIdxFull != null && tripIdxFull >= startIdx && tripIdxFull <= endIdx) ? tripIdxFull - startIdx : null;
   const triggerIdx = (triggerIdxFull != null && triggerIdxFull >= startIdx && triggerIdxFull <= endIdx) ? triggerIdxFull - startIdx : null;
+  const cursorIdx = (CURSOR_IDX != null && CURSOR_IDX >= startIdx && CURSOR_IDX <= endIdx) ? CURSOR_IDX - startIdx : null;
   CHART_GEOM[kind] = {
-    startIdx, endIdx, totalLen,
+    startIdx, endIdx, totalLen, msPerSample,
     marginLeft: BANNER_CHART_MARGIN_LEFT, marginRight: BANNER_CHART_MARGIN_RIGHT, viewW: BANNER_CHART_WIDTH,
   };
-  return { slicedTraces, tripIdx, triggerIdx, xOffsetMs: startIdx * msPerSample };
+  return { slicedTraces, tripIdx, triggerIdx, cursorIdx, xOffsetMs: startIdx * msPerSample };
 }
 
 function buildCurrentMagChart(P, A, compact) {
@@ -3722,13 +3760,13 @@ function buildCurrentMagChart(P, A, compact) {
   ];
 
   if (compact) {
-    const { slicedTraces, tripIdx, triggerIdx, xOffsetMs } = sliceChartWindow('current', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.current);
+    const { slicedTraces, tripIdx, triggerIdx, cursorIdx, xOffsetMs } = sliceChartWindow('current', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.current);
     const svg = renderMagnitudeChartSVG(slicedTraces, {
       width: BANNER_CHART_WIDTH, height: 190,
       marginLeft: BANNER_CHART_MARGIN_LEFT, marginRight: BANNER_CHART_MARGIN_RIGHT,
       marginTop: 12, marginBottom: 22,
       numHGrid: 4, numVGrid: 8, fontSize: 12, msPerSample, yUnit: unit,
-      forceZeroBaseline: true, triggerIdx, tripIdx, compact: true, bg: 'var(--card)', xOffsetMs,
+      forceZeroBaseline: true, triggerIdx, tripIdx, cursorIdx, compact: true, bg: 'var(--card)', xOffsetMs,
     });
     return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">Current Magnitude${zoomHintHTML('current')}</div><div class="chart-svg-slot" id="chartSlot-current">${svg}</div></div>`;
   }
@@ -3765,13 +3803,13 @@ function buildVoltageMagChart(P, A, compact) {
   ];
 
   if (compact) {
-    const { slicedTraces, tripIdx, triggerIdx, xOffsetMs } = sliceChartWindow('voltage', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.voltage);
+    const { slicedTraces, tripIdx, triggerIdx, cursorIdx, xOffsetMs } = sliceChartWindow('voltage', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.voltage);
     const svg = renderMagnitudeChartSVG(slicedTraces, {
       width: BANNER_CHART_WIDTH, height: 190,
       marginLeft: BANNER_CHART_MARGIN_LEFT, marginRight: BANNER_CHART_MARGIN_RIGHT,
       marginTop: 12, marginBottom: 22,
       numHGrid: 4, numVGrid: 8, fontSize: 12, msPerSample, yUnit: unit,
-      forceZeroBaseline: false, triggerIdx, tripIdx, compact: true, bg: 'var(--card)', xOffsetMs,
+      forceZeroBaseline: false, triggerIdx, tripIdx, cursorIdx, compact: true, bg: 'var(--card)', xOffsetMs,
     });
     return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">Voltage Magnitude${zoomHintHTML('voltage')}</div><div class="chart-svg-slot" id="chartSlot-voltage">${svg}</div></div>`;
   }
@@ -3832,21 +3870,23 @@ function renderBooleanFlagsSVG(rows, opts) {
   const plotH = rows.length * rowH;
   const height = marginTop + plotH + marginBottom;
   const totalMs = opts.totalMs || 1;
+  const startMs = opts.startMs ?? 0, endMs = opts.endMs ?? totalMs;
+  const winMs = Math.max(1, endMs - startMs);
   const fontSize = opts.fontSize ?? 9.5;
 
-  const xScale = ms => marginLeft + Math.max(0, Math.min(1, ms / totalMs)) * plotW;
+  const xScale = ms => marginLeft + Math.max(0, Math.min(1, (ms - startMs) / winMs)) * plotW;
 
   // Vertical gridlines + time labels (shared bottom axis, same style as the magnitude charts)
   const numVGrid = opts.numVGrid ?? 5;
   let vGridLines = '', xLabels = '';
   for (let g = 0; g <= numVGrid; g++) {
-    const ms = (g / numVGrid) * totalMs;
+    const ms = startMs + (g / numVGrid) * winMs;
     const x = xScale(ms);
     vGridLines += `<line x1="${x.toFixed(1)}" y1="${marginTop}" x2="${x.toFixed(1)}" y2="${marginTop + plotH}" stroke="var(--card-border)" stroke-width="1"/>`;
     xLabels += `<text x="${x.toFixed(1)}" y="${marginTop + plotH + 14}" text-anchor="middle" font-size="${fontSize}" fill="var(--text-dim)">${ms.toFixed(0)}${opts.compact ? '' : ' ms'}</text>`;
   }
 
-  // Trigger / trip markers, matching the magnitude charts above for visual alignment
+  // Trigger / trip / cursor markers, matching the magnitude charts above for visual alignment
   let markers = '';
   const markerFont = opts.compact ? 8 : 9;
   if (opts.triggerMs != null) {
@@ -3854,34 +3894,37 @@ function renderBooleanFlagsSVG(rows, opts) {
     markers += `<line x1="${x.toFixed(1)}" y1="${marginTop}" x2="${x.toFixed(1)}" y2="${marginTop + plotH}" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4,3"/>`;
     if (!opts.compact) markers += `<text x="${(x + 4).toFixed(1)}" y="${marginTop + 11}" font-size="${markerFont}" fill="#f59e0b">TRIG</text>`;
   }
-  if (opts.tripMs != null) {
-    const x = xScale(opts.tripMs);
-    markers += `<line x1="${x.toFixed(1)}" y1="${marginTop}" x2="${x.toFixed(1)}" y2="${marginTop + plotH}" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="2,3"/>`;
-    if (!opts.compact) markers += `<text x="${(x + 4).toFixed(1)}" y="${marginTop + 23}" font-size="${markerFont}" fill="#ef4444">TRIP</text>`;
+  // Draws a vertical marker at `ms` plus, per row, a dot/value showing that row's state right
+  // at that instant — reused for both the fixed TRIP marker and the draggable cursor.
+  function drawTimeMarker(ms, color, dashArr, label) {
+    if (ms == null || ms < startMs || ms > endMs) return '';
+    const x = xScale(ms);
+    let out = `<line x1="${x.toFixed(1)}" y1="${marginTop}" x2="${x.toFixed(1)}" y2="${marginTop + plotH}" stroke="${color}" stroke-width="1.5" stroke-dasharray="${dashArr}"/>`;
+    if (!opts.compact && label) out += `<text x="${(x + 4).toFixed(1)}" y="${marginTop + 23}" font-size="${markerFont}" fill="${color}">${label}</text>`;
+    rows.forEach((row, i) => {
+      const cy = marginTop + i * rowH + rowH / 2;
+      const asserted = row.intervals.some(([s, e]) => ms >= s && ms <= e);
+      const dotColor = asserted ? color : 'var(--text-muted)';
+      out += `<circle cx="${x.toFixed(1)}" cy="${cy.toFixed(1)}" r="${opts.compact ? 2.5 : 3}" fill="${dotColor}"/>`;
+      if (!opts.compact) out += `<text x="${(x + 6).toFixed(1)}" y="${(cy + 3).toFixed(1)}" font-size="${fontSize}" font-weight="600" fill="${dotColor}">${asserted ? '1' : '0'}</text>`;
+    });
+    return out;
   }
+  markers += drawTimeMarker(opts.tripMs, '#ef4444', '2,3', 'TRIP');
+  markers += drawTimeMarker(opts.cursorMs, '#38bdf8', '0', '');
 
-  // Rows: baseline + solid asserted bars + left-hand label + a data label showing each row's
-  // actual state (asserted/de-asserted) right at the trip instant — the same "read it at a
-  // glance instead of tracing the bar back" goal as the magnitude chart value labels.
+  // Rows: baseline + solid asserted bars + left-hand label
   let rowsHTML = '';
   const barH = rowH * 0.44;
-  const tripX = (opts.tripMs != null) ? xScale(opts.tripMs) : null;
   rows.forEach((row, i) => {
     const cy = marginTop + i * rowH + rowH / 2;
     rowsHTML += `<line x1="${marginLeft}" y1="${cy}" x2="${marginLeft + plotW}" y2="${cy}" stroke="var(--accent)" stroke-width="1" opacity="0.4"/>`;
     row.intervals.forEach(([s, e]) => {
-      const x1 = xScale(s), x2 = xScale(Math.min(e, totalMs));
+      if (e < startMs || s > endMs) return; // outside the visible window
+      const x1 = xScale(Math.max(s, startMs)), x2 = xScale(Math.min(e, endMs));
       rowsHTML += `<rect x="${x1.toFixed(1)}" y="${(cy - barH / 2).toFixed(1)}" width="${Math.max(1, x2 - x1).toFixed(1)}" height="${barH.toFixed(1)}" fill="var(--accent)" opacity="0.9" rx="1.5"/>`;
     });
     rowsHTML += `<text x="${marginLeft - 8}" y="${(cy + 3.2).toFixed(1)}" text-anchor="end" font-size="${fontSize}" font-family="var(--mono)" fill="var(--text-dim)">${row.label}</text>`;
-    if (tripX != null && opts.tripMs >= 0 && opts.tripMs <= totalMs) {
-      const assertedAtTrip = row.intervals.some(([s, e]) => opts.tripMs >= s && opts.tripMs <= e);
-      const dotColor = assertedAtTrip ? '#ef4444' : 'var(--text-muted)';
-      rowsHTML += `<circle cx="${tripX.toFixed(1)}" cy="${cy.toFixed(1)}" r="${opts.compact ? 2.5 : 3}" fill="${dotColor}"/>`;
-      if (!opts.compact) {
-        rowsHTML += `<text x="${(tripX + 6).toFixed(1)}" y="${(cy + 3).toFixed(1)}" font-size="${fontSize}" font-weight="600" fill="${dotColor}">${assertedAtTrip ? '1' : '0'}</text>`;
-      }
-    }
   });
 
   const bg = opts.bg || 'var(--card)';
@@ -3962,13 +4005,13 @@ function buildRelevantQuantityChart(P, A, compact) {
   if (!traces.length) return '';
 
   if (compact) {
-    const { slicedTraces, tripIdx, triggerIdx, xOffsetMs } = sliceChartWindow('relevant', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.relevant);
+    const { slicedTraces, tripIdx, triggerIdx, cursorIdx, xOffsetMs } = sliceChartWindow('relevant', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.relevant);
     const svg = renderMagnitudeChartSVG(slicedTraces, {
       width: BANNER_CHART_WIDTH, height: 190,
       marginLeft: BANNER_CHART_MARGIN_LEFT, marginRight: BANNER_CHART_MARGIN_RIGHT,
       marginTop: 12, marginBottom: 22,
       numHGrid: 4, numVGrid: 8, fontSize: 12, msPerSample, yUnit,
-      forceZeroBaseline, triggerIdx, tripIdx, compact: true, bg: 'var(--card)', xOffsetMs,
+      forceZeroBaseline, triggerIdx, tripIdx, cursorIdx, compact: true, bg: 'var(--card)', xOffsetMs,
     });
     return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">${title}${zoomHintHTML('relevant')}</div><div class="chart-svg-slot" id="chartSlot-relevant">${svg}</div></div>`;
   }
@@ -4122,15 +4165,22 @@ function buildSVFlagsChart(P, A, compact) {
   // at the exact same x position as it does in the magnitude charts above.
   const tripMs = (tripTransition?.analogSampleIdx != null) ? tripTransition.analogSampleIdx * msPerSample : null;
   const triggerMs = (P.triggerSampleIndex != null && P.triggerSampleIndex >= 0) ? P.triggerSampleIndex * msPerSample : null;
+  const totalLen = data.length;
+  const zr = CHART_ZOOM.svflags;
+  const startIdx = zr ? Math.max(0, Math.min(totalLen - 1, Math.round(zr.start))) : 0;
+  const endIdx = zr ? Math.max(startIdx + 1, Math.min(totalLen - 1, Math.round(zr.end))) : totalLen - 1;
+  const startMs = startIdx * msPerSample, endMs = endIdx * msPerSample;
+  const cursorMs = CURSOR_IDX != null ? CURSOR_IDX * msPerSample : null;
+  CHART_GEOM.svflags = { startIdx, endIdx, totalLen, msPerSample, marginLeft: BANNER_CHART_MARGIN_LEFT, marginRight: BANNER_CHART_MARGIN_RIGHT, viewW: BANNER_CHART_WIDTH };
 
   if (compact) {
     const svg = renderBooleanFlagsSVG(rows, {
       width: BANNER_CHART_WIDTH,
       marginLeft: BANNER_CHART_MARGIN_LEFT, marginRight: BANNER_CHART_MARGIN_RIGHT,
       marginTop: 12, marginBottom: 24,
-      rowH: 30, numVGrid: 8, fontSize: 12, totalMs, triggerMs, tripMs, compact: true, bg: 'var(--card)',
+      rowH: 30, numVGrid: 8, fontSize: 12, totalMs, startMs, endMs, triggerMs, tripMs, cursorMs, compact: true, bg: 'var(--card)',
     });
-    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">SV / Trip Chain Flags</div>${svg}</div>`;
+    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">SV / Trip Chain Flags${zoomHintHTML('svflags')}</div><div class="chart-svg-slot" id="chartSlot-svflags">${svg}</div></div>`;
   }
 
   const svg = renderBooleanFlagsSVG(rows, { totalMs, triggerMs, tripMs, marginLeft: 110 });
