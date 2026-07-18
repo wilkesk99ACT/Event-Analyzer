@@ -3650,13 +3650,14 @@ function wireChartInteractivity() {
     slot.style.cursor = CHART_ZOOM[kind] ? 'grab' : 'default';
 
     slot.addEventListener('wheel', e => {
-      e.preventDefault();
       const geom = CHART_GEOM[kind];
       if (!geom) return;
       const rect = slot.getBoundingClientRect();
       const px = e.clientX - rect.left;
       const svgX = px / rect.width * geom.viewW;
       const plotW = geom.viewW - geom.marginLeft - geom.marginRight;
+      if (svgX < geom.marginLeft || svgX > geom.marginLeft + plotW) return; // outside the plot (e.g. over the legend) — let the page scroll normally
+      e.preventDefault();
       const frac = Math.max(0, Math.min(1, (svgX - geom.marginLeft) / plotW));
       const curLen = geom.endIdx - geom.startIdx;
       const cursorIdx = geom.startIdx + frac * curLen;
