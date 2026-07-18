@@ -1581,6 +1581,47 @@ function analyzeCEV(P, prevEvent) {
     }
   }
 
+  // Drop the branches that DIDN'T actually contribute to the result, rather than showing every
+  // alternative regardless of whether it happened. The rule is intentionally dual, not a blanket
+  // "hide anything false":
+  //   • An OR that came out TRUE only needed ONE side — keep whichever side(s) are true, drop
+  //     the false alternatives (they're just conditions that didn't happen).
+  //   • An OR that came out FALSE needed EVERY side to be false (that's the only way an OR is
+  //     false) — every side is equally part of the explanation, so keep all of them.
+  //   • An AND that came out TRUE needed EVERY side true — all of them are the explanation, keep
+  //     all (this is why "AND 52A"-type context never disappears).
+  //   • An AND that came out FALSE only needed ONE side to fail — keep whichever side(s) are
+  //     false (the actual blocker), drop the side(s) that were fine.
+  // This is exactly De Morgan's duality (NOT-of-AND-of-false-things is the same shape as an
+  // OR-of-true-things), so a NOT wrapping a false AND — e.g. "NOT (IN301 AND IN303 AND IN305)"
+  // where all three read false — correctly keeps every one of those false leaves, since THAT
+  // false AND is precisely why the NOT came out true.
+  function pruneLogicTree(node) {
+    if (!node) return node;
+    switch (node.op) {
+      case 'VAR': return node;
+      case 'SVNODE': return Object.assign({}, node, { child: pruneLogicTree(node.child) });
+      case 'NOT': case 'REDGE': case 'FEDGE':
+        return Object.assign({}, node, { child: pruneLogicTree(node.child) });
+      case 'AND': case 'OR': {
+        const [l, r] = node.children;
+        const shouldFilter = (node.op === 'OR' && node.value === true) || (node.op === 'AND' && node.value === false);
+        if (!shouldFilter) {
+          // OR-false (every side had to fail) or AND-true (every side had to hold) — all
+          // children are part of the explanation, keep both.
+          return Object.assign({}, node, { children: [pruneLogicTree(l), pruneLogicTree(r)] });
+        }
+        const wantValue = node.op === 'OR'; // OR-true keeps true side(s); AND-false keeps false side(s)
+        let keep = [l, r].filter(c => c.value === wantValue);
+        if (!keep.length) keep = [l, r]; // shouldn't happen, but never drop everything
+        const pruned = keep.map(pruneLogicTree);
+        if (pruned.length === 1) return pruned[0]; // only one side survived — no group left to show
+        return Object.assign({}, node, { children: pruned });
+      }
+      default: return node;
+    }
+  }
+
   const EDGE_OPS = new Set(['R_TRIG', 'F_TRIG', 'R_TRIGGER', 'F_TRIGGER']);
 
   // Pretty-print an AST back to SEL-ish text, for display in explanations (e.g. "blocked by
@@ -2403,7 +2444,7 @@ function analyzeCEV(P, prevEvent) {
         const branches = splitTopOr(tripAst);
         const winningBranch = branches.find(b => astContainsToken(b, immediateCause)) || branches[0];
         if (winningBranch) {
-          logicTree = bakeFullLogicTree(winningBranch, isAssertedAtTrip, new Set(), 0);
+          logicTree = pruneLogicTree(bakeFullLogicTree(winningBranch, isAssertedAtTrip, new Set(), 0));
           logicTreeOtherBranchCount = Math.max(0, branches.length - 1);
         }
       }
