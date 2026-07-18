@@ -1515,6 +1515,16 @@ function analyzeCEV(P, prevEvent) {
   const faultData = analogData.slice(fStart, fEnd);
 
   // Voltage analysis
+  // Raw channel data can be secondary-referred (the common case) or primary-referred, and
+  // primary-referred data can itself be expressed in kV or in raw volts depending on the
+  // relay/export format — these are two independent conventions that must be detected
+  // separately (see the fuller explanation next to this same detection in
+  // computeConsistencyCheck). Assuming one fixed convention here previously produced
+  // secondaryV/primaryKV values off by orders of magnitude for files that don't match it.
+  const isPrimaryDataV = (P.settings.primaryValues !== undefined && P.settings.primaryValues !== null)
+    ? P.settings.primaryValues
+    : detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], '').toUpperCase() === 'KV';
+  const voltChannelIsKV = detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], '').toUpperCase() === 'KV';
   ['yTerminal', 'zTerminal'].forEach(term => {
     const ptr = term === 'yTerminal' ? PTRY : PTRZ;
     const pre = term === 'yTerminal' ? 'VAY' : 'VAZ';
@@ -1524,12 +1534,18 @@ function analyzeCEV(P, prevEvent) {
 
     A.voltages[term] = {};
     for (const [ph, key] of Object.entries(phases)) {
-      const pfRMS = computeRMS(preFault, key);
-      const fRMS = computeRMS(faultData, key);
+      const pfRaw = computeRMS(preFault, key);
+      const fRaw = computeRMS(faultData, key);
+      const toKvSec = raw => {
+        const primaryKV = isPrimaryDataV ? (voltChannelIsKV ? raw : raw / 1000) : (raw * ptr) / 1000;
+        const secondaryV = primaryKV * 1000 / ptr;
+        return { primaryKV, secondaryV };
+      };
+      const pf = toKvSec(pfRaw), f = toKvSec(fRaw);
       A.voltages[term][ph] = {
-        preFault: { primaryKV: pfRMS, secondaryV: pfRMS * 1000 / ptr },
-        fault: { primaryKV: fRMS, secondaryV: fRMS * 1000 / ptr },
-        change: pfRMS > 0 ? ((fRMS - pfRMS) / pfRMS * 100) : (fRMS > 0 ? 999 : 0),
+        preFault: pf,
+        fault: f,
+        change: pf.primaryKV > 0 ? ((f.primaryKV - pf.primaryKV) / pf.primaryKV * 100) : (f.primaryKV > 0 ? 999 : 0),
       };
     }
   });
@@ -2830,6 +2846,55 @@ function analyzeCEV(P, prevEvent) {
           title: 'Breaker Was Already Open — Not a Fault Interruption',
           detail: `${bkrLabel} reads open for the entire record leading up to this trip, and measured current stayed near zero throughout (typical phase reading ~${medPhaseI.toFixed(2)} A sec, ground ~${medGroundI.toFixed(2)} A sec). This trip did not interrupt any load or fault current. Whatever operated here was reacting to something other than a fresh fault on an energized, closed circuit — e.g. a residual/backfeed condition, or the logic-driven path flagged above.`,
         });
+      }
+
+      // ── Slow/failed breaker operation — mechanism health, not electrical ──
+      // Only meaningful when the breaker was actually closed going into this trip. A real
+      // interrupter should confirm open within a handful of cycles of the trip command; a
+      // long delay — or no confirmation at all — points at the breaker mechanism itself (worn
+      // contacts, low control-power/trip-coil energy, a sticking mechanism), not the utility side.
+      if (closedBeforeTrip) {
+        const spc = P.eventInfo.samPerCycA || 32;
+        const msPerSampleFlag = 1000 / (freq * spc);
+        const openTransition = digitalTransitions.slice(boundary + 1)
+          .find(t => t.changes.some(c => c.label === bkrLabel && !c.asserted));
+        if (openTransition) {
+          const delayMs = (openTransition.analogSampleIdx - tripTransition.analogSampleIdx) * msPerSampleFlag;
+          const delayCyc = delayMs / (1000 / freq);
+          if (delayCyc > 8) {
+            A.investigationFlags.push({
+              severity: 'medium',
+              title: 'Slow Breaker Operation — Possible Mechanism Issue',
+              detail: `${bkrLabel} did not confirm open until ${delayMs.toFixed(0)} ms (~${delayCyc.toFixed(1)} cycles) after the trip command — well beyond a healthy interrupter's typical clearing time. This points at the breaker/recloser mechanism itself (contact wear, low trip-coil/control-power energy, a sticking operating mechanism) rather than anything on the utility side.`,
+            });
+          }
+        } else if (digitalTransitions.length > boundary + 1) {
+          A.investigationFlags.push({
+            severity: 'high',
+            title: 'Breaker Did Not Confirm Open After Trip',
+            detail: `A trip was commanded, but ${bkrLabel} never shows an open confirmation for the remainder of this record. Worth checking the breaker/recloser mechanism directly — this is a device-health question, not an electrical one.`,
+          });
+        }
+      }
+
+      // ── Voltage still present after the breaker opens — possible DER backfeed/islanding ──
+      // If a phase voltage hasn't actually collapsed while the breaker reads open, on-site
+      // generation is likely still energizing that side — a DER/anti-islanding question on
+      // site equipment, not a utility-side condition.
+      const stateNow = timeline[Math.min(boundary, timeline.length - 1)];
+      const breakerOpenNow = !stateNow.has(bkrLabel);
+      const yV = A.voltages?.yTerminal;
+      if (breakerOpenNow && yV && VNOM > 1) {
+        const highPhases = ['A', 'B', 'C']
+          .map(ph => ({ ph, v: yV[`V${ph}`]?.fault?.secondaryV }))
+          .filter(x => x.v != null && x.v > VNOM * 0.15);
+        if (highPhases.length) {
+          A.investigationFlags.push({
+            severity: 'medium',
+            title: 'Voltage Present With Breaker Open — Possible DER Backfeed/Islanding',
+            detail: `${bkrLabel} reads open, but ${highPhases.map(x => `V${x.ph} (${x.v.toFixed(1)} V sec, ${(x.v / VNOM * 100).toFixed(0)}% of nominal)`).join(', ')} ${highPhases.length > 1 ? 'have' : 'has'} not collapsed. On a properly de-energized, open section this should read near zero — a sustained reading suggests on-site generation is still energizing this side of the open point, which is a DER/anti-islanding response question rather than a utility-side condition.`,
+          });
+        }
       }
     }
 
