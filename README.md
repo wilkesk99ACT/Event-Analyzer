@@ -3,9 +3,13 @@
 ## What It Is
 
 The CEV Trip Analyzer is an internally developed diagnostic tool that reads SEL relay event
-(CEV) files and determines — automatically, and with supporting evidence — *why* a protective
-device actually operated. It runs entirely in a web browser, requires no installation, no
-server, and no data leaves the browser at any point.
+(CEV) files and works out a likely, evidence-backed explanation for why a protective device
+operated. It runs entirely in a web browser, requires no installation, no server, and no data
+leaves the browser at any point.
+
+It is a diagnostic aid, not a final authority — its output is a starting point grounded in the
+relay's own recorded data and configured logic, meant to be checked against the diagram and
+supporting tabs rather than taken as an unquestioned answer.
 
 ## The Problem It Solves
 
@@ -23,12 +27,13 @@ instrument rather than a real electrical condition.
 - **Faster event turnaround.** The tool performs the settings cross-reference and logic
   resolution automatically for every event, replacing what is otherwise a manual, multi-step
   process specific to each relay's configuration.
-- **Fewer misdiagnosed trips.** A built-in set of diagnostic checks is specifically designed to
-  catch cases where the obvious-looking cause is not the actual cause — including trips driven
-  by internal logic rather than a measured fault, trips issued on an already-open breaker, and
-  voltage/current mismatches consistent with a failed voltage-sensing channel (e.g. a blown PT
-  fuse) rather than a real fault. Each of these previously required a trained eye to catch on
-  manual review; the tool now surfaces them automatically, every time.
+- **Fewer misdiagnosed trips.** A set of diagnostic checks looks for cases where the obvious-
+  looking cause may not be the actual one — including trips driven by internal logic rather
+  than a measured fault, trips issued on an already-open breaker, and voltage/current mismatches
+  consistent with a failed voltage-sensing channel (e.g. a blown PT fuse) rather than a real
+  fault. These are exactly the kind of pattern that's easy to miss on a quick manual review, and
+  the tool is intended to help surface them consistently — the flags are a prompt to look
+  closer, not a substitute for that look.
 - **Broader usability.** Correctly interpreting nested SELogic by hand is a specialized skill.
   Presenting the resolved logic chain as a diagram — rather than requiring a manual settings
   walkthrough — allows a wider range of personnel to correctly interpret an event.
@@ -37,10 +42,10 @@ instrument rather than a real electrical condition.
 
 ## What the Tool Does, in Practice
 
-1. **Resolves the root cause.** It parses the relay's trip equation and every internal SV
+1. **Works out a likely root cause.** It parses the relay's trip equation and every internal SV
    (logic/timer variable) it references, evaluates them against the actual recorded digital
-   transitions, and identifies the real condition — or chain of conditions — that produced the
-   trip, anchored to the exact recorded transition rather than a re-derived approximation.
+   transitions, and identifies the condition(s) that the relay's own configured logic points to,
+   anchored to the recorded transition rather than a re-derived approximation.
 2. **Displays it as a logic diagram**, not a linear text summary — showing every side of an AND
    condition (so a supervisory condition like "breaker closed" is never silently omitted) and
    only the branch of an OR condition that actually occurred.
@@ -56,9 +61,10 @@ instrument rather than a real electrical condition.
 ## Operator FAQ
 
 **What am I looking at when I open an event?**
-A headline "Root Cause Identified" banner, followed by a branching logic diagram showing the
-exact path through the relay's own logic that produced the trip, any diagnostic flags relevant
-to this event, and a set of waveform charts.
+A headline cause banner, followed by a branching logic diagram showing the path the tool has
+traced through the relay's own logic for this trip, any diagnostic flags relevant to the event,
+and a set of waveform charts. Each piece is meant to be checkable against the underlying data,
+not taken on faith.
 
 **What do the colors in the logic diagram mean?**
 Green = true/asserted at the moment of the trip. Grey/muted = false/not asserted, shown only
