@@ -1117,41 +1117,162 @@ function findElementDelayMs(P, base, freq) {
 // actually means, distinguishing fixed-delay elements (50/27/59/81/67) from inverse-time
 // elements (51), where "starts a fixed timer" would be physically wrong.
 function explainElementBit(label, P, freq) {
-  const m = label.match(/^(50|51|67|27|59|81)([ABCGNQPV])?(\d)?([PTRS])?$/);
-  if (!m) return null;
-  const [, dev, ph, num, suf] = m;
-  const fam = ANSI_FAMILY[dev];
-  if (!fam) return null;
-  const phWord = ph ? PHASE_WORD[ph] : null;
-  const subj = ph ? PHASE_SUBJECT[ph] : (dev === '27' || dev === '59' ? 'Voltage' : 'The measured quantity');
-  const lvl = num ? `level ${num}` : '';
-  const base = label.replace(/[PTRS]$/, '');
-  const pairP = base + 'P', pairT = base + 'T';
-  const short = `${fam.name} ${lvl}${phWord ? ' — ' + phWord : ''}`.replace(/\s+/g, ' ').trim();
+  freq = freq || 60;
 
-  if (fam.kind === 'inverse') {
-    // 51-family: inverse-time curve, no fixed cycle count
-    if (suf === 'T') return { short: `${short} (timed out)`, on: `${subj} stayed above the ${lvl} pickup long enough for this element's inverse-time curve to fully integrate — this is the output that actually feeds trip/output logic.`, off: `The ${lvl} inverse-time curve has not completed — either ${subj.toLowerCase()} never exceeded pickup, or it dropped back below pickup before the curve finished integrating.` };
-    if (suf === 'S') return { short: `${short} (timer running)`, on: `${subj} is currently above the ${lvl} pickup and this element's inverse-time integrator is actively accumulating toward a trip. How long it takes depends on how far above pickup the current is (per this element's curve shape and time-dial setting) — not a fixed delay.`, off: `${subj} is not currently above the ${lvl} pickup, so the inverse-time integrator isn't accumulating.` };
-    if (suf === 'R') return { short: `${short} (reset)`, on: `${subj} has dropped back below the ${lvl} pickup and this element's integrator has fully reset back to zero.`, off: `The integrator has not yet fully reset — it may still be counting down from a prior pickup.` };
-    return { short, on: `${subj} has exceeded the ${lvl} time-overcurrent pickup. This begins timing toward a trip along this element's inverse-time curve — the higher above pickup the current is, the faster it will time out (see the element's curve and time-dial setting for specifics).`, off: `${subj} is below the ${lvl} pickup — this element is not currently timing.` };
+  // ── SV logic/timer variables: explain from THIS relay's own equation and delays ──
+  let sm = label.match(/^SV(\d+)(T?)$/);
+  if (sm && P) {
+    const sv = (P.svSettings || []).find(s => s.num === parseInt(sm[1]));
+    if (sv) {
+      const comment = sv.equation.includes('#') ? sv.equation.split('#')[1].trim() : '';
+      const eq = sv.equation.split('#')[0].trim();
+      const puMs = (sv.pickupDelay / freq * 1000).toFixed(0);
+      const what = comment ? `${comment} (site-programmed logic ${sv.label})` : `Site-programmed logic variable ${sv.label}`;
+      if (sm[2] === 'T') return {
+        short: `${what} — timed output`,
+        on: `The logic condition "${eq}" has held true for the full ${sv.pickupDelay}-cycle (${puMs} ms) pickup delay. This timed output is what feeds downstream trip/output logic.`,
+        off: `The condition "${eq}" either isn't true right now, or hasn't yet held for the full ${sv.pickupDelay}-cycle delay.`,
+      };
+      return {
+        short: what,
+        on: `The logic condition "${eq}" is true right now. ${sv.pickupDelay > 0 ? `This starts the ${sv.pickupDelay}-cycle (${puMs} ms) timer toward ${sv.label}T.` : `With no pickup delay, ${sv.label}T follows immediately.`}`,
+        off: `The condition "${eq}" is not currently true${sv.pickupDelay > 0 ? `, so the timer toward ${sv.label}T isn't running (or has reset)` : ''}.`,
+      };
+    }
   }
 
-  // Definite-time families: 50, 67, 27, 59, 81
-  const delay = findElementDelayMs(P, base, freq);
-  const delayPhrase = delay ? `${delay.cycles} cycles (${delay.ms.toFixed(0)} ms)` : 'this element\'s configured time delay';
-  const verb = dev === '27' ? 'dropped below' : dev === '59' ? 'exceeded' : dev === '81' ? 'moved past' : 'exceeded';
-  const qty = dev === '27' || dev === '59' ? 'the ' + lvl + ' voltage threshold' : dev === '81' ? 'the ' + lvl + ' frequency threshold' : 'the ' + lvl + ' pickup';
-
-  if (suf === 'T') {
-    return { short: `${short} (timed out)`, on: `${subj} stayed past ${qty} for the full ${delayPhrase} — this is the output that actually feeds trip/output logic (as opposed to ${pairP}, the instantaneous condition alone).`, off: `The ${lvl} timer has not completed — either the condition cleared before the delay finished, or it never started.` };
-  }
-  // Pickup (no suffix, or "P")
-  return {
-    short,
-    on: `${subj} has ${verb} ${qty}. This starts a ${delayPhrase} timer${dev === '67' ? ', supervised by this element\'s configured direction,' : ''} — if the condition holds for the full delay, ${pairT} will assert and feed the trip logic.`,
-    off: `${subj} is back within normal range for this element — ${verb === 'dropped below' ? 'no longer below' : 'no longer past'} ${qty}.`,
+  // ── Specific, operationally-important named bits ──
+  const NAMED = {
+    TRIP: { short: 'Trip command', on: 'The relay is actively commanding its breaker/recloser to open — this is the final output of the trip logic.', off: 'No trip command is being issued.' },
+    TR: { short: 'Trip logic result', on: 'The trip equation is currently satisfied — this drives the TRIP command output.', off: 'The trip equation is not currently satisfied.' },
+    ULTRIP: { short: 'Unlatched trip', on: 'The unlatch/trip-release logic is active.', off: 'Unlatch condition not present.' },
+    '52A': { short: 'Breaker status — closed', on: 'The breaker/recloser auxiliary contact reports CLOSED.', off: 'The breaker/recloser reports OPEN.' },
+    '52B': { short: 'Breaker status — open (inverse contact)', on: 'The breaker/recloser reports OPEN (52B is the inverse of 52A).', off: 'The breaker/recloser reports CLOSED.' },
+    LOP: { short: 'Loss of potential detected', on: 'The relay believes one or more of its own voltage inputs has failed (e.g. blown PT fuse) — measured voltages are inconsistent in a way a real power-system event wouldn\u2019t produce. Voltage-based elements may be blocked or unreliable while this is set.', off: 'Voltage inputs look consistent — no loss-of-potential condition detected.' },
+    ER: { short: 'Event report trigger', on: 'The relay\u2019s event-recording condition fired — this is what caused a record like this file to be captured. It does not itself trip anything.', off: 'The event-record trigger condition is not active.' },
+    CLOSE: { short: 'Close command', on: 'The relay is commanding the breaker/recloser to close.', off: 'No close command is being issued.' },
+    CL: { short: 'Close logic result', on: 'The close equation is satisfied, driving the close command.', off: 'Close logic not satisfied.' },
+    CC: { short: 'Close command received (external)', on: 'An external/remote close command input is present.', off: 'No external close command present.' },
+    OC: { short: 'Open command received (external)', on: 'An external/remote open command input is present.', off: 'No external open command present.' },
+    '79RS': { short: 'Recloser — reset state', on: 'The reclosing sequence is in its normal, reset state (ready; no shots used).', off: 'The recloser is NOT in reset — it\u2019s mid-sequence (cycling) or locked out.' },
+    '79CY': { short: 'Recloser — cycling', on: 'A reclose sequence is actively in progress (the device tripped and is timing toward, or between, reclose attempts).', off: 'No reclose sequence in progress.' },
+    '79LO': { short: 'Recloser — lockout', on: 'The recloser is LOCKED OUT: it has used its programmed reclose attempts (or was driven to lockout) and will not close again without intervention.', off: 'The recloser is not locked out.' },
+    BFI: { short: 'Breaker-failure initiate', on: 'Breaker-failure timing has been started — the relay tripped and is now watching whether the breaker actually clears in time.', off: 'Breaker-failure scheme not initiated.' },
+    BFT: { short: 'Breaker-failure trip', on: 'The breaker FAILED to clear within the breaker-failure time — this output typically trips upstream/backup devices. A serious, device-health event.', off: 'No breaker-failure operation.' },
+    '50BF': { short: 'Breaker-failure current supervision', on: 'Current is still flowing above the breaker-failure threshold — used to judge whether the breaker actually opened.', off: 'Current is below the breaker-failure supervision threshold.' },
+    FAULT: { short: 'Fault indication', on: 'The relay\u2019s composite fault-detection logic is active — some protective element sees a fault-like condition.', off: 'No composite fault condition indicated.' },
+    LOCAL: { short: 'Local control mode', on: 'The device is in LOCAL control — remote/SCADA operate commands are typically blocked.', off: 'The device is in remote-permitted control.' },
+    REMTRIP: { short: 'Remote trip received', on: 'A trip command arrived from a remote device/communications channel — the trip originated elsewhere, not from this relay\u2019s own measurements.', off: 'No remote trip command present.' },
+    COMMLOSS: { short: 'Communications loss', on: 'A monitored communications channel is down.', off: 'Communications channel healthy.' },
+    FREQTRK: { short: 'Frequency tracking', on: 'The relay\u2019s sampling is actively tracking measured system frequency.', off: 'Frequency tracking inactive (e.g. voltage too low to track) — the relay falls back to nominal frequency.' },
   };
+  if (NAMED[label]) return NAMED[label];
+
+  // ── 81RF rate-of-change-of-frequency scheme bits ──
+  if (/^81RF/.test(label)) {
+    const sub = { '81RFT': ['timed out', 'Rate-of-change-of-frequency (df/dt) protection has timed out — frequency was moving fast enough, long enough, to operate.', 'df/dt element not timed out.'], '81RFP': ['pickup', 'Frequency is currently changing faster than the df/dt pickup threshold.', 'Frequency rate-of-change is below the pickup threshold.'], '81RFI': ['inhibit', 'The df/dt element is inhibited (e.g. low voltage).', 'df/dt element not inhibited.'], '81RFBL': ['blocked', 'The df/dt element is blocked by supervising logic.', 'df/dt element not blocked.'] }[label];
+    if (sub) return { short: `Rate-of-change-of-frequency (df/dt) — ${sub[0]}`, on: sub[1], off: sub[2] };
+    return { short: 'Rate-of-change-of-frequency (df/dt) scheme bit', on: 'This df/dt scheme condition is active.', off: 'This df/dt scheme condition is not active.' };
+  }
+
+  // ── Numbered protection elements — the full grammar ──
+  const m = label.match(/^(25|27|32|3?PWR|50|51|55|59|67|78|81)(PP|[ABCGNQPVSDIR])?(\d)?(RS|[PTRS])?$/);
+  if (m) {
+    const [, dev, qual, num, suf] = m;
+    const lvl = num ? `level ${num}` : '';
+    const base = label.replace(/(RS|[PTRS])$/, '');
+    const pairT = base + 'T';
+
+    // Subject + short name per device family and qualifier
+    const QUAL_WORD = { A: 'Phase A', B: 'Phase B', C: 'Phase C', G: 'ground/residual', N: 'neutral', Q: 'negative-sequence', P: 'phase (max of A/B/C)', V: 'voltage-polarized', PP: 'phase-to-phase', S: 'synchronism (Vs) terminal', I: 'independent element bank', D: '', R: 'rate-of-change' };
+    const qWord = qual ? (QUAL_WORD[qual] ?? qual) : '';
+
+    let famName, subj, verb, qty, kind = 'definite';
+    if (dev === '27') { famName = 'Undervoltage'; subj = qual === 'PP' ? 'A phase-to-phase voltage' : qual === 'S' ? 'The synchronism (Vs) input voltage' : qual === 'I' ? `Voltage (independent element ${num || ''})` : `${qWord ? qWord + ' ' : ''}voltage`; verb = 'dropped below'; qty = `the ${lvl} undervoltage threshold`; }
+    else if (dev === '59') { famName = 'Overvoltage'; subj = qual === 'PP' ? 'A phase-to-phase voltage' : qual === 'S' ? 'The synchronism (Vs) input voltage' : qual === 'G' ? 'Zero-sequence (3V0) voltage' : qual === 'Q' ? 'Negative-sequence voltage' : qual === 'I' ? `Voltage (independent element ${num || ''})` : `${qWord ? qWord + ' ' : ''}voltage`; verb = 'exceeded'; qty = `the ${lvl} overvoltage threshold`; }
+    else if (dev === '50') { famName = 'Instantaneous overcurrent'; subj = PHASE_SUBJECT[qual] || 'Current'; verb = 'exceeded'; qty = `the ${lvl} pickup`; }
+    else if (dev === '51') { famName = 'Time-overcurrent'; subj = PHASE_SUBJECT[qual] || 'Current'; kind = 'inverse'; }
+    else if (dev === '67') { famName = 'Directional overcurrent'; subj = PHASE_SUBJECT[qual] || 'Current'; verb = 'exceeded'; qty = `the ${lvl} pickup (in this element\u2019s supervised direction)`; }
+    else if (dev === '81' && qual === 'R') { famName = 'Frequency rate-of-change'; subj = 'The rate of frequency change (df/dt)'; verb = 'exceeded'; qty = `the ${lvl} df/dt setpoint`; }
+    else if (dev === '81') { famName = 'Frequency'; subj = 'System frequency'; verb = 'moved past'; qty = `the ${lvl} frequency setpoint (over- or under-frequency, per this element\u2019s setting)`; }
+    else if (dev === '25') { famName = 'Synchronism check'; subj = 'The two sides being compared'; return { short: `Synchronism check ${lvl}`.trim(), on: 'Voltage magnitude, angle, and slip across the device are all within the configured sync-check windows — closing is permitted by this element.', off: 'The two sides are NOT currently within the sync-check windows — this element is withholding close permission.' }; }
+    else if (dev === '55') { return { short: `Power factor element ${lvl}`.trim(), on: suf === 'T' ? 'Power factor stayed past its threshold for the full time delay.' : 'Power factor is currently past its configured threshold.', off: 'Power factor is within its normal configured range.' }; }
+    else if (dev === '78') { return { short: 'Vector shift / out-of-step element', on: 'A sudden voltage phase-angle jump (vector shift) beyond the setpoint was detected — commonly used for anti-islanding at DER sites.', off: 'No qualifying vector shift detected.' }; }
+    else if (/PWR/.test(dev)) { return { short: `Power element ${lvl}`.trim(), on: suf === 'T' ? `Measured power stayed past the ${lvl} threshold for the full delay — this output feeds trip/alarm logic.` : `Measured power is past the ${lvl} threshold${suf === 'P' ? `, starting the timer toward ${pairT}` : ''}.`, off: 'Measured power is within its normal configured range.' }; }
+    else if (dev === '32') { return { short: `Directional power element ${qWord} ${lvl}`.trim(), on: 'Power flow past this element\u2019s threshold, in its configured direction.', off: 'Power flow is not past this element\u2019s directional threshold.' }; }
+
+    if (famName) {
+      const short = `${famName} ${lvl}${qWord ? ' \u2014 ' + qWord : ''}`.replace(/\s+/g, ' ').trim();
+      if (kind === 'inverse') {
+        if (suf === 'T') return { short: `${short} (timed out)`, on: `${subj} stayed above the ${lvl} pickup long enough for this element's inverse-time curve to fully integrate \u2014 this is the output that actually feeds trip logic.`, off: `The inverse-time curve has not completed \u2014 either ${subj.toLowerCase()} never exceeded pickup, or it dropped back before the curve finished.` };
+        if (suf === 'R' || suf === 'RS') return { short: `${short} (reset)`, on: `${subj} dropped back below the ${lvl} pickup and the integrator has fully reset.`, off: `The integrator has not fully reset \u2014 it may still be counting down from a prior pickup.` };
+        return { short, on: `${subj} has exceeded the ${lvl} time-overcurrent pickup. Timing toward a trip follows this element's inverse-time curve \u2014 the further above pickup, the faster it times out.`, off: `${subj} is below the ${lvl} pickup \u2014 not timing.` };
+      }
+      const delay = findElementDelayMs(P, base, freq);
+      const delayPhrase = delay ? `${delay.cycles}-cycle (${delay.ms.toFixed(0)} ms)` : null;
+      if (suf === 'T') return { short: `${short} (timed out)`, on: `${subj} stayed past ${qty} for the full ${delayPhrase || 'configured'} delay \u2014 this is the output that feeds trip/output logic (unlike the instantaneous pickup alone).`, off: `The ${lvl} timer has not completed \u2014 the condition cleared early or never started.` };
+      if (suf === 'RS') return { short: `${short} (reset)`, on: `This element has fully reset after a prior operation.`, off: `This element has not reset.` };
+      return { short, on: `${subj} has ${verb} ${qty}. This starts ${delayPhrase ? 'a ' + delayPhrase : 'this element\u2019s configured'} timer \u2014 if the condition holds for the full delay, ${pairT} asserts and feeds the trip logic.`, off: `${subj} is back within normal range \u2014 no longer ${verb === 'dropped below' ? 'below' : 'past'} ${qty}.` };
+    }
+  }
+
+  // SV bit whose equation isn't in this file's parsed settings — still explain what SVs are.
+  if (sm) {
+    const isT = sm[2] === 'T';
+    return {
+      short: `Site-programmed logic variable SV${sm[1]}${isT ? ' \u2014 timed output' : ''}`,
+      on: isT ? `The site-programmed condition behind SV${sm[1]} held true for its full pickup delay. Its specific equation isn't included in this file \u2014 check this relay's settings for what SV${sm[1]} is programmed to represent.` : `The site-programmed condition behind SV${sm[1]} is currently true. Its equation isn't included in this file \u2014 check this relay's settings.`,
+      off: `The site-programmed condition behind SV${sm[1]} is not currently ${isT ? 'timed out' : 'true'}.`,
+    };
+  }
+
+  // ── Y/Z-terminal voltage elements (SEL-651R style: 27YB1, 59YN1, 27ZAB1T, 59YV1...) ──
+  let ym = label.match(/^(27|59)([YZ])(AB|BC|CA|[ABCNQVL])(\d)(RS|[PTRS])?$/);
+  if (ym) {
+    const [, dev, term, q, num, suf] = ym;
+    const isUV = dev === '27';
+    const qName = { A: 'Phase A', B: 'Phase B', C: 'Phase C', AB: 'A-B phase-to-phase', BC: 'B-C phase-to-phase', CA: 'C-A phase-to-phase', N: 'zero-sequence (3V0)', Q: 'negative-sequence', V: 'positive-sequence', L: 'line' }[q] || q;
+    const subj = `${qName} voltage on the ${term}-terminal`;
+    const thr = `the level ${num} ${isUV ? 'undervoltage' : 'overvoltage'} threshold`;
+    const short = `${isUV ? 'Undervoltage' : 'Overvoltage'} level ${num} \u2014 ${qName}, ${term}-terminal`;
+    const base = label.replace(/(RS|[PTRS])$/, '');
+    if (suf === 'T') return { short: `${short} (timed out)`, on: `${subj} stayed ${isUV ? 'below' : 'above'} ${thr} for the full configured delay \u2014 this output feeds trip/logic.`, off: `The timer has not completed \u2014 the condition cleared early or never started.` };
+    if (suf === 'RS') return { short: `${short} (reset)`, on: 'This element has fully reset after a prior operation.', off: 'This element has not reset.' };
+    return { short, on: `${subj} has ${isUV ? 'dropped below' : 'exceeded'} ${thr}. If it holds for the configured delay, ${base}T asserts and feeds the trip logic.`, off: `${subj} is back within normal range for this element.` };
+  }
+  // ── Forward/reverse overcurrent direction-supervision bits: 50GF, 50QR, 50NF... ──
+  let fm = label.match(/^50([PGQN])([FR])$/);
+  if (fm) {
+    const q = { P: 'phase', G: 'ground/residual', Q: 'negative-sequence', N: 'neutral' }[fm[1]];
+    const d = fm[2] === 'F' ? 'FORWARD' : 'REVERSE';
+    return { short: `${q} overcurrent \u2014 ${d.toLowerCase()}-direction supervision`, on: `${q[0].toUpperCase() + q.slice(1)} current above threshold AND flowing in the ${d} direction (per this relay's configured polarity) \u2014 enables the ${d.toLowerCase()}-looking directional elements.`, off: `Not currently above threshold in the ${d.toLowerCase()} direction.` };
+  }
+
+  // ── Non-element categories, each with meaningful ON/OFF ──
+  let dm = label.match(/^(F|R)?DIR([A-Z0-9]{1,3})$/) || label.match(/^([GQPN])(\d)DIR$/);
+  if (dm || /DIR$/.test(label) || /^(F|R)DIR/.test(label)) {
+    const fwd = /^F/.test(label) || /F$/.test(label.replace(/DIR.*/, ''));
+    return { short: `Directional decision \u2014 ${label}`, on: `The relay has determined flow direction for this quantity ${/^FDIR/.test(label) ? '(FORWARD, per this relay\u2019s configured polarity)' : /^RDIR/.test(label) ? '(REVERSE, per this relay\u2019s configured polarity)' : '(per this relay\u2019s configured polarity)'} \u2014 this supervises the associated directional (67/32) elements. Which physical direction \u201cforward\u201d means depends on this relay\u2019s CT/PT wiring and settings.`, off: 'This directional decision is not currently made in this direction (flow may be the other way, or too small to determine).' };
+  }
+  if (/^89/.test(label)) return { short: `Disconnect switch status/scheme point (${label})`, on: 'The switch position or scheme condition this point represents is currently TRUE (e.g. the monitored switch is in the indicated state). Which physical switch is site-configured.', off: 'The monitored switch/scheme condition is not in the indicated state.' };
+  if (/^(RMB|TMB)\d/.test(label)) return { short: `${label.startsWith('R') ? 'Received' : 'Transmitted'} communications bit ${label}`, on: `This ${label.startsWith('R') ? 'incoming' : 'outgoing'} MIRRORED BITS channel point is set \u2014 a status carried over a data link with another device, not a locally measured quantity. What it represents is defined by the paired device\u2019s configuration.`, off: 'This communications point is clear.' };
+  if (/^LT\d/.test(label)) return { short: `Latch bit ${label} (site-programmed)`, on: 'This latch has been SET by its site-programmed SET equation and stays set (through power cycles) until its RESET equation fires \u2014 it remembers a state rather than measuring one. Its meaning is defined in this site\u2019s settings.', off: 'This latch is reset/clear.' };
+  if (/^(LB|RB)\d/.test(label)) return { short: `${label.startsWith('LB') ? 'Local' : 'Remote'} control bit ${label}`, on: `This ${label.startsWith('LB') ? 'front-panel/local' : 'SCADA/remote'} control point is set \u2014 typically an operator-controlled enable/mode selection defined in this site\u2019s settings.`, off: 'This control point is clear.' };
+  if (/^VB\d/.test(label)) return { short: `Virtual bit ${label} (comms-mapped)`, on: 'This virtual point (typically mapped over communications, e.g. DNP/Modbus) is set. Its meaning is defined by the site\u2019s point map.', off: 'This virtual point is clear.' };
+  if (/^SG\d/.test(label)) return { short: `Settings group ${label.slice(2)} active`, on: `The relay is currently operating on settings group ${label.slice(2)}.`, off: 'This settings group is not the active one.' };
+  if (/^IN\d/.test(label)) return { short: `Physical input ${label}`, on: 'Voltage is present on this physical input terminal \u2014 whatever field device is wired to it (a breaker contact, switch, external relay) is closed/energized. The field meaning is per this site\u2019s wiring.', off: 'This input terminal is de-energized \u2014 the wired field contact is open.' };
+  if (/^OUT\d/.test(label)) return { short: `Physical output ${label}`, on: 'The relay is closing this output contact \u2014 driving whatever is wired to it (trip coil, close coil, alarm, SCADA point) per this site\u2019s wiring.', off: 'This output contact is open/idle.' };
+  if (/^PB\d+(_PUL)?$/.test(label) || /_LED$/.test(label) || /^T\d\d_LED$/.test(label) || /^TLED/.test(label)) return { short: `Front-panel ${/LED/.test(label) ? 'LED/target' : 'pushbutton'} ${label}`, on: /LED/.test(label) ? 'This front-panel LED/target is lit.' : 'This front-panel pushbutton is currently pressed (or its pulse just fired).', off: /LED/.test(label) ? 'This LED/target is dark.' : 'This pushbutton is not pressed.' };
+  if (/^RTD/.test(label)) return { short: `Temperature (RTD) point ${label}`, on: label.endsWith('T') ? 'An RTD temperature has exceeded its TRIP threshold.' : label.endsWith('A') ? 'An RTD temperature has exceeded its ALARM threshold.' : 'This RTD status condition is active.', off: 'This RTD condition is not active \u2014 temperature within limits (or input not in that state).' };
+  if (/^TH/.test(label)) return { short: `Thermal-model point ${label}`, on: 'The relay\u2019s thermal overload model has reached the state this point represents (alarm/trip/level).', off: 'The thermal model is not in this state.' };
+  if (/^(HIF|AFS)/.test(label)) return { short: `High-impedance/arc-fault detection point ${label}`, on: 'The harmonic-based high-impedance/arcing fault algorithm is reporting this condition (e.g. suspected downed conductor or arcing).', off: 'This arc/high-impedance condition is not being reported.' };
+  if (/^(TUTC|TSNTP|PTP|TIRIG|IRIGOK|TSOK|TQUAL|DST|LPSEC)/.test(label)) return { short: `Time-sync status ${label}`, on: 'This clock-synchronization status is true (relates to the relay\u2019s time source quality, not any electrical quantity).', off: 'This clock-sync status is false.' };
+  if (/^SC\d+Q[UD]$/.test(label)) return { short: `Counter ${label.slice(0, 4)} \u2014 count-${label.endsWith('QU') ? 'up' : 'down'} input`, on: `The site-programmed condition that ${label.endsWith('QU') ? 'increments' : 'decrements'} this counter is currently true.`, off: 'The counter input condition is not true.' };
+  if (/^(DNAUX|DNP)/.test(label)) return { short: `SCADA/DNP auxiliary point ${label}`, on: 'This SCADA-mapped auxiliary point is set, per the site\u2019s DNP point map.', off: 'This SCADA point is clear.' };
+
+  // ── Fall back to the static dictionary, with honest generic ON/OFF ──
+  if (TOOLTIPS[label]) return { short: TOOLTIPS[label], on: 'The condition just described is currently true/active on this device.', off: 'The condition described is not currently active.' };
+  return null;
 }
 
 // Generate tooltip for SV elements dynamically from parsed data
