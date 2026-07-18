@@ -1,48 +1,71 @@
-# CEV Trip Analyzer
+# CEV Trip Analyzer — What It Does and Why It Matters
 
-A self-contained, browser-only tool for analyzing SEL relay CEV event files. No server,
-no build step, no dependencies to install — it's a single HTML file that runs entirely
-in the browser. That also makes it trivial to host for free on GitHub Pages.
+## What it is
 
-## Deploying this (step by step, no GitHub experience required)
+A browser-based tool that reads SEL relay CEV event files and tells you, in plain language,
+*why* a recloser or breaker actually tripped — not just which relay word bit fired, but the
+full causal chain back through the relay's own SELogic equations to the real field condition
+that started it. It runs entirely client-side: no server, no data leaving the browser, and no
+install — drop in a `.CEV` file and it's parsed and analyzed instantly.
 
-### 1. Create a repository
-1. Go to https://github.com and log in (or create a free account).
-2. Click the **+** icon in the top-right corner → **New repository**.
-3. Give it a name (e.g. `cev-trip-analyzer`).
-4. Set it to **Public** (required for free GitHub Pages).
-5. Leave everything else as default and click **Create repository**.
+## Core capability: real root-cause tracing, not a settings dump
 
-### 2. Upload the files
-1. On your new (empty) repository's page, click **uploading an existing file**
-   (or **Add file → Upload files** if you don't see that link).
-2. Drag in both files from this folder:
-   - `index.html`
-   - `.nojekyll`
-3. Scroll down and click **Commit changes**.
+Most event-viewer tools show you the digital word and let you go read the settings sheet
+yourself. This tool actually **evaluates the relay's own trip equation** — parsing the SELogic
+text, walking AND/OR/NOT structure, and resolving it against the real digital transitions in
+the file — to identify the specific element or logic path that fired, anchored to the exact
+instant the relay's own TRIP bit asserted (not a re-derived approximation that can drift).
 
-   > Note: `.nojekyll` has no name before the dot and no visible content — that's
-   > correct. Some file pickers hide it since it's a "hidden" file type; if it doesn't
-   > show up when dragging from a folder, you can also create it directly on GitHub:
-   > **Add file → Create new file**, name it `.nojekyll`, leave it empty, and commit.
+That resolution is substitutive: if the trip equation references an internal SV (SEL's timer/
+logic variable), the tool doesn't stop there — it follows that SV's own equation, and the one
+inside that, all the way down to real, measured protection elements or field status points.
 
-### 3. Turn on GitHub Pages
-1. In your repository, click **Settings** (top menu).
-2. In the left sidebar, click **Pages**.
-3. Under **Build and deployment → Source**, choose **Deploy from a branch**.
-4. Under **Branch**, select **main** and folder **/ (root)**, then click **Save**.
-5. Wait 30–60 seconds, then refresh the page. A green box will appear with your live
-   URL, something like:
-   `https://your-username.github.io/cev-trip-analyzer/`
+## The branching logic diagram
 
-That's it — that URL is now the live tool. Anyone with the link can open it and drop in
-CEV files; nothing is installed or uploaded to a server, since all parsing happens in
-the visitor's own browser.
+Instead of a flat "A → B → C tripped" summary, the tool renders the actual logic structure as
+a left-to-right diagram: AND conditions show every required side (so a supervisory condition
+like "AND 52A closed" isn't silently dropped), OR conditions collapse to just the branch that
+actually fired, and the whole thing traces from the earliest contributing condition through to
+the final trip command. It's pruned to show only what actually happened — no wading through
+a dozen alternative conditions that never mattered for this specific event.
 
-## Updating it later
+## Catching what a quick read would get wrong
 
-Whenever you want to push a new version of the tool:
-1. Go to the repository on GitHub and open `index.html`.
-2. Click the pencil (✏️) icon to edit, or use **Add file → Upload files** to replace it
-   with a new version.
-3. Commit the change — GitHub Pages will redeploy automatically within about a minute.
+This is the part aimed squarely at reducing misdiagnosis:
+
+- **Logic/status-driven trips** are called out explicitly when no real voltage/current/frequency
+  element operated — so a trip driven by an internal latch or breaker-status bit doesn't get
+  mistaken for a "real" protection operation just because the waveform nearby looks fault-like.
+- **Breaker-already-open detection** flags trips that didn't actually interrupt any load or
+  fault current, which changes what question you should even be asking about the event.
+- **Loss-of-potential detection** compares each phase's voltage against its own current: if a
+  phase's voltage reads near-zero while that same phase's current stays normal and in line with
+  the other phases, that's the signature of a blown PT fuse or bad voltage input — not a real
+  fault — and the tool says so instead of letting it pass as a three-phase undervoltage trip.
+- A dynamic equation evaluator correctly separates conditions that are structurally present in
+  an equation from ones that actually contributed to the result at that moment, so a stale,
+  always-true supervisory bit doesn't get blamed over the real, just-changed cause.
+
+## Interactive waveform review
+
+Current, voltage, and the fault-relevant derived quantity (zero-sequence voltage, negative-
+sequence current, frequency — whichever actually matters for that trip's cause) render as
+linked charts, synchronized with a Trip/Trigger reference and a digital SV/flag timeline.
+Scroll to zoom and drag to pan — synced across all charts at once — and drop a draggable
+measurement cursor anywhere to read exact values off every trace simultaneously, SynchroWAVe-
+style, with callout labels that reposition themselves to never cover the data they're describing.
+
+## The net effect for operators
+
+- **Faster triage**: the headline cause is the *resolved* cause, not a relay-word name someone
+  has to go cross-reference against a settings sheet.
+- **Fewer false conclusions**: the investigation flags exist specifically to stop a plausible-
+  looking but wrong read of an event — "it looks like undervoltage" vs. "an instrumentation
+  channel failed" vs. "the breaker was already open" are very different follow-ups, and the
+  tool tells you which one you're actually looking at.
+- **Less relay-logic literacy required**: understanding *why* SV28 tripped no longer requires
+  manually tracing three levels of nested SELogic by hand — the tool has already done that
+  walk and shows the result as a diagram.
+- **Consistent methodology across events and sites**: every event gets the same rigorous
+  equation-resolution and cross-check treatment, rather than depending on whoever happens to
+  be reading the event that day.
