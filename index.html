@@ -2803,17 +2803,27 @@ function analyzeCEV(P, prevEvent) {
     // A real fault/open conductor shows up in BOTH V and I together on that phase. A dead
     // voltage channel next to a normal current channel means the voltage MEASUREMENT failed
     // (blown PT fuse, disconnected VT, bad input) — not an actual system condition.
+    // CRITICAL DISTINCTION: a real close-in single-line-to-ground fault ALSO collapses that
+    // phase's voltage to near zero — but with its current ELEVATED well above the healthy
+    // phases. What separates LOP from a real fault is that in LOP the current is UNCHANGED:
+    // normal in magnitude relative to its siblings AND relative to its own pre-fault level.
+    // Both upper-bound checks below are therefore load-bearing, not optional.
     const yV = A.voltages?.yTerminal;
     if (yV) {
       const phases = ['A', 'B', 'C'];
       const vVal = ph => yV[`V${ph}`]?.fault?.secondaryV ?? null;
       const iVal = ph => A.currents?.[`I${ph}`]?.fault?.secA ?? null;
+      const iPreVal = ph => A.currents?.[`I${ph}`]?.preFault?.secA ?? null;
       phases.forEach(ph => {
         const others = phases.filter(p => p !== ph);
-        const v = vVal(ph), i = iVal(ph);
+        const v = vVal(ph), i = iVal(ph), iPre = iPreVal(ph);
         const otherVAvg = others.reduce((s, p) => s + (vVal(p) || 0), 0) / others.length;
         const otherIAvg = others.reduce((s, p) => s + (iVal(p) || 0), 0) / others.length;
-        if (v != null && i != null && otherVAvg > 5 && v < otherVAvg * 0.1 && otherIAvg > 0.05 && i > otherIAvg * 0.4) {
+        const iNotElevated = i != null && i < otherIAvg * 2.5;                 // a real SLG fault spikes I well past siblings
+        const iUnchanged = (iPre == null || iPre < 0.02) ? true                // no meaningful pre-fault load to compare against
+          : (i / iPre > 0.5 && i / iPre < 2);                                  // LOP leaves current essentially undisturbed
+        if (v != null && i != null && otherVAvg > 5 && v < otherVAvg * 0.1
+            && otherIAvg > 0.05 && i > otherIAvg * 0.4 && iNotElevated && iUnchanged) {
           A.investigationFlags.push({
             severity: 'high',
             title: `Possible Loss of Potential — V${ph} Reads Near-Zero While I${ph} Doesn't`,
@@ -2868,12 +2878,19 @@ function analyzeCEV(P, prevEvent) {
               detail: `${bkrLabel} did not confirm open until ${delayMs.toFixed(0)} ms (~${delayCyc.toFixed(1)} cycles) after the trip command — well beyond a healthy interrupter's typical clearing time. This points at the breaker/recloser mechanism itself (contact wear, low trip-coil/control-power energy, a sticking operating mechanism) rather than anything on the utility side.`,
             });
           }
-        } else if (digitalTransitions.length > boundary + 1) {
-          A.investigationFlags.push({
-            severity: 'high',
-            title: 'Breaker Did Not Confirm Open After Trip',
-            detail: `A trip was commanded, but ${bkrLabel} never shows an open confirmation for the remainder of this record. Worth checking the breaker/recloser mechanism directly — this is a device-health question, not an electrical one.`,
-          });
+        } else {
+          // No open confirmation found — but only claim failure if the record actually
+          // extends long enough past the trip to have captured a normal opening. A record
+          // that ends 2 cycles after the trip command simply can't distinguish "breaker
+          // failed" from "breaker opened right after the recording stopped."
+          const recordEndMs = (analogData.length - 1 - tripTransition.analogSampleIdx) * msPerSampleFlag;
+          if (recordEndMs > 10 * (1000 / freq)) {
+            A.investigationFlags.push({
+              severity: 'high',
+              title: 'Breaker Did Not Confirm Open After Trip',
+              detail: `A trip was commanded, but ${bkrLabel} never shows an open confirmation in the ${recordEndMs.toFixed(0)} ms of record following the trip — well beyond a healthy interrupter's clearing time. Worth checking the breaker/recloser mechanism directly — this is a device-health question, not an electrical one.`,
+            });
+          }
         }
       }
 
@@ -2892,7 +2909,7 @@ function analyzeCEV(P, prevEvent) {
           A.investigationFlags.push({
             severity: 'medium',
             title: 'Voltage Present With Breaker Open — Possible DER Backfeed/Islanding',
-            detail: `${bkrLabel} reads open, but ${highPhases.map(x => `V${x.ph} (${x.v.toFixed(1)} V sec, ${(x.v / VNOM * 100).toFixed(0)}% of nominal)`).join(', ')} ${highPhases.length > 1 ? 'have' : 'has'} not collapsed. On a properly de-energized, open section this should read near zero — a sustained reading suggests on-site generation is still energizing this side of the open point, which is a DER/anti-islanding response question rather than a utility-side condition.`,
+            detail: `${bkrLabel} reads open, but ${highPhases.map(x => `V${x.ph} (${x.v.toFixed(1)} V sec, ${(x.v / VNOM * 100).toFixed(0)}% of nominal)`).join(', ')} ${highPhases.length > 1 ? 'have' : 'has'} not collapsed. If these PTs are on the generation side of the open point, a de-energized section should read near zero — a sustained reading would mean on-site generation is still energizing this side, a DER/anti-islanding response question rather than a utility-side condition. If instead the PTs are on the utility source side of this device, voltage with the breaker open is expected and this is not an anomaly — the PT location determines which reading applies.`,
           });
         }
       }
@@ -3296,6 +3313,24 @@ function computeFundamentalPhasors(samples, N) {
   return { re, im };
 }
 
+// Zero-sequence magnitude series (3V0 = |Va + Vb + Vc| at FUNDAMENTAL frequency) from three
+// phase sample arrays. Uses the same one-cycle DFT phasors as the negative-sequence transform,
+// which inherently rejects DC offset and all harmonics — including the triplen harmonics that
+// are themselves zero-sequence and would otherwise contaminate a raw instantaneous sum.
+function computeZeroSeqMagnitude(sA, sB, sC, N) {
+  const pA = computeFundamentalPhasors(sA, N);
+  const pB = computeFundamentalPhasors(sB, N);
+  const pC = computeFundamentalPhasors(sC, N);
+  const n = sA.length;
+  const mag = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    const re = pA.re[i] + pB.re[i] + pC.re[i];
+    const im = pA.im[i] + pB.im[i] + pC.im[i];
+    mag[i] = Math.sqrt(re * re + im * im);
+  }
+  return mag;
+}
+
 // Negative-sequence magnitude series from three phase sample arrays, via the Fortescue
 // transform V2 = (Va + a²·Vb + a·Vc)/3 where a = 1∠120°. Formula convention verified
 // against a synthetic three-phase signal with a known injected 20∠30° negative-sequence
@@ -3432,8 +3467,12 @@ function computeConsistencyCheck(P, A, kind) {
   let vMag, vLabel, vPickupPatterns, iMag, iLabel, iPickupPatterns, hasCurrentChannel;
 
   if (kind === 'zero') {
-    const sum = data.map(r => (r.VAY || 0) + (r.VBY || 0) + (r.VCY || 0));
-    vMag = computeRmsMagnitude(sum, samplesPerCycle);
+    // 3V0 must be computed from FUNDAMENTAL phasors, not the raw instantaneous sum: triplen
+    // harmonics (3rd, 9th, ...) are themselves zero-sequence and add constructively in a raw
+    // sum — and inverter-based sites carry exactly that harmonic content. The relay's 59N/59G
+    // element responds to fundamental 3V0 only, so a raw-sum RMS inflated by harmonics would
+    // be compared against a pickup that never sees that content — a false-flag mechanism.
+    vMag = computeZeroSeqMagnitude(data.map(r => r.VAY), data.map(r => r.VBY), data.map(r => r.VCY), samplesPerCycle);
     vLabel = '3V0';
     vPickupPatterns = ['59YN#P', '59N#P', '59G#P', '59GN#P', '59G#AP'];
     hasCurrentChannel = data.some(r => Math.abs(r.IG || 0) > 0.001) ? 'IG'
@@ -3533,8 +3572,44 @@ function computeConsistencyCheck(P, A, kind) {
 
   // Flag only on a genuine, sustained mismatch — not a momentary blip, and not when the
   // voltage side is itself negligible (avoids flagging pure noise on a quiet, healthy file).
+  //
+  // TWO PHYSICS GATES, both mandatory:
+  //
+  // 1) Breaker must have been CLOSED for the majority of this record. Sequence voltage with
+  //    zero corresponding current through an OPEN breaker is expected — no current flows
+  //    through an open device, full stop. Without this gate, a backfeed event on an already-
+  //    open recloser (voltage present from the generation side, correctly zero current) would
+  //    be mislabeled as a CT/grounding wiring problem.
+  //
+  // 2) For the ZERO-sequence check specifically, the settings must contain a ground
+  //    overcurrent pickup (iRefIsPickup). Its presence indicates the design expects a ground-
+  //    current path to exist. On an ungrounded-by-design system — e.g. a solar collector
+  //    system behind a delta GSU winding, which is exactly why 59N protection is applied at
+  //    such sites — a ground fault legitimately produces large 3V0 with essentially NO ground
+  //    current. That is correct physics, not a wiring defect, and without this gate every
+  //    legitimate 59N operation on such a system would be falsely flagged (the fallback
+  //    reference would compare IG against phase load current, which is meaningless there).
+  //    Negative-sequence is exempt from gate 2: I2 flows for any unbalance in any 3-wire
+  //    system, so a V2-without-I2 mismatch is meaningful regardless of grounding design.
+  const bkr = ['52A3P', '52A'].find(l => (P.digitalLabels || []).includes(l));
+  let breakerClosedMajority = true; // if no breaker status channel exists, don't block on it
+  if (bkr && P.analogData?.length) {
+    let closed = (P.initialDigitalState || []).includes(bkr);
+    let closedSamples = 0, prevIdx = 0;
+    for (const t of (P.digitalTransitions || [])) {
+      const idx = Math.min(t.analogSampleIdx ?? 0, P.analogData.length - 1);
+      if (closed) closedSamples += idx - prevIdx;
+      const ch = t.changes.find(c => c.label === bkr);
+      if (ch) closed = ch.asserted;
+      prevIdx = idx;
+    }
+    if (closed) closedSamples += (P.analogData.length - 1) - prevIdx;
+    breakerClosedMajority = closedSamples / P.analogData.length > 0.5;
+  }
+  const groundPathExpected = kind !== 'zero' || iRefIsPickup;
   const flagged = vSustainedPct != null && iSustainedPct != null
-    && vSustainedPct >= 40 && iSustainedPct <= 8;
+    && vSustainedPct >= 40 && iSustainedPct <= 8
+    && breakerClosedMajority && groundPathExpected;
 
   return {
     kind, vLabel, iLabel,
@@ -3542,7 +3617,7 @@ function computeConsistencyCheck(P, A, kind) {
     vPickupSec, iPickupSec, vPickupPrimary, iPickupPrimary,
     vRefIsPickup, iRefIsPickup,
     vSustainedPct, vPeakPct, iSustainedPct, iPeakPct,
-    flagged,
+    flagged, breakerClosedMajority, groundPathExpected,
   };
 }
 
@@ -4300,6 +4375,17 @@ function renderConsistencyCheckBlock(check, opts) {
       proportional ${check.iLabel} — this large a gap is consistent with a disconnected or miswired
       ${check.kind === 'zero' ? 'grounding transformer or ground CT' : 'current-sensing circuit, or an open phase'},
       rather than the current genuinely being absent.
+    </p>`;
+  } else if (check.vSustainedPct != null && check.iSustainedPct != null
+             && check.vSustainedPct >= 40 && check.iSustainedPct <= 8) {
+    // The raw numbers show a mismatch, but a physics gate determined it isn't evidence of a
+    // wiring problem in this specific situation — say why, rather than showing a bare pass.
+    const reason = !check.breakerClosedMajority
+      ? `the breaker was open for most of this record, and no current flows through an open device regardless of the voltage present — so the missing ${check.iLabel} is expected here, not a wiring defect`
+      : `no ground overcurrent pickup exists in this relay's settings, which indicates this system isn't designed to carry ground current (e.g. behind a delta winding) — elevated ${check.vLabel} with no ${check.iLabel} is the expected, correct behavior on such a system, and is exactly why voltage-based ground protection is applied there`;
+    html += `<p style="margin-top:8px;font-size:${compact ? '11px' : '12px'};color:var(--text-muted);line-height:1.5;">
+      Note: ${check.vLabel} is elevated (${check.vSustainedPct.toFixed(0)}% of reference) with ${check.iLabel} near zero,
+      but this is not flagged as a wiring inconsistency because ${reason}.
     </p>`;
   }
 
