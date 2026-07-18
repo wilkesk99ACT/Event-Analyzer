@@ -1307,6 +1307,18 @@ function parseCEV(text, fileName) {
     const raw = lines[dataHdrIdx].replace(/"/g, '');
     const parts = raw.split(',');
     R.analogChannels = [];
+    // Raw, POSITION-PRESERVING name→column-index map (unlike R.analogChannels below, which
+    // drops "*" placeholder columns for display purposes). Some formats (e.g. SEL-751) place
+    // several "*" placeholder columns between the last named channel and FREQ — filtering
+    // those out before computing indices silently shifted every subsequent lookup (FREQ ended
+    // up reading one of the placeholder columns instead, always 0, regardless of the real
+    // frequency recorded later in the row).
+    R.analogColIndex = {};
+    for (let j = 0; j < parts.length; j++) {
+      const name = parts[j].trim();
+      const clean = name.replace(/\(.*\)/, '').trim().toUpperCase();
+      if (clean && clean !== '*' && !(clean in R.analogColIndex)) R.analogColIndex[clean] = j;
+    }
     let digitalPartIdx = -1;
     // Find where TRIG column is — digital labels follow
     for (let j = 0; j < parts.length; j++) {
@@ -1356,10 +1368,12 @@ function parseCEV(text, fileName) {
     const parts = line.split(',');
     if (parts.length < 5) break;
 
-    // Map columns dynamically based on channel names
+    // Map columns dynamically based on channel names, using the RAW header position map
+    // (R.analogColIndex) rather than the filtered display list — see the comment where
+    // analogColIndex is built for why that distinction matters.
     const getCol = (name) => {
-      const idx = chanNames.indexOf(name);
-      return idx >= 0 && idx < parts.length ? parseFloat(parts[idx]) || 0 : 0;
+      const idx = R.analogColIndex ? R.analogColIndex[name] : chanNames.indexOf(name);
+      return (idx != null && idx >= 0 && idx < parts.length) ? parseFloat(parts[idx]) || 0 : 0;
     };
 
     const row = {
