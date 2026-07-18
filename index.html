@@ -3420,10 +3420,56 @@ function renderMagnitudeChartSVG(traces, opts) {
       const longestChars = Math.max(...rows.map(r => r.label.length + r.text.length));
       const boxW = Math.min(plotW - 10, Math.max(opts.compact ? 88 : 108, longestChars * boxFont * 0.62 + swatch + padX * 2 + 10));
       const boxH = rows.length * rowH + padY * 2;
-      let boxX = x + 9;
-      if (boxX + boxW > marginLeft + plotW) boxX = x - boxW - 9;
-      boxX = Math.max(marginLeft + 2, boxX);
-      const boxY = marginTop + 4;
+
+      // Find real clearance for a candidate box x-position: look at what the traces actually
+      // do across that specific horizontal span (not just near the trip line — a bump right at
+      // the trip instant is often exactly when the trace is busiest, so the only genuinely
+      // clear band can be well before or after it), and return the best of placing above vs.
+      // below that span's data.
+      function clearanceAt(bx) {
+        const idxStart = Math.max(0, Math.floor((bx - marginLeft) / plotW * (n - 1)));
+        const idxEnd = Math.min(n - 1, Math.ceil((bx + boxW - marginLeft) / plotW * (n - 1)));
+        let dataMinY = Infinity, dataMaxY = -Infinity;
+        for (let i = idxStart; i <= idxEnd; i++) {
+          traces.forEach(t => {
+            const v = t.values[i];
+            if (v != null && isFinite(v)) {
+              const py = yScale(v);
+              if (py < dataMinY) dataMinY = py;
+              if (py > dataMaxY) dataMaxY = py;
+            }
+          });
+        }
+        if (dataMinY === Infinity) { dataMinY = marginTop; dataMaxY = marginTop; }
+        const topClearance = dataMinY - marginTop, bottomClearance = (marginTop + plotH) - dataMaxY;
+        const useTop = topClearance >= bottomClearance;
+        return { useTop, score: (useTop ? topClearance : bottomClearance) - boxH, dataMinY, dataMaxY };
+      }
+
+      const clamp = bx => Math.max(marginLeft + 2, Math.min(marginLeft + plotW - boxW - 2, bx));
+      // Candidates: right/left of the trip line first (keeps the box near the point it
+      // describes whenever there's room), then the plot's far left/right edges as a fallback
+      // for when the trip instant itself is too busy on both sides to fit the box.
+      const candidateXs = [clamp(x + 9), clamp(x - boxW - 9), clamp(marginLeft + 4), clamp(marginLeft + plotW - boxW - 4)];
+      let best = null;
+      for (const bx of candidateXs) {
+        const c = clearanceAt(bx);
+        if (!best || c.score > best.score) best = Object.assign({ bx }, c);
+      }
+      const boxX = best.bx;
+      const boxY = best.useTop
+        ? Math.max(marginTop + 4, Math.min(marginTop + plotH - boxH - 4, best.dataMinY - boxH - 6))
+        : Math.max(marginTop + 4, Math.min(marginTop + plotH - boxH - 4, best.dataMaxY + 6));
+
+      // If the clearest spot ended up well away from the trip line itself, draw a thin dotted
+      // leader so it's still visually tied to the point it's describing.
+      let leader = '';
+      if (Math.abs(boxX - x) > boxW + 20) {
+        const leaderX = boxX < x ? boxX + boxW : boxX;
+        const leaderY = boxY + boxH / 2;
+        leader = `<line x1="${x.toFixed(1)}" y1="${leaderY.toFixed(1)}" x2="${leaderX.toFixed(1)}" y2="${leaderY.toFixed(1)}" stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="1,3"/>`;
+      }
+
       let rowsSvg = '';
       rows.forEach((r, i) => {
         const ry = boxY + padY + i * rowH + rowH * 0.72;
@@ -3431,7 +3477,7 @@ function renderMagnitudeChartSVG(traces, opts) {
         rowsSvg += `<text x="${(boxX + padX + swatch + 5).toFixed(1)}" y="${ry.toFixed(1)}" font-size="${boxFont}" fill="var(--text-dim)">${r.label}</text>`;
         rowsSvg += `<text x="${(boxX + boxW - padX).toFixed(1)}" y="${ry.toFixed(1)}" text-anchor="end" font-size="${boxFont}" font-weight="600" fill="${r.color}">${r.text}</text>`;
       });
-      markers += `<rect x="${boxX.toFixed(1)}" y="${boxY.toFixed(1)}" width="${boxW.toFixed(1)}" height="${boxH.toFixed(1)}" fill="rgba(6,9,15,0.94)" stroke="var(--card-border)" stroke-width="1" rx="4"/>${rowsSvg}`;
+      markers += leader + `<rect x="${boxX.toFixed(1)}" y="${boxY.toFixed(1)}" width="${boxW.toFixed(1)}" height="${boxH.toFixed(1)}" fill="rgba(6,9,15,0.94)" stroke="var(--card-border)" stroke-width="1" rx="4"/>${rowsSvg}`;
     }
     markers += dots;
   }
