@@ -332,6 +332,90 @@ body.dragging-file #drop-overlay { display: flex; }
   flex-shrink: 0;
 }
 
+/* ── Branching logic tree ── */
+.logic-tree-block {
+  margin: 14px 0;
+  padding: 12px 14px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+}
+.logic-tree-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+.logic-tree-title {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.logic-tree-comment {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.logic-tree-other {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  font-style: italic;
+}
+.logic-tree-body {
+  margin-top: 8px;
+  overflow-x: auto;
+}
+.logic-node {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  vertical-align: top;
+}
+.logic-leaf {
+  padding: 6px 11px;
+  border-radius: 6px;
+  border: 1px solid var(--card-border);
+  background: var(--bg2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.logic-leaf.is-true {
+  border-color: var(--green);
+  background: var(--green-dim);
+  color: var(--green);
+  font-weight: 600;
+}
+.logic-group-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 5px;
+  text-align: center;
+}
+.logic-group-label.is-true { color: var(--red); }
+.logic-and-children, .logic-or-children {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 10px 6px;
+  border-radius: 7px;
+}
+.logic-and-children { border: 1px dashed var(--card-border); }
+.logic-or-children { flex-direction: column; border-left: 2px solid var(--card-border); padding-left: 12px; }
+.logic-or-children.has-live { border-left-color: var(--red); }
+.logic-prefix {
+  font-size: 9.5px;
+  font-family: var(--mono);
+  color: var(--yellow);
+  margin-bottom: 3px;
+  text-align: center;
+}
+
 .trip-timing {
   display: flex;
   gap: 20px;
@@ -1416,6 +1500,55 @@ function analyzeCEV(P, prevEvent) {
   // approximation of an edge, which is the best we can do from the settings alone, and
   // is correct for cause attribution (the operand did assert at some point in the record).
 
+  // Split a top-level OR chain into its independent branches (e.g. "A OR B OR C" → [A,B,C]).
+  // A trip equation is very often a long flat disjunction of unrelated conditions; only ONE
+  // branch usually matters for a given event, so this lets us isolate and render just that
+  // branch's own internal AND/OR/NOT structure without exploding every sibling condition too.
+  function splitTopOr(node) {
+    if (!node) return [];
+    if (node.op === 'OR') return [...splitTopOr(node.l), ...splitTopOr(node.r)];
+    return [node];
+  }
+
+  function astContainsToken(node, name) {
+    if (!node) return false;
+    switch (node.op) {
+      case 'VAR': return node.name === name;
+      case 'NOT': case 'REDGE': case 'FEDGE': return astContainsToken(node.c, name);
+      case 'AND': case 'OR': return astContainsToken(node.l, name) || astContainsToken(node.r, name);
+      default: return false;
+    }
+  }
+
+  // Evaluate an AST into a static, already-resolved tree (every node carries its own boolean
+  // value at the moment being analyzed) so the UI layer can render it as a branching diagram
+  // without needing to re-run any logic — it just walks this plain object. AND nodes always
+  // keep both children (an AND's OTHER side is exactly the context that's easy to miss in a
+  // flat description — e.g. a supervisory condition like "AND 52A" — so it's never collapsed).
+  function bakeLogicTree(node, isAsserted) {
+    if (!node) return null;
+    switch (node.op) {
+      case 'VAR': return { op: 'VAR', name: node.name, value: !!isAsserted(node.name) };
+      case 'NOT': {
+        const c = bakeLogicTree(node.c, isAsserted);
+        return { op: 'NOT', value: !c.value, child: c };
+      }
+      case 'REDGE': case 'FEDGE': {
+        const c = bakeLogicTree(node.c, isAsserted);
+        return { op: node.op, value: c.value, child: c };
+      }
+      case 'AND': {
+        const l = bakeLogicTree(node.l, isAsserted), r = bakeLogicTree(node.r, isAsserted);
+        return { op: 'AND', value: l.value && r.value, children: [l, r] };
+      }
+      case 'OR': {
+        const l = bakeLogicTree(node.l, isAsserted), r = bakeLogicTree(node.r, isAsserted);
+        return { op: 'OR', value: l.value || r.value, children: [l, r] };
+      }
+      default: return { op: '?', value: false };
+    }
+  }
+
   const EDGE_OPS = new Set(['R_TRIG', 'F_TRIG', 'R_TRIGGER', 'F_TRIGGER']);
 
   // Pretty-print an AST back to SEL-ish text, for display in explanations (e.g. "blocked by
@@ -1778,7 +1911,7 @@ function analyzeCEV(P, prevEvent) {
 
     let allElements = [...new Set(directElements)];
     let allNegElements = [...new Set(directNegElements)];
-    let allSvPath = [{ label: sv.label, equation: sv.equation, pickupDelay: sv.pickupDelay, comment }];
+    let allSvPath = [{ label: sv.label, equation: sv.equation, equationText: eq, pickupDelay: sv.pickupDelay, comment, ast: parseEq(tokenizeEq(eq)) }];
 
     for (const ref of svRefs) {
       const childNum = parseInt(ref.replace(/SV|T/g, ''));
@@ -1993,7 +2126,7 @@ function analyzeCEV(P, prevEvent) {
   // whatever final "command issued" node it needs (TRIP vs ER) on top of causeChain.
   function classifyImmediateCauseTerm(immediateCause, immediateCauseNegated) {
     let causeText = '', causeDetail = '', causeChain = [], family = null;
-    let isNonProtection = false, resolvedNegElements = [];
+    let isNonProtection = false, resolvedNegElements = [], resolvedSvPath = [];
     const svMatch = immediateCause.match(/^SV(\d+)T?$/);
     const ocMatch = immediateCause.match(/^(5[01][A-Z]\d*T?)$/);
 
@@ -2013,6 +2146,7 @@ function analyzeCEV(P, prevEvent) {
       family = classified.family;
       isNonProtection = classified.isNonProtection;
       resolvedNegElements = resolved.negElements || [];
+      resolvedSvPath = resolved.svPath || [];
 
       const leafElements = resolved.elements.filter(e => allChangedLabels.includes(e));
       for (const le of leafElements.slice(0, 3)) {
@@ -2130,7 +2264,7 @@ function analyzeCEV(P, prevEvent) {
       causeChain.push({ label: immediateCause, desc: causeText, delay: 0 });
     }
 
-    return { causeText, causeDetail, causeChain, family, isNonProtection, negElements: resolvedNegElements };
+    return { causeText, causeDetail, causeChain, family, isNonProtection, negElements: resolvedNegElements, svPath: resolvedSvPath };
   }
 
   if (tripTransition) {
@@ -2151,10 +2285,12 @@ function analyzeCEV(P, prevEvent) {
     let immediateCause = null;
     let immediateCauseNegated = false;
     let evalFoundAt = null;
+    let stateAtTripSnapshot = null;
     if (tripAst) {
       const groundTruthChanged = new Set((tripTransition.changes || []).map(c => c.label));
       const tIdxTimeline = Math.min(tripIdx + 1, timeline.length - 1);
       const stateAtTrip = timeline[tIdxTimeline];
+      stateAtTripSnapshot = stateAtTrip;
       const res0 = evalAst(tripAst, name => stateAtTrip.has(name));
       const liveChanged0 = [...res0.live].filter(l => groundTruthChanged.has(l));
       const negChanged0 = [...res0.neg].filter(l => groundTruthChanged.has(l));
@@ -2224,10 +2360,45 @@ function analyzeCEV(P, prevEvent) {
       const neverTransitioned = (negElements || []).filter(ne =>
         !digitalTransitions.some(t => t.changes.some(c => c.label === ne)));
 
+      // ── Branching logic tree ──
+      // Rather than flattening everything into one linear path, bake out the actual AND/OR
+      // structure so the UI can show BOTH sides of an AND (e.g. a supervisory condition like
+      // "AND 52A" that's easy to miss when only the winning leaf is shown) with each side's
+      // real true/false state at the moment of the trip. Built in two parts: (1) the ONE
+      // top-level OR branch that actually fired (siblings are just independent, unrelated trip
+      // conditions — noted as a count, not expanded, to avoid drowning the real path in
+      // unrelated alternatives), and (2) each SV's own equation along the resolved chain,
+      // which is where AND/OR structure most often actually matters.
+      let logicTrees = [];
+      if (tripAst && stateAtTripSnapshot) {
+        const isAssertedAtTrip = name => stateAtTripSnapshot.has(name);
+        const branches = splitTopOr(tripAst);
+        const winningBranch = branches.find(b => astContainsToken(b, immediateCause)) || branches[0];
+        if (winningBranch) {
+          logicTrees.push({
+            title: `${P.tripEquationName || 'TR'} (trip equation)`,
+            equationText: astToStr(winningBranch),
+            tree: bakeLogicTree(winningBranch, isAssertedAtTrip),
+            otherBranchCount: Math.max(0, branches.length - 1),
+          });
+        }
+        for (const step of (classified.svPath || [])) {
+          if (step.ast) {
+            logicTrees.push({
+              title: step.label,
+              equationText: step.equationText || (step.equation || '').split('#')[0].trim(),
+              comment: step.comment || '',
+              tree: bakeLogicTree(step.ast, isAssertedAtTrip),
+              otherBranchCount: 0,
+            });
+          }
+        }
+      }
+
       A.tripCause = {
         causeText, causeDetail, immediateCause, causeChain, tripTransition,
         crossEvent: isCrossEvent, family, isNonProtection, negElements: negElements || [],
-        negElementsNeverTransitioned: neverTransitioned,
+        negElementsNeverTransitioned: neverTransitioned, logicTrees,
       };
     } else {
       const causeText = 'Trip Detected (cause element not captured in digital data)';
@@ -2427,39 +2598,65 @@ function analyzeCEV(P, prevEvent) {
     }
 
     // ── Flag: other protection-family elements picked up nearby but weren't part of this trip ──
-    const seenInChain = new Set((cause.causeChain || []).map(c => c.label));
-    const protectionFamilyRe = /^(27|59|81|5[01]|67)[A-Z]*\d/;
-    const decoyCandidates = new Set();
-    for (const t of digitalTransitions.slice(0, boundary + 1)) {
+    // Purpose: catch the specific misread the user is worried about — someone sees a familiar
+    // element (e.g. undervoltage) sitting right next to the trip in the timeline and assumes
+    // that's "the cause" without checking whether it was actually wired into the trip logic.
+    // To keep this genuinely useful rather than a wall of noise: reset bits (...R) are excluded
+    // entirely (a reset is the OPPOSITE of a pickup — including them was actively misleading),
+    // each candidate is checked against the full baked logic tree (not just the flattened
+    // chain labels) so nothing already show above gets restated, and every element gets a
+    // concrete timing + a specific, plain-language reason it isn't what tripped this event.
+    function treeHasToken(node, name) {
+      if (!node) return false;
+      if (node.op === 'VAR') return node.name === name;
+      if (node.child) return treeHasToken(node.child, name);
+      if (node.children) return node.children.some(c => treeHasToken(c, name));
+      return false;
+    }
+    const shownInTrees = new Set();
+    for (const lt of (cause.logicTrees || [])) {
+      (function walk(n) { if (!n) return; if (n.op === 'VAR') shownInTrees.add(n.name); if (n.child) walk(n.child); if (n.children) n.children.forEach(walk); })(lt.tree);
+    }
+    const seenInChain = new Set([...(cause.causeChain || []).map(c => c.label), ...shownInTrees]);
+    const protectionFamilyRe = /^(27|59|81|5[01]|67)[A-Z]*\d+[A-Z]?$/;
+    const boundaryMs = tripTransition && tripTransition.analogSampleIdx != null
+      ? tripTransition.analogSampleIdx * (1000 / ((P.eventInfo.freq || 60) * (P.eventInfo.samPerCycA || 32))) : null;
+    const decoyCandidates = new Map(); // label -> transition index where it was asserted
+    digitalTransitions.slice(0, boundary + 1).forEach((t, ti) => {
       for (const c of t.changes) {
-        if (c.asserted && protectionFamilyRe.test(c.label) && !seenInChain.has(c.label)) {
-          decoyCandidates.add(c.label);
+        if (c.asserted && protectionFamilyRe.test(c.label) && !/R$/.test(c.label) && !seenInChain.has(c.label)) {
+          decoyCandidates.set(c.label, ti);
         }
       }
-    }
+    });
     if (decoyCandidates.size) {
       const stateAtTrip = timeline[Math.min(boundary, timeline.length - 1)];
       const isAssertedAtTrip = name => stateAtTrip.has(name);
-      const explained = [...decoyCandidates].map(el => {
+      const msPerSample = 1000 / ((P.eventInfo.freq || 60) * (P.eventInfo.samPerCycA || 32));
+      const explained = [...decoyCandidates.entries()].map(([el, ti]) => {
         const baseName = el.replace(/T$/, '');
-        let note = 'not referenced anywhere in the resolved trip logic';
+        const transition = digitalTransitions[ti];
+        const timing = (transition?.analogSampleIdx != null && boundaryMs != null)
+          ? `${(boundaryMs - transition.analogSampleIdx * msPerSample).toFixed(0)} ms before this trip`
+          : 'earlier in this record';
+        let reason = `it isn't referenced anywhere in this relay's trip logic at all — its pickup here is unrelated to why the relay tripped`;
         for (const sv of svSettings) {
           const eqRaw = sv.equation.split('#')[0];
           if (new RegExp('\\b' + el + '\\b').test(eqRaw) || new RegExp('\\b' + baseName + '\\b').test(eqRaw)) {
             const ast = parseEq(tokenizeEq(eqRaw));
             const blocking = findBlockingSibling(ast, el, isAssertedAtTrip) || findBlockingSibling(ast, baseName, isAssertedAtTrip);
-            note = blocking
-              ? `referenced in ${sv.label} (\`${eqRaw.trim()}\`), gated by ${blocking}, which read false at the moment of the trip`
-              : `referenced in ${sv.label} (\`${eqRaw.trim()}\`), which did not evaluate true at the moment of the trip`;
+            reason = blocking
+              ? `it's only wired into the trip through ${sv.label}, which also requires ${blocking} — and that read false at the moment of the trip, so this branch never activated`
+              : `it's referenced in ${sv.label}, but that logic never evaluated true at the moment of the trip`;
             break;
           }
         }
-        return `${tt(el, P)} — ${note}`;
+        return `<b>${tt(el, P)}</b> picked up ${timing}. It's not what tripped this event: ${reason}.`;
       });
       A.investigationFlags.push({
         severity: 'medium',
-        title: 'Other Protection Elements Also Picked Up — But Weren\u2019t Part Of This Trip',
-        detail: `${explained.join('; ')}. It's easy to default to whichever of these looks familiar (e.g. an undervoltage pickup) as "the cause" — the resolved chain above is what actually fed the trip equation; these elements changing state nearby is coincidental to that path.`,
+        title: 'Something Else Also Changed Nearby — Don\u2019t Mistake It For The Cause',
+        detail: `${explained.join(' ')}`,
       });
     }
   }
@@ -2479,6 +2676,63 @@ function badge(asserted, label) {
   const cls = asserted ? 'badge-red' : 'badge-green';
   const text = label || (asserted ? 'ASSERTED' : 'NORMAL');
   return `<span class="badge ${cls}"><span class="badge-dot"></span>${text}</span>`;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// BRANCHING LOGIC TREE — renders A.tripCause.logicTrees (built in analyzeCEV)
+// ══════════════════════════════════════════════════════════════════════
+// Unlike the old single-path sequence diagram, this shows BOTH sides of every AND — the
+// side that's easy to overlook (a supervisory condition like "AND 52A") is drawn right next
+// to the side that changed, each colored by its own true/false state at the trip instant.
+function collectFlatChildren(node, op) {
+  if (node.op === op) return [...collectFlatChildren(node.children[0], op), ...collectFlatChildren(node.children[1], op)];
+  return [node];
+}
+
+function renderLogicTreeNode(node, P) {
+  if (!node) return '';
+  switch (node.op) {
+    case 'VAR':
+      return `<div class="logic-node"><div class="logic-leaf ${node.value ? 'is-true' : ''}">${tt(node.name, P)}</div></div>`;
+    case 'NOT':
+      return `<div class="logic-node"><div class="logic-prefix">NOT</div>${renderLogicTreeNode(node.child, P)}</div>`;
+    case 'REDGE':
+      return `<div class="logic-node"><div class="logic-prefix">↑ R_TRIG</div>${renderLogicTreeNode(node.child, P)}</div>`;
+    case 'FEDGE':
+      return `<div class="logic-node"><div class="logic-prefix">↓ F_TRIG</div>${renderLogicTreeNode(node.child, P)}</div>`;
+    case 'AND': {
+      const flat = collectFlatChildren(node, 'AND');
+      return `<div class="logic-node">
+        <div class="logic-group-label ${node.value ? 'is-true' : ''}">ALL required (AND)</div>
+        <div class="logic-and-children">${flat.map(c => renderLogicTreeNode(c, P)).join('')}</div>
+      </div>`;
+    }
+    case 'OR': {
+      const flat = collectFlatChildren(node, 'OR');
+      const hasLive = flat.some(c => c.value);
+      return `<div class="logic-node">
+        <div class="logic-group-label ${node.value ? 'is-true' : ''}">ANY of these (OR)</div>
+        <div class="logic-or-children ${hasLive ? 'has-live' : ''}">${flat.map(c => renderLogicTreeNode(c, P)).join('')}</div>
+      </div>`;
+    }
+    default: return '';
+  }
+}
+
+function buildLogicTreeSection(P, A) {
+  const trees = A?.tripCause?.logicTrees;
+  if (!trees || !trees.length) return '';
+  return trees.map((lt, i) => `
+    <div class="logic-tree-block">
+      <div class="logic-tree-header">
+        <span class="logic-tree-title">${tt(lt.title, P)}</span>
+        ${lt.comment ? `<span class="logic-tree-comment">— ${lt.comment}</span>` : ''}
+      </div>
+      <div class="logic-tree-body">${renderLogicTreeNode(lt.tree, P)}</div>
+      ${lt.otherBranchCount ? `<div class="logic-tree-other">+ ${lt.otherBranchCount} other independent trip condition${lt.otherBranchCount === 1 ? '' : 's'} in this same equation, unrelated to this event (not shown)</div>` : ''}
+    </div>
+    ${i < trees.length - 1 ? '<div style="text-align:center;color:var(--text-muted);font-size:15px;margin:-4px 0 2px;">↓ feeds into</div>' : ''}
+  `).join('');
 }
 
 function renderBanner() {
@@ -2584,7 +2838,9 @@ function renderBanner() {
     return;
   }
 
-  // Build sequence arrows
+  // Build sequence arrows — kept as a fallback for event-report (ER) events, which don't
+  // currently get the richer branching-tree treatment below (that's built only for real
+  // trips, where the AND/OR structure matters most).
   let seqHTML = '';
   if (cause.causeChain.length) {
     // Deduplicate and keep order
@@ -2628,7 +2884,7 @@ function renderBanner() {
         </div>
         ${cause.crossEvent ? '<div style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:4px;background:var(--yellow-dim);color:var(--yellow);font-size:11px;font-weight:600;margin-bottom:10px;border:1px solid #5c4506"><span>🔗</span> CROSS-EVENT: Condition started in a prior event record</div>' : ''}
         <p style="color:${cause.isEventReport ? '#bfdbfe' : '#fecaca'};font-size:13px;margin-bottom:16px;line-height:1.6;">${cause.causeDetail}</p>
-        ${seqHTML}
+        ${buildLogicTreeSection(PARSED, ANALYSIS) || seqHTML}
         <div class="trip-timing">
           <div class="timing-chip"><span class="label">${cause.isEventReport ? 'Timer Delay:' : 'Total Timer Delay:'}</span> <span class="value">${totalCycles} cycles (${totalMs.toFixed(0)} ms)</span></div>
           <div class="timing-chip"><span class="label">Immediate Cause:</span> <span class="value">${cause.immediateCause || '—'}</span></div>
@@ -3056,32 +3312,44 @@ function renderMagnitudeChartSVG(traces, opts) {
     markers += `<line x1="${x.toFixed(1)}" y1="${marginTop}" x2="${x.toFixed(1)}" y2="${marginTop + plotH}" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="2,3"/>`;
     if (!opts.compact) markers += `<text x="${(x + 4).toFixed(1)}" y="${marginTop + 23}" font-size="${markerFont}" fill="#ef4444">TRIP</text>`;
 
-    // Data labels: the actual value of each trace at the exact trip instant, so the trip
-    // point can be read at a glance instead of having to trace each line back to the axis.
-    // Dot placed at (tripIdx, value); text offset to the right, with simple vertical
-    // collision avoidance so close-together traces don't overlap illegibly.
-    const dotR = opts.compact ? 2 : 3;
-    const labelFont = opts.compact ? 8 : 9.5;
-    const minGap = opts.compact ? 9 : 12;
-    const onRight = x < marginLeft + plotW * 0.82; // flip label side near the right edge
-    // placements carries the LABEL y-position (nudged apart to avoid overlap); the dot
-    // itself always uses the true, un-nudged data value so it stays glued to the real point.
-    const placements = traces.map(t => {
+    // Data-value box: a single boxed legend at the trip instant listing every trace's exact
+    // value (color swatch + label + value), mirroring SynchroWAVe's cursor readout box —
+    // read the whole trip point at a glance instead of tracing each line back to the axis.
+    const dotR = opts.compact ? 2 : 2.6;
+    const boxFont = opts.compact ? 8.5 : 10.5;
+    const rowH = opts.compact ? 12.5 : 15.5;
+    const padX = opts.compact ? 6 : 8, padY = opts.compact ? 5 : 7;
+    const swatch = opts.compact ? 7 : 8.5;
+    const rows = traces.map(t => {
       const v = t.values[opts.tripIdx];
       return (v == null || !isFinite(v)) ? null
-        : { color: t.color, trueY: yScale(v), y: yScale(v), text: (Math.abs(v) < 10 ? v.toFixed(2) : v.toFixed(1)) };
-    }).filter(Boolean).sort((a, b) => a.y - b.y);
-    for (let i = 1; i < placements.length; i++) {
-      if (placements[i].y - placements[i - 1].y < minGap) placements[i].y = placements[i - 1].y + minGap;
-    }
+        : { color: t.color, label: t.label, text: (Math.abs(v) < 10 ? v.toFixed(3) : v.toFixed(2)) + (opts.yUnit ? ' ' + opts.yUnit : '') };
+    }).filter(Boolean);
+
     let dots = '';
-    placements.forEach(p => {
-      dots += `<circle cx="${x.toFixed(1)}" cy="${p.trueY.toFixed(1)}" r="${dotR}" fill="${p.color}" stroke="var(--bg2)" stroke-width="1"/>`;
+    traces.forEach(t => {
+      const v = t.values[opts.tripIdx];
+      if (v == null || !isFinite(v)) return;
+      dots += `<circle cx="${x.toFixed(1)}" cy="${yScale(v).toFixed(1)}" r="${dotR}" fill="${t.color}" stroke="var(--bg2)" stroke-width="1"/>`;
     });
-    placements.forEach(p => {
-      const lx = onRight ? x + dotR + 3 : x - dotR - 3;
-      markers += `<text x="${lx.toFixed(1)}" y="${(p.y + labelFont * 0.35).toFixed(1)}" text-anchor="${onRight ? 'start' : 'end'}" font-size="${labelFont}" font-weight="600" fill="${p.color}">${p.text}</text>`;
-    });
+
+    if (rows.length) {
+      const longestChars = Math.max(...rows.map(r => r.label.length + r.text.length));
+      const boxW = Math.min(plotW - 10, Math.max(opts.compact ? 88 : 108, longestChars * boxFont * 0.62 + swatch + padX * 2 + 10));
+      const boxH = rows.length * rowH + padY * 2;
+      let boxX = x + 9;
+      if (boxX + boxW > marginLeft + plotW) boxX = x - boxW - 9;
+      boxX = Math.max(marginLeft + 2, boxX);
+      const boxY = marginTop + 4;
+      let rowsSvg = '';
+      rows.forEach((r, i) => {
+        const ry = boxY + padY + i * rowH + rowH * 0.72;
+        rowsSvg += `<rect x="${(boxX + padX).toFixed(1)}" y="${(ry - swatch * 0.78).toFixed(1)}" width="${swatch}" height="${swatch}" fill="${r.color}" rx="1"/>`;
+        rowsSvg += `<text x="${(boxX + padX + swatch + 5).toFixed(1)}" y="${ry.toFixed(1)}" font-size="${boxFont}" fill="var(--text-dim)">${r.label}</text>`;
+        rowsSvg += `<text x="${(boxX + boxW - padX).toFixed(1)}" y="${ry.toFixed(1)}" text-anchor="end" font-size="${boxFont}" font-weight="600" fill="${r.color}">${r.text}</text>`;
+      });
+      markers += `<rect x="${boxX.toFixed(1)}" y="${boxY.toFixed(1)}" width="${boxW.toFixed(1)}" height="${boxH.toFixed(1)}" fill="rgba(6,9,15,0.94)" stroke="var(--card-border)" stroke-width="1" rx="4"/>${rowsSvg}`;
+    }
     markers += dots;
   }
 
