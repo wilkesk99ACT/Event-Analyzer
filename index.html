@@ -2595,6 +2595,10 @@ function analyzeCEV(P, prevEvent) {
       causeDetail = `No overcurrent, voltage, or frequency protection element is behind this — ${label} resolved entirely to internal status/latch points${parts ? ', via ' + parts : ''}. This is not a measured electrical fault condition; something in the relay's internal logic or a status/position input drove it instead.`;
     }
 
+    if (!family && /3V0|ZERO.?SEQ|NEG.?SEQ|SEQUENCE VOLT/i.test(topComment)) {
+      family = /NEG.?SEQ/i.test(topComment) && !/3V0|ZERO.?SEQ/i.test(topComment) ? 'negSeqV' : 'zeroSeqV';
+    }
+
     return { causeText, causeDetail, family, isNonProtection, negElements };
   }
 
