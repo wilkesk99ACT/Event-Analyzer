@@ -816,10 +816,13 @@ body.dragging-file #drop-overlay { display: flex; }
         <button class="btn" onclick="toggleHelp(false)">Close</button>
       </div>
       <div class="help-modal-body">
+        <p style="color:var(--text-muted);font-style:italic;">This tool is a diagnostic aid: it works out a likely,
+        evidence-backed explanation from the relay's own recorded data and configured logic. It's meant to be checked
+        against the diagram and supporting tabs, not treated as an unquestionable final answer.</p>
         <h3>Reading the Logic Chain Diagram</h3>
-        <p>The diagram traces the relay's own trip logic from left (earliest contributing
+        <p>The diagram traces the relay's trip logic from left (earliest contributing
         condition) to right (the final trip command), reconstructed from the relay's settings
-        and the actual recorded data for this event.</p>
+        and the recorded data for this event.</p>
         <ul>
           <li><b>Green, filled box</b> — this condition was <b>true / asserted</b> at the moment of the trip.</li>
           <li><b>Grey / muted box</b> — this condition was <b>false / not asserted</b> at that moment. It's only
@@ -896,8 +899,9 @@ body.dragging-file #drop-overlay { display: flex; }
         configured pickups, timers, and logic — which is the step that otherwise has to be done
         manually, equation by equation.</p>
         <ol>
-          <li><b>Start with the headline cause</b> at the top of the page — this is the fully resolved
-          determination, not a raw relay-word name.</li>
+          <li><b>Start with the headline cause</b> at the top of the page — this reflects the
+          tool's resolution of the relay's own logic, not a raw relay-word name, though it's
+          still worth confirming against the diagram below it.</li>
           <li><b>Check the diagram</b> to see the actual path, including any supervisory (AND) conditions
           that had to be satisfied alongside the main cause.</li>
           <li><b>Read any diagnostic flags</b> below the diagram. These call out cases that are easy to
@@ -3171,18 +3175,18 @@ function buildEvidenceBlock(P, cause) {
       ? ` — measured <b>${it.measured}</b> vs. pickup <b>${it.pickup}</b>${it.multiple ? ` (<b>${it.multiple}×</b> pickup)` : ''}`
       : '';
     const completed = ev.completedBy === it.el
-      ? ` <span style="color:var(--red);font-weight:700;">← last to assert; completed the trip logic</span>`
+      ? ` <span style="color:var(--red);font-weight:700;">— last to assert, completing the trip logic</span>`
       : '';
     return `<li style="margin-bottom:5px;"><span style="font-family:var(--mono);color:var(--text);">${tt(it.el, P)}</span> ${timing}${meas}${completed}</li>`;
   }).join('');
   const uvNote = ev.uninvolvedUV?.length
     ? `<p style="font-size:12px;color:var(--text-dim);line-height:1.6;margin-top:8px;">
-        The phase voltages did dip during this event — undervoltage element${ev.uninvolvedUV.length > 1 ? 's' : ''}
-        <span style="font-family:var(--mono);">${ev.uninvolvedUV.join(', ')}</span> picked up — but
-        ${ev.uninvolvedUV.length > 1 ? 'they appear' : 'it appears'} <b>nowhere in the resolved trip logic</b> above.
-        The dip is an effect of the event (fault current depresses voltage), not the input the relay tripped on:
-        the elements the trip logic actually consulted are exactly the ones listed here, each verifiable against
-        the equations in the diagram and the Equations tab.</p>`
+        Phase voltage${ev.uninvolvedUV.length > 1 ? 's' : ''} also dipped during this event, and undervoltage
+        element${ev.uninvolvedUV.length > 1 ? 's' : ''} <span style="font-family:var(--mono);">${ev.uninvolvedUV.join(', ')}</span>
+        picked up — but ${ev.uninvolvedUV.length > 1 ? "they aren't referenced" : "it isn't referenced"} in the resolved
+        trip equation above. That's consistent with the dip being a downstream effect of the fault current rather than
+        a separate input the relay acted on here, though it's worth a look at the diagram and Equations tab to confirm
+        for this specific relay's logic.</p>`
     : '';
   return `<div style="background:var(--card);border:1px solid var(--card-border);border-radius:8px;padding:12px 16px;margin-bottom:16px;">
     <div style="font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Why this determination — evidence from this record</div>
