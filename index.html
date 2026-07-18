@@ -288,6 +288,25 @@ body.dragging-file #drop-overlay { display: flex; }
   cursor: default;
   user-select: none;
 }
+.help-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  z-index: 2000; display: flex; align-items: center; justify-content: center;
+}
+.help-modal {
+  background: var(--card); border: 1px solid var(--card-border); border-radius: 10px;
+  max-width: 720px; width: 90%; max-height: 85vh; overflow-y: auto;
+}
+.help-modal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 16px 20px; border-bottom: 1px solid var(--card-border);
+  font-size: 15px; font-weight: 700; position: sticky; top: 0; background: var(--card);
+}
+.help-modal-body { padding: 20px; font-size: 13px; line-height: 1.6; color: var(--text-dim); }
+.help-modal-body h3 { color: var(--text); font-size: 14px; margin: 18px 0 8px; }
+.help-modal-body h3:first-child { margin-top: 0; }
+.help-modal-body ul, .help-modal-body ol { padding-left: 20px; margin: 6px 0; }
+.help-modal-body li { margin-bottom: 8px; }
+.help-modal-body b { color: var(--text); }
 .zoom-hint {
   font-size: 9px;
   font-weight: 400;
@@ -775,7 +794,59 @@ body.dragging-file #drop-overlay { display: flex; }
         <div id="topBarTimestamp" style="font-size:12px;color:var(--text-dim)"></div>
         <div id="topBarRatios" style="font-size:10px;color:var(--text-muted)"></div>
       </div>
+      <button class="btn" onclick="toggleHelp(true)">Help</button>
       <button class="btn" onclick="resetApp()">New Files</button>
+    </div>
+  </div>
+
+  <!-- Help modal -->
+  <div id="helpModal" class="help-overlay" style="display:none" onclick="if(event.target===this) toggleHelp(false)">
+    <div class="help-modal">
+      <div class="help-modal-header">
+        <span>How to Read This Tool</span>
+        <button class="btn" onclick="toggleHelp(false)">Close</button>
+      </div>
+      <div class="help-modal-body">
+        <h3>Reading the Logic Chain Diagram</h3>
+        <p>The diagram traces the relay's own trip logic from left (earliest contributing
+        condition) to right (the final trip command), reconstructed from the relay's settings
+        and the actual recorded data for this event.</p>
+        <ul>
+          <li><b>Green, filled box</b> — this condition was <b>true / asserted</b> at the moment of the trip.</li>
+          <li><b>Grey / muted box</b> — this condition was <b>false / not asserted</b> at that moment. It's only
+          shown when it's structurally required to explain the result (e.g. every side of an AND, or every side
+          of a NOT'd condition that failed together) — a false box is never just decoration.</li>
+          <li><b>Boxes with a thicker accent/red border</b> — these are internal <b>SV</b> logic/timer variables
+          (the relay's own named intermediate signals), rather than a directly measured element. Hover any box
+          for its underlying equation or description.</li>
+          <li><b>"ALL required (AND)"</b> — every box in that group had to be true (or false, if explaining a
+          negated condition) for the result shown.</li>
+          <li><b>"ANY of these (OR)"</b> — only one box in that group needed to be true; alternatives that
+          didn't happen are omitted rather than shown as false.</li>
+          <li><b>NOT / R_TRIG / F_TRIG prefixes</b> inside a box (e.g. "NOT SV19", "R_TRIG CLOSE") mean the
+          condition is being evaluated as negated, or only counts at the instant it just changed state
+          (rising/falling edge), not merely whenever it happens to be in that state.</li>
+          <li>The final red box on the right is the trip/event command itself. A note below the diagram
+          indicates how many other, unrelated trip conditions exist in the same equation but weren't part
+          of this event.</li>
+        </ul>
+        <h3>Investigating a Trip</h3>
+        <ol>
+          <li><b>Start with the headline cause</b> at the top of the page — this is the fully resolved
+          determination, not a raw relay-word name.</li>
+          <li><b>Check the diagram</b> to see the actual path, including any supervisory (AND) conditions
+          that had to be satisfied alongside the main cause.</li>
+          <li><b>Read any diagnostic flags</b> below the diagram. These call out cases that are easy to
+          misread at a glance — e.g. a trip driven by internal logic rather than a measured fault, a trip
+          issued while the breaker was already open, or a voltage/current mismatch suggesting a failed
+          voltage-sensing channel rather than a real fault. Flags are informational; they intentionally
+          don't tell you what corrective action to take.</li>
+          <li><b>Use the charts</b> to confirm the story: current, voltage, and the most relevant derived
+          quantity are synchronized with the digital logic timeline. Scroll to zoom and drag to pan — this
+          applies to all charts at once. Click or drag anywhere to drop the measurement cursor; it shows
+          exact values on every chart simultaneously at that instant. Double-click any chart to reset its zoom.</li>
+        </ol>
+      </div>
     </div>
   </div>
 
@@ -2802,17 +2873,16 @@ function buildLogicTreeSection(P, A) {
 
   function renderNode(node) {
     const x = xOf(node.depth), y = yOf(node.row);
+    const prefix = (node.modifiers && node.modifiers.length) ? node.modifiers.join(' ') + ' ' : '';
     if (node.op === 'VAR') {
-      boxesHTML += `<div class="logic-box logic-leaf-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${tt(node.name, P)}</div>`;
-      boxesHTML += modifierBadge(node, x, y);
+      boxesHTML += `<div class="logic-box logic-leaf-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${prefix}${tt(node.name, P)}</div>`;
       return;
     }
     if (node.op === 'SVNODE') {
       const cx = xOf(node.child.depth) + LOGIC_BOX_W, cy = yOf(node.child.row) + LOGIC_BOX_H / 2;
       const ny = y + LOGIC_BOX_H / 2;
       linesHTML += `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${ny}" stroke="${node.child.value ? trueColor : falseColor}" stroke-width="1.5"/>`;
-      boxesHTML += `<div class="logic-box logic-sv-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${tt(node.label, P)}</div>`;
-      boxesHTML += modifierBadge(node, x, y);
+      boxesHTML += `<div class="logic-box logic-sv-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${prefix}${tt(node.label, P)}</div>`;
       renderNode(node.child);
       return;
     }
@@ -4685,6 +4755,11 @@ function selectEvent(idx) {
   renderBanner();
   renderTabs();
   renderContent();
+}
+
+function toggleHelp(show) {
+  const el = document.getElementById('helpModal');
+  if (el) el.style.display = show ? 'flex' : 'none';
 }
 
 function resetApp() {
