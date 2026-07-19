@@ -679,8 +679,9 @@ body.dragging-file #drop-overlay { display: flex; }
   font-size: 12px; line-height: 1.5; color: var(--text-dim);
   padding: 8px 4px 2px; border-top: 1px solid var(--card-border); margin-top: 8px;
 }
-.sv-legend-item b { color: var(--text); font-family: var(--mono); }
+.sv-legend-item > .has-tip:first-child { color: var(--text); font-family: var(--mono); font-weight: 700; }
 .sv-legend-eq { color: var(--accent); font-family: var(--mono); }
+.sv-legend-eq .has-tip { color: inherit; }
 
 .sv-card {
   padding: 14px;
@@ -740,6 +741,11 @@ body.dragging-file #drop-overlay { display: flex; }
   line-height: 1.5;
   pointer-events: none;
 }
+/* Clickable bit labels drawn as native SVG <text> (e.g. the SV/Trip Chain Flags chart's Y
+   axis) — the ::after CSS-tooltip trick above doesn't render on SVG text, so these rely on a
+   native <title> child for hover and a simple fill-color cue instead of the dotted underline. */
+.svg-bit-label { cursor: pointer; }
+.svg-bit-label:hover { fill: var(--accent) !important; }
 
 /* ── Event Selector ── */
 .evt-btn {
@@ -1456,6 +1462,21 @@ function tt(label, parsed) {
   const escaped = tip.replace(/"/g, '&quot;').replace(/\n/g, '&#10;');
   const jsSafe = label.replace(/'/g, "\\'");
   return `<span class="has-tip bit-click" title="${escaped}" onclick="event.stopPropagation(); showBitDetail('${jsSafe}');">${label}</span>`;
+}
+
+// Wraps every relay-word-bit-looking token inside a raw SELOGIC equation string with the same
+// clickable tooltip as tt() — used wherever an equation is shown verbatim (e.g. the SV/Trip
+// Chain Flags legend's "[59G1T AND 52A]" text) so each individual bit it references is just as
+// explorable as the bit whose equation it is. Keywords (AND/OR/NOT/R_TRIG/F_TRIG), parentheses,
+// and bare numeric literals (pickup/delay values) are left as plain text.
+const SELOGIC_KEYWORDS = new Set(['AND', 'OR', 'NOT', 'R_TRIG', 'F_TRIG', 'R_TRIGGER', 'F_TRIGGER']);
+function linkifyEquationBits(eqText, parsed) {
+  return eqText.replace(/\(|\)|\bAND\b|\bOR\b|\bNOT\b|\bR_TRIGGER\b|\bF_TRIGGER\b|\bR_TRIG\b|\bF_TRIG\b|[A-Za-z0-9_]+/g, tok => {
+    if (tok === '(' || tok === ')') return tok;
+    if (SELOGIC_KEYWORDS.has(tok)) return tok;
+    if (/^[0-9]+(\.[0-9]+)?$/.test(tok)) return tok; // pure numeric literal (e.g. a pickup value), not a bit
+    return tt(tok, parsed);
+  });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -3105,58 +3126,132 @@ function analyzeCEV(P, prevEvent) {
   A.digitalTimeline = digitalTransitions.map(t => {
     const asserts = t.changes.filter(c => c.asserted).map(c => c.label);
     const deasserts = t.changes.filter(c => !c.asserted).map(c => c.label);
+    const allChanged = [...asserts, ...deasserts];
     let desc = '';
+
     const hasTrip = asserts.some(l => ['TRIP3P','TRIPA','TRIPB','TRIPC','TRIP'].includes(l));
     const hasClose = asserts.some(l => ['CLOSE','CLOSE3P','CLOSEA','CLOSEB','CLOSEC','CL'].includes(l));
-    const hasUV = asserts.some(l => /^27[YZ]/.test(l));
-    const hasOV = asserts.some(l => /^59[YZ]/.test(l));
-    const hasSVT = asserts.some(l => /^SV\d+T$/.test(l));
-    const hasSV = asserts.some(l => /^SV\d+$/.test(l));
-    const hasBkr = ['52A3P', '52A', '52B'].some(l => asserts.includes(l) || deasserts.includes(l));
+    const bkrClosedNow = ['52A3P', '52A'].some(l => asserts.includes(l)) || deasserts.includes('52B');
+    const bkrOpenNow = ['52A3P', '52A'].some(l => deasserts.includes(l)) || asserts.includes('52B');
+    // Ground/neutral-residual/negative-sequence protection elements — see the broadened
+    // sequence-element regex used elsewhere for the "What is sequence voltage/current?" link;
+    // these get their own category since "50G1P picks up" reads very differently from a plain
+    // phase overcurrent, and lumping it into "Overcurrent element state change" hid that.
+    const seqElRe = /^(50|51|59|67|27|47)[A-Z]*[GNQ]\d?/;
+    const seqEls = [...new Set(allChanged.filter(l => seqElRe.test(l)))];
     const hasOC = asserts.some(l => /^5[01][A-Z]/.test(l));
-    const hasFreq = asserts.some(l => /^81D/.test(l));
+    const hasUV = asserts.some(l => /^27/.test(l));
+    const hasOV = asserts.some(l => /^59/.test(l));
+    const hasFreq = allChanged.some(l => /^81[DR]/.test(l));
+    const hasDir = asserts.some(l => /^(67[PGQ]?\d|F32[QVGP]?|R32[QVGP]?)/.test(l));
+    const hasER = asserts.includes('ER');
+    const hasComm = allChanged.some(l => ['COMMLOSS','COMMFLT','COMMIDLE','LINKA','LINKFAIL'].includes(l));
+    const hasTarget = asserts.some(l => ['TRGTR','RSTTRGT'].includes(l));
+    const hasPB = asserts.some(l => /^PB\d+_PUL$/.test(l));
+    const hasIN = allChanged.some(l => /^IN\d+$/.test(l));
+    const hasOUT = allChanged.some(l => /^OUT\d+$/.test(l));
+
+    // Short, plain-text (no HTML) description of a single bit, used by several branches below
+    // and as the final fallback — pulls from the same tooltip data as everywhere else in the
+    // tool, so the wording stays consistent whether it's read here or in a popup.
+    const plainDesc = (label, asserted) => {
+      const el = explainElementBit(label, P, freq);
+      if (el) {
+        // Some bits only carry a static one-line dictionary entry (e.g. "Fault on Phase A"),
+        // for which explainElementBit pads out a generic "the condition just described is
+        // currently active" on/off pair rather than real state-specific text. That boilerplate
+        // reads fine paired with a visible "short" title in the bit-detail popup, but is
+        // meaningless read alone here — prefer the short description itself in that case.
+        const stateText = asserted ? el.on : el.off;
+        const isGenericPad = /^The condition (just described is currently true\/active on this device\.|described is not currently active\.)$/.test(stateText);
+        return (isGenericPad ? el.short : stateText).split('\n')[0];
+      }
+      const tip = getSVTooltip(label, P);
+      return tip ? tip.split('\n')[0] : label;
+    };
 
     if (hasTrip) {
       desc = 'TRIP COMMAND ISSUED';
     } else if (hasClose) {
-      desc = 'CLOSE COMMAND ISSUED';
-    } else if (hasSVT) {
-      // Describe what the SV timer expiration means using the equation
-      const svtLabels = asserts.filter(l => /^SV\d+T$/.test(l));
+      desc = asserts.includes('CC') ? 'CLOSE COMMAND ISSUED (remote/SCADA)' : 'CLOSE COMMAND ISSUED';
+    } else if (bkrClosedNow || bkrOpenNow) {
+      desc = bkrClosedNow ? 'Breaker confirms CLOSED' : 'Breaker confirms OPEN';
+    } else if (allChanged.some(l => /^SV\d+T$/.test(l))) {
+      // Describe what the SV timer expiration means using the equation. Checked against BOTH
+      // asserts and deasserts (not asserts alone) so a blinker's OFF transitions get simplified
+      // just as much as its ON ones — otherwise only half of a blinker's noise gets filtered.
+      const svtLabels = allChanged.filter(l => /^SV\d+T$/.test(l));
       const descs = svtLabels.map(l => {
+        const asserted = asserts.includes(l);
         const num = parseInt(l.replace(/SV|T/g, ''));
         const sv = svSettings.find(s => s.num === num);
-        if (sv) {
-          const comment = sv.equation.includes('#') ? sv.equation.split('#')[1].trim() : '';
-          return comment ? `${l} (${comment.substring(0, 50)})` : `${l} timer expired`;
-        }
-        return `${l} timer expired`;
+        if (!sv) return `${l} ${asserted ? 'timer expired' : 'timer resets'}`;
+        const info = describeSVLogic(sv);
+        if (info.isBlinker) return `${l}: Blinker`;
+        if (info.comment) return `${l} ${asserted ? 'timer expired' : 'timer resets'} (${info.comment.substring(0, 50)})`;
+        if (info.referencedName) return `Timer for ${info.referencedName} ${asserted ? 'expired' : 'resets'}`;
+        return `${l} ${asserted ? 'timer expired' : 'timer resets'}`;
       });
       desc = descs.join('; ');
-    } else if (hasOC) {
-      desc = 'Overcurrent element state change';
-    } else if (hasUV && !hasSV) {
-      desc = 'Undervoltage elements assert';
-    } else if (hasOV && !hasSV) {
-      desc = 'Overvoltage elements assert';
-    } else if (hasFreq) {
-      desc = 'Frequency element state change';
-    } else if (hasSV) {
-      const svLabels = asserts.filter(l => /^SV\d+$/.test(l));
+    } else if (allChanged.some(l => /^SV\d+$/.test(l))) {
+      const svLabels = allChanged.filter(l => /^SV\d+$/.test(l));
       const descs = svLabels.map(l => {
+        const asserted = asserts.includes(l);
         const num = parseInt(l.replace('SV', ''));
         const sv = svSettings.find(s => s.num === num);
-        if (sv) {
-          const comment = sv.equation.includes('#') ? sv.equation.split('#')[1].trim() : '';
-          return comment ? `${l} starts (${comment.substring(0, 50)})` : `${l} asserts`;
-        }
-        return `${l} asserts`;
+        if (!sv) return `${l} ${asserted ? 'asserts' : 'de-asserts'}`;
+        const info = describeSVLogic(sv);
+        if (info.isBlinker) return `${l}: Blinker`;
+        if (info.comment) return `${l} ${asserted ? 'starts' : 'clears'} (${info.comment.substring(0, 50)})`;
+        if (info.referencedName) return `${info.referencedName} condition ${asserted ? 'starts' : 'clears'}`;
+        return `${l} ${asserted ? 'asserts' : 'de-asserts'}`;
       });
       desc = descs.join('; ');
-    } else if (hasBkr) {
-      desc = 'Breaker state change';
+    } else if (seqEls.length) {
+      const isAssert = seqEls.some(l => asserts.includes(l));
+      desc = `${seqEls.join(', ')} ${isAssert ? 'picks up' : 'resets'} — ground/residual or negative-sequence element`;
+    } else if (hasOC) {
+      const ocLabels = asserts.filter(l => /^5[01][A-Z]/.test(l));
+      desc = ocLabels.length === 1 ? `${ocLabels[0]} picks up — ${plainDesc(ocLabels[0], true)}` : `Overcurrent elements pick up: ${ocLabels.join(', ')}`;
+    } else if (hasUV) {
+      const uvLabels = asserts.filter(l => /^27/.test(l));
+      desc = uvLabels.length === 1 ? `${uvLabels[0]} picks up — ${plainDesc(uvLabels[0], true)}` : `Undervoltage elements pick up: ${uvLabels.join(', ')}`;
+    } else if (hasOV) {
+      const ovLabels = asserts.filter(l => /^59/.test(l));
+      desc = ovLabels.length === 1 ? `${ovLabels[0]} picks up — ${plainDesc(ovLabels[0], true)}` : `Overvoltage elements pick up: ${ovLabels.join(', ')}`;
+    } else if (hasFreq) {
+      const freqLabels = allChanged.filter(l => /^81[DR]/.test(l));
+      desc = `Frequency element ${asserts.some(l => freqLabels.includes(l)) ? 'picks up' : 'resets'}: ${freqLabels.join(', ')}`;
+    } else if (hasDir) {
+      const dirLabels = asserts.filter(l => /^(67[PGQ]?\d|F32[QVGP]?|R32[QVGP]?)/.test(l));
+      desc = `Directional element asserts: ${dirLabels.join(', ')} (forward/reverse per this relay's own polarity setting)`;
+    } else if (hasER) {
+      desc = 'Event Report triggered — recorded as a separate record, not itself a trip';
+    } else if (hasComm) {
+      const commLabels = allChanged.filter(l => ['COMMLOSS','COMMFLT','COMMIDLE','LINKA','LINKFAIL'].includes(l));
+      desc = `Communications status change: ${commLabels.map(l => `${asserts.includes(l) ? '+' : '-'}${l}`).join(', ')}`;
+    } else if (hasTarget) {
+      desc = 'Front-panel target/LED reset';
+    } else if (hasPB) {
+      const pbLabels = asserts.filter(l => /^PB\d+_PUL$/.test(l));
+      desc = `Front-panel pushbutton pressed: ${pbLabels.join(', ')}`;
+    } else if (hasIN) {
+      const inLabels = allChanged.filter(l => /^IN\d+$/.test(l));
+      desc = inLabels.length === 1
+        ? `Digital input ${inLabels[0]} ${asserts.includes(inLabels[0]) ? 'asserts' : 'de-asserts'} — ${plainDesc(inLabels[0], asserts.includes(inLabels[0]))}`
+        : `Digital input change: ${inLabels.join(', ')}`;
+    } else if (hasOUT) {
+      const outLabels = allChanged.filter(l => /^OUT\d+$/.test(l));
+      desc = `Output contact change: ${outLabels.map(l => `${asserts.includes(l) ? '+' : '-'}${l}`).join(', ')}`;
     } else {
-      desc = 'Digital state change';
+      // Fallback — describe the first bit that actually changed rather than a bare "Digital
+      // state change". Virtually everything reaching this point still gets a real sentence,
+      // since plainDesc() draws on the same tooltip reference used throughout the rest of the
+      // tool; only a bit with genuinely no reference anywhere falls back to its bare name.
+      const first = asserts[0] || deasserts[0];
+      const firstAsserted = asserts.includes(first);
+      desc = first ? `${first} ${firstAsserted ? 'asserts' : 'de-asserts'} — ${plainDesc(first, firstAsserted)}` : 'Digital state change';
+      if (allChanged.length > 1) desc += ` (+${allChanged.length - 1} more)`;
     }
 
     return { ...t, asserts, deasserts, desc, isTrip: hasTrip };
@@ -4950,7 +5045,7 @@ function computeAssertIntervals(P, label, totalMs, msPerSample) {
 
 // Render the boolean/digital-flags panel as horizontal step-bands, one per label.
 // rows: [{label, intervals:[[startMs,endMs],...]}]
-function renderBooleanFlagsSVG(rows, opts) {
+function renderBooleanFlagsSVG(rows, opts, P) {
   if (!rows.length) return `<div style="color:var(--text-muted);font-size:12px;padding:16px;">No trip-chain flags to display.</div>`;
 
   const width = opts.width || 460;
@@ -5015,7 +5110,7 @@ function renderBooleanFlagsSVG(rows, opts) {
       const x1 = xScale(Math.max(s, startMs)), x2 = xScale(Math.min(e, endMs));
       rowsHTML += `<rect x="${x1.toFixed(1)}" y="${(cy - barH / 2).toFixed(1)}" width="${Math.max(1, x2 - x1).toFixed(1)}" height="${barH.toFixed(1)}" fill="var(--accent)" opacity="0.9" rx="1.5"/>`;
     });
-    rowsHTML += `<text x="${marginLeft - 8}" y="${(cy + 3.2).toFixed(1)}" text-anchor="end" font-size="${fontSize}" font-family="var(--mono)" fill="var(--text-dim)">${row.label}</text>`;
+    rowsHTML += `<text x="${marginLeft - 8}" y="${(cy + 3.2).toFixed(1)}" text-anchor="end" font-size="${fontSize}" font-family="var(--mono)" fill="var(--text-dim)" class="svg-bit-label" onclick="event.stopPropagation(); showBitDetail('${row.label.replace(/'/g, "\\'")}');"><title>${(P ? (getSVTooltip(row.label, P) || '') : '').replace(/"/g, '&quot;') || 'Click for details'}</title>${row.label}</text>`;
   });
 
   const bg = opts.bg || 'var(--card)';
@@ -5314,6 +5409,67 @@ function buildConsistencyWarningBanner(P, A) {
   </div>`;
 }
 
+// Shared definition of "bits relevant to this trip", used by both the SV/Trip Chain Flags
+// chart and the Event Timeline's trip-only filter so the two stay consistent: the resolved
+// cause chain itself, plus a small set of context bits (close command, Event Report trigger,
+// breaker status) when they're actually present in this file and change state somewhere in
+// the record.
+// Produces a clean, human-oriented description for an SV logic/timer variable, in priority
+// order:
+//  1. "Blinker" — a self-oscillating SV whose own equation is just "NOT <itself>T" (a classic
+//     free-running flasher used to blink a target LED) has no diagnostic content at all; every
+//     one of its toggles is just the oscillator running, not something that happened. Also
+//     caught by an explicit "BLINKER" in the site's own comment, since that's a stronger and
+//     more direct signal than the structural pattern when the two might disagree.
+//  2. The site's own equation comment, when present — written by whoever configured this
+//     relay, so it's taken as authoritative over anything this tool could infer.
+//  3. When there's no comment AND the equation is really just a thin wrapper around ONE
+//     underlying protection element (optionally with one simple supervisory AND, e.g.
+//     "59G1T AND 52A"), describe using THAT element's own name — "SV18T timer expired" becomes
+//     "Timer for <the element 59G1 actually is> expired" instead of a bare SV number that means
+//     nothing without opening the settings file.
+//  4. A bare fallback for anything else.
+function describeSVLogic(sv) {
+  const eq = sv.equation.split('#')[0].trim();
+  const comment = sv.equation.includes('#') ? sv.equation.split('#')[1].trim() : '';
+
+  const selfNotRe = new RegExp(`^NOT\\s+SV0*${sv.num}T$`, 'i');
+  if (selfNotRe.test(eq) || /\bblink/i.test(comment)) {
+    return { isBlinker: true };
+  }
+
+  if (comment) return { isBlinker: false, comment };
+
+  const toks = (eq.match(/\(|\)|\bAND\b|\bOR\b|\bNOT\b|\bR_TRIGGER\b|\bF_TRIGGER\b|\bR_TRIG\b|\bF_TRIG\b|[A-Za-z0-9_]+/g) || [])
+    .filter(t => t !== '(' && t !== ')');
+  let referenced = null;
+  if (toks.length === 1) {
+    referenced = toks[0];
+  } else if (toks.length === 3 && toks[1] === 'AND') {
+    referenced = /^\d/.test(toks[0]) ? toks[0] : (/^\d/.test(toks[2]) ? toks[2] : null);
+  }
+  const referencedBase = referenced ? referenced.replace(/T$/, '') : null;
+  const referencedName = referencedBase ? (TOOLTIPS[referencedBase] || null) : null;
+  return { isBlinker: false, comment: '', referenced, referencedName };
+}
+
+function getTripRelevantLabels(P, A) {
+  const cause = A?.tripCause;
+  const set = new Set();
+  if (cause?.causeChain?.length) {
+    cause.causeChain.forEach(c => set.add(c.label));
+    if (cause.immediateCause) set.add(cause.immediateCause);
+    const last = cause.causeChain[cause.causeChain.length - 1]?.label;
+    if (last) set.add(last);
+  }
+  ['CLOSE', 'CL', 'CC', 'ER', '52A3P', '52A', '52B'].forEach(l => {
+    if ((P.digitalLabels || []).includes(l) && (P.digitalTransitions || []).some(t => t.changes.some(c => c.label === l))) {
+      set.add(l);
+    }
+  });
+  return set;
+}
+
 function buildSVFlagsChart(P, A, compact) {
   const data = P.analogData || [];
   const cause = A?.tripCause;
@@ -5336,14 +5492,9 @@ function buildSVFlagsChart(P, A, compact) {
 
   // Beyond the resolved logic chain itself, always surface a small set of bits that give
   // essential context for THIS trip even when they aren't literally part of the equation that
-  // produced it: the breaker's own closed/open status, and — when this record includes a close
-  // attempt or a separately-triggered Event Report — the close command and the ER trigger.
-  // Included only when the bit is actually present in this file AND changes state somewhere in
-  // the record, so an ordinary trip with no close attempt in it gets no extra rows.
-  const contextLabels = ['CLOSE', 'CL', 'CC', 'ER', '52A3P', '52A', '52B']
-    .filter(l => (P.digitalLabels || []).includes(l))
-    .filter(l => (P.digitalTransitions || []).some(t => t.changes.some(c => c.label === l)));
-  contextLabels.forEach(l => { if (!labels.includes(l)) labels.push(l); });
+  // produced it — same "relevant to this trip" set the Event Timeline's filter uses, so the
+  // two features agree on what counts.
+  getTripRelevantLabels(P, A).forEach(l => { if (!labels.includes(l)) labels.push(l); });
 
   const rows = labels
     .map(label => ({ label, intervals: computeAssertIntervals(P, label, totalMs, msPerSample) }))
@@ -5355,21 +5506,29 @@ function buildSVFlagsChart(P, A, compact) {
   labels = rows.map(r => r.label);
 
   // Small, plain-text legend for every bit shown above — compact enough to sit directly under
-  // the chart and still fit comfortably in a normal screenshot alongside it.
+  // the chart and still fit comfortably in a normal screenshot alongside it. An SVxxT entry is
+  // skipped when its bare SVxx counterpart is also in the legend — both resolve to the exact
+  // same equation/comment text, so showing both is pure repetition; the CHART rows above still
+  // show both traces, since their timing relative to each other is genuinely meaningful.
   const freqForLegend = P.eventInfo?.freq || 60;
-  const legendHTML = `<div class="sv-legend">${labels.map(l => {
+  const legendLabels = labels.filter(l => {
+    const m = l.match(/^SV(\d+)T$/);
+    return !(m && labels.includes(`SV${m[1]}`));
+  });
+  const legendHTML = `<div class="sv-legend">${legendLabels.map(l => {
     const svM = l.match(/^SV(\d+)T?$/);
     const sv = svM ? (P.svSettings || []).find(s => s.num === parseInt(svM[1])) : null;
     let short;
     if (sv) {
-      const comment = sv.equation.includes('#') ? sv.equation.split('#')[1].trim() : '';
-      short = comment || `Logic variable ${sv.label}`;
+      const info = describeSVLogic(sv);
+      short = info.isBlinker ? 'Blinker (self-oscillating; flashes a target/LED — no diagnostic meaning)'
+        : info.comment || (info.referencedName ? `Wraps ${info.referencedName}` : `Logic variable ${sv.label}`);
     } else {
       const el = explainElementBit(l, P, freqForLegend);
       short = el ? el.short : (getSVTooltip(l, P) || l);
     }
-    const eq = sv ? `<span class="sv-legend-eq">[${sv.equation.split('#')[0].trim()}]</span> ` : '';
-    return `<span class="sv-legend-item"><b>${l}</b>: ${eq}${short}</span>`;
+    const eq = sv ? `<span class="sv-legend-eq">[${linkifyEquationBits(sv.equation.split('#')[0].trim(), P)}]</span> ` : '';
+    return `<span class="sv-legend-item">${tt(l, P)}: ${eq}${short}</span>`;
   }).join('')}</div>`;
 
   const tripTransition = cause.tripTransition;
@@ -5391,11 +5550,11 @@ function buildSVFlagsChart(P, A, compact) {
       marginLeft: BANNER_CHART_MARGIN_LEFT, marginRight: BANNER_CHART_MARGIN_RIGHT,
       marginTop: 12, marginBottom: 24,
       rowH: 30, numVGrid: 8, fontSize: 12, totalMs, startMs, endMs, triggerMs, tripMs, cursorMs, compact: true, bg: 'var(--card)',
-    });
+    }, P);
     return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">SV / Trip Chain Flags${zoomHintHTML('svflags')}</div><div class="chart-svg-slot" id="chartSlot-svflags">${svg}</div>${legendHTML}</div>`;
   }
 
-  const svg = renderBooleanFlagsSVG(rows, { totalMs, triggerMs, tripMs, marginLeft: 110 });
+  const svg = renderBooleanFlagsSVG(rows, { totalMs, triggerMs, tripMs, marginLeft: 110 }, P);
   return `<div class="card blue-accent"><div class="card-header">🔗 SV / Trip Chain Flags</div>${svg}${legendHTML}
     <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Boolean state of each element in the resolved trip-cause chain, reconstructed from digital transitions across the full record.</div>
   </div>`;
@@ -5438,6 +5597,7 @@ function renderContent() {
   let html = '';
 
   // ── Timeline ──
+  const tripRelevant = getTripRelevantLabels(P, A);
   html += `<div class="tab-panel active" id="panel-timeline">
     <div class="card red-accent">
       <div class="card-header">⏱️ Digital Event Timeline</div>
@@ -5450,10 +5610,15 @@ function renderContent() {
         <span><span class="tl-bit assert" style="padding:2px 6px;">▲ bit</span> Asserted (turned ON) at this step</span>
         <span><span class="tl-bit deassert" style="padding:2px 6px;">▼ bit</span> De-asserted (turned OFF) at this step</span>
       </div>
+      ${tripRelevant.size ? `<label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-dim);margin-bottom:14px;cursor:pointer;">
+        <input type="checkbox" id="timelineTripOnlyToggle" onchange="toggleTimelineTripFilter(this.checked)">
+        Show only bits relevant to the trip
+      </label>` : ''}
       <div class="timeline">`;
 
-  // Show initial state summary
-  html += `<div class="tl-event">
+  // Show initial state summary — always visible regardless of the trip-relevant filter, since
+  // it's orientation for the whole record rather than a candidate step to filter out.
+  html += `<div class="tl-event tl-initial">
     <div class="tl-time">t = 0 ms (record start)</div>
     <div class="tl-label">Initial State</div>
     <div class="tl-desc">Key initial conditions: ${(P.initialDigitalState || []).filter(l =>
@@ -5462,17 +5627,21 @@ function renderContent() {
   </div>`;
 
   A.digitalTimeline.forEach(evt => {
-    html += `<div class="tl-event ${evt.isTrip ? 'trip' : ''}">
+    const relevantAsserts = evt.asserts.filter(l => tripRelevant.has(l));
+    const relevantDeasserts = evt.deasserts.filter(l => tripRelevant.has(l));
+    const rowRelevant = relevantAsserts.length || relevantDeasserts.length;
+    html += `<div class="tl-event ${evt.isTrip ? 'trip' : ''}" data-tl-relevant="${rowRelevant ? '1' : '0'}">
       <div class="tl-time">t = ${evt.timeMs.toFixed(1)} ms</div>
       <div class="tl-label">${evt.desc}</div>
       ${evt.asserts.length ? `<div class="tl-bits">${evt.asserts.map(l =>
-        `<span class="tl-bit assert">▲ ${tt(l,P)}</span>`).join('')}</div>` : ''}
+        `<span class="tl-bit assert" data-tl-bit-relevant="${tripRelevant.has(l) ? '1' : '0'}">▲ ${tt(l,P)}</span>`).join('')}</div>` : ''}
       ${evt.deasserts.length ? `<div class="tl-bits" style="margin-top:3px">${evt.deasserts.map(l =>
-        `<span class="tl-bit deassert">▼ ${tt(l,P)}</span>`).join('')}</div>` : ''}
+        `<span class="tl-bit deassert" data-tl-bit-relevant="${tripRelevant.has(l) ? '1' : '0'}">▼ ${tt(l,P)}</span>`).join('')}</div>` : ''}
     </div>`;
   });
 
   html += `</div></div></div>`;
+
 
   // ── Voltages ──
   html += `<div class="tab-panel" id="panel-voltages">`;
@@ -5921,6 +6090,21 @@ function selectEvent(idx) {
   renderBanner();
   renderTabs();
   renderContent();
+}
+
+// Filters the Event Timeline (panel-timeline) to only the bits relevant to the resolved trip.
+// Operates on the already-rendered DOM (each row/bit was tagged with data-tl-relevant /
+// data-tl-bit-relevant at render time) rather than re-rendering, so it's instant and doesn't
+// disturb scroll position or any other tab's state.
+function toggleTimelineTripFilter(checked) {
+  document.querySelectorAll('#panel-timeline .tl-event').forEach(evt => {
+    if (evt.classList.contains('tl-initial')) return; // orientation row — always visible
+    evt.querySelectorAll('[data-tl-bit-relevant]').forEach(bit => {
+      bit.style.display = (!checked || bit.dataset.tlBitRelevant === '1') ? '' : 'none';
+    });
+    const show = !checked || evt.dataset.tlRelevant === '1';
+    evt.style.display = show ? '' : 'none';
+  });
 }
 
 function toggleHelp(show, tab) {
