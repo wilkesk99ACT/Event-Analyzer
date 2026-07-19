@@ -3254,6 +3254,7 @@ function analyzeCEV(P, prevEvent) {
         closeLabel, initiatedBy, closeMs: closeIdx * msPerSampleC,
         bkrCloseLabel, bkrConfirmed: !!bkrConfirmTransition, closeTimeMs,
         tripElement, tripDelayMs, firstProtPickup, pickupBeforeFullyClosed,
+        _tripTransitionRef: tripTransitionAfterClose || null,
       };
 
       // ── Breaker never confirmed closed at all — genuine close failure ──
@@ -3296,6 +3297,38 @@ function analyzeCEV(P, prevEvent) {
             title: 'Slow Breaker Close Time',
             detail: `${tt(bkrCloseLabel, P)} did not confirm closed until ${closeTimeMs.toFixed(0)} ms (~${closeCyc.toFixed(1)} cycles) after the close command — slower than a typical breaker's closing time. Worth comparing against this breaker's rated closing time if mechanism health is in question.`,
           });
+        }
+      }
+
+      // ── Current spike / inrush check — only relevant when the close attempt was followed by ──
+      // a trip. A large current spike right after energizing isn't automatically a fault: closing
+      // onto a transformer routinely draws a magnetizing inrush current that can be many times
+      // full-load current and can look, on a magnitude chart alone, like a fault. This check
+      // gives that alternative explanation an explicit, checkable basis (2nd-harmonic content)
+      // rather than leaving "was this actually a fault?" unaddressed for a failed close attempt.
+      if (tripTransitionAfterClose) {
+        const preWinStart = Math.max(0, closeIdx - spcC * 2);
+        const preSamples = analogData.slice(preWinStart, closeIdx);
+        const peakOf = (rows, ch) => rows.reduce((m, r) => Math.max(m, Math.abs(r[ch] || 0)), 0);
+        const peakPre = Math.max(peakOf(preSamples, 'IA'), peakOf(preSamples, 'IB'), peakOf(preSamples, 'IC'));
+        const windowEnd = Math.min(analogData.length, tripTransitionAfterClose.analogSampleIdx + 2);
+        const duringSamples = analogData.slice(closeIdx, windowEnd);
+        const peakDuring = Math.max(peakOf(duringSamples, 'IA'), peakOf(duringSamples, 'IB'), peakOf(duringSamples, 'IC'));
+        const hasSpike = peakDuring > Math.max(peakPre * 3, 1); // secondary amps floor
+
+        if (hasSpike) {
+          const inrush = detectInrushSignature(P, closeIdx, windowEnd);
+          const inrushLikely = !!inrush && inrush.pct2H >= 15;
+          A.closeAttempt.currentSpike = { peakPre, peakDuring, inrush, inrushLikely };
+          if (inrushLikely) {
+            A.investigationFlags.push({
+              severity: 'medium',
+              title: 'Current Spike Consistent With Inrush, Not Necessarily a Fault',
+              detail: `Phase ${inrush.phase} carried a peak of ${inrush.peak.toFixed(1)} A secondary right after the close command, with roughly ${inrush.pct2H.toFixed(0)}% second-harmonic content relative to the fundamental${inrush.asymmetry ? ` and a ${inrush.asymmetry.toFixed(1)}:1 peak asymmetry between half-cycles` : ''} — the same signature transformer differential relays use to restrain from tripping on inrush. This doesn't rule out a real fault, but the current shape by itself reads more like energizing a transformer's magnetizing inrush than a bolted fault, which normally carries much less harmonic content. Worth weighing against the specific element(s) that actually operated (see the trip cause above) before concluding this was a line fault.`,
+            });
+          } else if (!inrush && spcC < 8) {
+            A.closeAttempt.currentSpike.note = 'Sample rate in this record (below 8 samples/cycle) is too coarse to reliably check for a 2nd-harmonic inrush signature.';
+          }
         }
       }
     }
@@ -3432,7 +3465,14 @@ function analyzeCEV(P, prevEvent) {
       );
       const medGroundI = median(analogData.map(r => Math.abs(r.IG || 0)));
       const smallCurrent = medPhaseI < 2 && medGroundI < 2; // secondary amps — well below any real load/fault
-      if (!closedBeforeTrip && smallCurrent) {
+      // If this exact trip is the one the close-attempt analysis already identified as
+      // "closed into an existing fault" (real current flowed briefly while the contacts were
+      // still traveling), the whole-record median above will typically wash that brief pulse
+      // out — don't let this more generic, less-precise check contradict the more specific
+      // close-attempt finding for the same trip.
+      const closeExplainsThisTrip = !!(A.closeAttempt && A.closeAttempt._tripTransitionRef === cause.tripTransition
+        && A.closeAttempt.pickupBeforeFullyClosed);
+      if (!closedBeforeTrip && smallCurrent && !closeExplainsThisTrip) {
         A.investigationFlags.push({
           severity: 'high',
           title: 'Breaker Was Already Open — Not a Fault Interruption',
@@ -3996,6 +4036,74 @@ function computeFundamentalPhasors(samples, N) {
     im[i] = si * norm;
   }
   return { re, im };
+}
+
+// Generalized version of the fundamental-frequency extractor above, parameterized by harmonic
+// order — harmonic=1 reproduces computeFundamentalPhasors exactly. Used to estimate 2nd-harmonic
+// content for inrush detection: transformer magnetizing inrush current is characteristically
+// rich in 2nd harmonic (commonly 20-70% of the fundamental), while genuine fault current
+// normally carries very little (commonly under ~10%) — the same signature transformer
+// differential relays use for inrush restraint.
+function computeHarmonicPhasors(samples, N, harmonic) {
+  const n = samples.length;
+  const re = new Array(n).fill(0), im = new Array(n).fill(0);
+  const cosT = new Array(N), sinT = new Array(N);
+  for (let k = 0; k < N; k++) {
+    cosT[k] = Math.cos(2 * Math.PI * harmonic * k / N);
+    sinT[k] = Math.sin(2 * Math.PI * harmonic * k / N);
+  }
+  const norm = Math.sqrt(2) / N;
+  for (let i = 0; i < n; i++) {
+    if (i < N - 1) { re[i] = re[Math.max(0, i - 1)] || 0; im[i] = im[Math.max(0, i - 1)] || 0; continue; }
+    let sr = 0, si = 0;
+    for (let k = 0; k < N; k++) {
+      const v = samples[i - k] || 0;
+      sr += v * cosT[k];
+      si += v * sinT[k];
+    }
+    re[i] = sr * norm;
+    im[i] = si * norm;
+  }
+  return { re, im };
+}
+
+// Best-effort check for a transformer-inrush-like signature in phase current right after a
+// close attempt: elevated 2nd-harmonic content relative to the fundamental, plus (as
+// supporting-only evidence) a one-sided/asymmetric peak shape. Requires at least 8 analog
+// samples/cycle to say anything about the 2nd harmonic — a 2nd harmonic needs a minimum of 4
+// samples/cycle just to satisfy Nyquist with essentially zero margin, which is too close to
+// the sampling limit to trust; below 8, this returns null rather than a misleading number.
+function detectInrushSignature(P, startIdx, endIdx) {
+  const spc = P.eventInfo.samPerCycA || 32;
+  if (spc < 8) return null;
+  const data = P.analogData || [];
+  const s = Math.max(0, startIdx), e = Math.min(data.length, endIdx);
+  if (e - s < spc * 1.5) return null; // need at least ~1.5 cycles in the window to say anything
+
+  let best = null;
+  for (const ch of ['IA', 'IB', 'IC']) {
+    const full = data.map(r => r[ch] || 0);
+    const fundP = computeHarmonicPhasors(full, spc, 1);
+    const h2P = computeHarmonicPhasors(full, spc, 2);
+    // Evaluate at the end of the window (closest to whatever happens next — typically the
+    // following trip), where the sliding DFT window sits fully inside the post-close current.
+    const idx = e - 1;
+    const fundMag = Math.hypot(fundP.re[idx], fundP.im[idx]);
+    const h2Mag = Math.hypot(h2P.re[idx], h2P.im[idx]);
+    const pct2H = fundMag > 0.05 ? (h2Mag / fundMag) * 100 : 0;
+
+    // Peak-based asymmetry over the window — inrush is characteristically one-sided (a
+    // DC-offset, "cuspy" waveform); a genuine fault is close to symmetric. Supporting evidence
+    // only — a fault initiated at an unfavorable point-on-wave can also show some transient
+    // asymmetry — so this is reported alongside the harmonic content, never in place of it.
+    let posPeak = 0, negPeak = 0;
+    for (let i = s; i < e; i++) { const v = full[i]; if (v > posPeak) posPeak = v; if (-v > negPeak) negPeak = -v; }
+    const asymmetry = Math.min(posPeak, negPeak) > 0.01 ? Math.max(posPeak, negPeak) / Math.max(0.01, Math.min(posPeak, negPeak)) : null;
+
+    const peak = Math.max(posPeak, negPeak);
+    if (!best || peak > best.peak) best = { phase: ch.slice(1), peak, pct2H, asymmetry };
+  }
+  return best;
 }
 
 // Zero-sequence magnitude series (3V0 = |Va + Vb + Vc| at FUNDAMENTAL frequency) from three
@@ -5110,6 +5218,9 @@ function buildCloseAttemptCard(P, A) {
   if (!ca.bkrConfirmed) {
     verdict = '✕ Breaker never confirmed closed';
     verdictColor = 'var(--red)';
+  } else if (ca.currentSpike?.inrushLikely) {
+    verdict = ca.pickupBeforeFullyClosed ? '⚡ Tripped — current shape suggests inrush, not a fault' : '⚡ Re-tripped — current shape suggests inrush, not a fault';
+    verdictColor = 'var(--yellow)';
   } else if (ca.tripElement && ca.pickupBeforeFullyClosed) {
     verdict = '⚠ Closed into an existing fault';
     verdictColor = 'var(--red)';
@@ -5132,6 +5243,18 @@ function buildCloseAttemptCard(P, A) {
     if (ca.firstProtPickup) {
       rows.push(['First protection pickup', `${tt(ca.firstProtPickup.label, P)}, ${ca.pickupBeforeFullyClosed ? 'before the breaker confirmed fully closed' : 'after the breaker confirmed fully closed'}`]);
     }
+    if (ca.currentSpike) {
+      const cs = ca.currentSpike;
+      let spikeText = `peaked at ${cs.peakDuring.toFixed(1)} A sec (vs. ${cs.peakPre.toFixed(1)} A sec just before the close)`;
+      if (cs.inrush) {
+        spikeText += cs.inrushLikely
+          ? ` — ~${cs.inrush.pct2H.toFixed(0)}% 2nd-harmonic content on phase ${cs.inrush.phase}, consistent with transformer inrush rather than a bolted fault`
+          : ` — ~${cs.inrush.pct2H.toFixed(0)}% 2nd-harmonic content on phase ${cs.inrush.phase}, in the range typical of real fault current, not inrush`;
+      } else if (cs.note) {
+        spikeText += ` — ${cs.note}`;
+      }
+      rows.push(['Current spike', spikeText]);
+    }
   } else {
     rows.push(['Following trip', 'None in this record']);
   }
@@ -5144,7 +5267,7 @@ function buildCloseAttemptCard(P, A) {
       ${rows.map(([k, v]) => `<tr><td style="font-weight:600;color:var(--text);white-space:nowrap;">${k}</td><td>${v}</td></tr>`).join('')}
     </tbody></table>
     <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">
-      "Closed into an existing fault" means a protection element picked up while the contacts were still traveling (before the breaker confirmed closed) — a prestrike/arcing signature consistent with a fault already present on the line, not a breaker malfunction. "Re-tripped shortly after" means the pickup came only after full closure was confirmed — consistent with a fault or inrush that appeared once the circuit was actually energized.
+      "Closed into an existing fault" means a protection element picked up while the contacts were still traveling (before the breaker confirmed closed) — a prestrike/arcing signature consistent with a fault already present on the line, not a breaker malfunction. "Re-tripped shortly after" means the pickup came only after full closure was confirmed — consistent with a fault or inrush that appeared once the circuit was actually energized. A "current spike" row with elevated 2nd-harmonic content points toward transformer magnetizing inrush rather than a real fault — the same basis transformer differential relays use to restrain from tripping on it.
     </div>
   </div>`;
 }
@@ -5211,7 +5334,25 @@ function buildSVFlagsChart(P, A, compact) {
   const mustInclude = [cause.immediateCause, cause.causeChain[cause.causeChain.length - 1]?.label].filter(Boolean);
   mustInclude.forEach(l => { if (!labels.includes(l)) labels.push(l); });
 
-  const rows = labels.map(label => ({ label, intervals: computeAssertIntervals(P, label, totalMs, msPerSample) }));
+  // Beyond the resolved logic chain itself, always surface a small set of bits that give
+  // essential context for THIS trip even when they aren't literally part of the equation that
+  // produced it: the breaker's own closed/open status, and — when this record includes a close
+  // attempt or a separately-triggered Event Report — the close command and the ER trigger.
+  // Included only when the bit is actually present in this file AND changes state somewhere in
+  // the record, so an ordinary trip with no close attempt in it gets no extra rows.
+  const contextLabels = ['CLOSE', 'CL', 'CC', 'ER', '52A3P', '52A', '52B']
+    .filter(l => (P.digitalLabels || []).includes(l))
+    .filter(l => (P.digitalTransitions || []).some(t => t.changes.some(c => c.label === l)));
+  contextLabels.forEach(l => { if (!labels.includes(l)) labels.push(l); });
+
+  const rows = labels
+    .map(label => ({ label, intervals: computeAssertIntervals(P, label, totalMs, msPerSample) }))
+    // Chronological, top to bottom: whichever bit asserts earliest in the record is drawn
+    // first, matching how an operator would actually narrate the sequence of events. A bit
+    // already asserted at t=0 sorts first (interval start 0); one that never actually asserts
+    // sorts last rather than disrupting the ordering.
+    .sort((a, b) => (a.intervals[0]?.[0] ?? Infinity) - (b.intervals[0]?.[0] ?? Infinity));
+  labels = rows.map(r => r.label);
 
   // Small, plain-text legend for every bit shown above — compact enough to sit directly under
   // the chart and still fit comfortably in a normal screenshot alongside it.
@@ -5841,11 +5982,21 @@ function showBitDetail(label) {
     || treeHasLabel(ANALYSIS?.tripCause?.logicTree, label));
 
   // Does this bit involve a sequence quantity (negative-sequence or zero-sequence V/I)? If so,
-  // point to the plain-language explainer rather than repeating it in every popup.
+  // point to the plain-language explainer rather than repeating it in every popup. This needs to
+  // catch three shapes: (1) the element bit itself — any 50/51/59/67/27/47-family element whose
+  // designator is G (ground/residual — a zero-sequence-derived quantity), N (neutral — measured
+  // via a physical neutral CT, functionally the same 3I0/3V0 residual family in a wye system),
+  // or Q (SEL's negative-sequence designator) — regardless of whether a level digit follows
+  // (e.g. "50G1P" and the level-less "51QP" both need to match); (2) a bare mention of a raw
+  // sequence quantity (3V0, 3I0, V2, I2); or (3) an SV logic variable whose OWN equation is
+  // built from one of those — e.g. "SV17 := 59G1T" is a sequence-derived timer even though
+  // "SV17" itself carries no element-like name.
   const svForSeq = svMatch && PARSED ? (PARSED.svSettings || []).find(s => s.num === parseInt(svMatch[1])) : null;
-  const isSequenceRelated = /(^|[^A-Z])Q\d/.test(label) && /^(50|51|59|67|27)/.test(label)
-    || /^(59|27)[YZ]?N\d/.test(label) || /3V0/i.test(label)
-    || (svForSeq && /SEQ|3V0/i.test(svForSeq.equation));
+  const seqElementRe = /^(50|51|59|67|27|47)[A-Z]*[GNQ]\d?/;
+  const seqQuantityRe = /3V0|3I0|\bV2\b|\bI2\b|ZERO.?SEQ|NEG.?SEQ|SEQUENCE/i;
+  const svEquationIsSeq = sv => !!sv && (seqQuantityRe.test(sv.equation)
+    || (sv.equation.match(/\b[0-9][A-Z0-9]*\b/g) || []).some(tok => seqElementRe.test(tok)));
+  const isSequenceRelated = seqElementRe.test(label) || seqQuantityRe.test(label) || svEquationIsSeq(svForSeq);
   const seqLink = isSequenceRelated
     ? `<div style="margin-top:10px;"><span class="zoom-badge" onclick="toggleHelp(true,'seq');">What is sequence voltage/current? →</span></div>`
     : '';
