@@ -5617,8 +5617,8 @@ function getDirectInputs(label, eqByLabel) {
 }
 
 function buildLocalLogicGraph(P, label, maxForwardCols, maxBackwardCols) {
-  maxForwardCols = maxForwardCols || 4;
-  maxBackwardCols = maxBackwardCols || 6;
+  maxForwardCols = maxForwardCols || 6;
+  maxBackwardCols = maxBackwardCols || 10;
   const { eqByLabel, refIndex } = getEquationRefIndex(P);
   const edges = []; // {from, to} — from feeds into to; drawn as an actual connector, not inferred from column position
 
@@ -6442,34 +6442,60 @@ function renderLocalLogicGraph(graph, P) {
   // and every edge gets its OWN line between the two specific boxes it actually connects —
   // not one shared arrow standing in for a whole column-to-column relationship.
   const COL_W = 122, ROW_H = 32, BOX_W = 98, BOX_H = 24, MARGIN = 10;
+  const colIndexOf = {};
+  columns.forEach((col, ci) => col.forEach(lbl => { colIndexOf[lbl] = ci; }));
+
+  // An edge between adjacent columns is drawn as a plain diagonal — there's nothing else in
+  // that single gap for it to cross through. An edge that SKIPS one or more columns (which
+  // happens when a bit was already placed earlier by a different branch) would cut diagonally
+  // across whatever columns sit between it, so those get routed instead as a taxicab path
+  // through a dedicated horizontal lane above the whole diagram — straight up, straight across,
+  // straight down — going around the intervening columns rather than through them. Each skip
+  // edge gets its own lane so multiple skips don't overlap each other.
+  const adjacentEdges = [], skipEdges = [];
+  graph.edges.forEach(e => {
+    const ciFrom = colIndexOf[e.from], ciTo = colIndexOf[e.to];
+    if (ciFrom == null || ciTo == null) return;
+    (Math.abs(ciTo - ciFrom) <= 1 ? adjacentEdges : skipEdges).push(e);
+  });
+
+  const LANE_H = 7;
+  const topPad = MARGIN + skipEdges.length * LANE_H;
   const maxRows = Math.max(...columns.map(c => c.length), 1);
   const totalH = maxRows * ROW_H;
   const totalW = columns.length * COL_W - (COL_W - BOX_W) + MARGIN * 2;
-  const height = totalH + MARGIN * 2;
+  const height = totalH + topPad + MARGIN;
 
   const pos = {}; // label -> {x, y} (top-left of its box)
   columns.forEach((col, ci) => {
     const colH = col.length * ROW_H;
-    const startY = MARGIN + (totalH - colH) / 2;
+    const startY = topPad + (totalH - colH) / 2;
     col.forEach((lbl, ri) => { pos[lbl] = { x: MARGIN + ci * COL_W, y: startY + ri * ROW_H }; });
   });
 
   const centerColor = 'var(--accent)';
+  const edgeColor = ({ from, to }) => {
+    if (from === graph.center || to === graph.center) return centerColor;
+    const st = currentBitState(from);
+    if (st && st.state) return /^SV\d+T?$/.test(from) ? 'var(--red)' : 'var(--green)';
+    return 'var(--text-muted)';
+  };
+
   let linesHTML = '';
-  graph.edges.forEach(({ from, to }) => {
-    const a = pos[from], b = pos[to];
-    if (!a || !b) return; // shouldn't happen, but don't draw a dangling line if it does
+  adjacentEdges.forEach(e => {
+    const a = pos[e.from], b = pos[e.to];
+    if (!a || !b) return;
     const x1 = a.x + BOX_W, y1 = a.y + BOX_H / 2;
     const x2 = b.x, y2 = b.y + BOX_H / 2;
-    const involvesCenter = from === graph.center || to === graph.center;
-    let color = 'var(--text-muted)';
-    if (involvesCenter) {
-      color = centerColor;
-    } else {
-      const st = currentBitState(from);
-      if (st && st.state) color = /^SV\d+T?$/.test(from) ? 'var(--red)' : 'var(--green)';
-    }
-    linesHTML += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="1.5"/>`;
+    linesHTML += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${edgeColor(e)}" stroke-width="1.5"/>`;
+  });
+  skipEdges.forEach((e, i) => {
+    const a = pos[e.from], b = pos[e.to];
+    if (!a || !b) return;
+    const x1 = a.x + BOX_W, y1 = a.y + BOX_H / 2;
+    const x2 = b.x, y2 = b.y + BOX_H / 2;
+    const laneY = MARGIN / 2 + i * LANE_H + LANE_H / 2;
+    linesHTML += `<path d="M ${x1} ${y1} L ${x1} ${laneY} L ${x2} ${laneY} L ${x2} ${y2}" fill="none" stroke="${edgeColor(e)}" stroke-width="1.5"/>`;
   });
 
   let boxesHTML = '';
