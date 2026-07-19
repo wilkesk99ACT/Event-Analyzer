@@ -1131,8 +1131,9 @@ const TOOLTIPS = {
   '52A3P':'Three-phase breaker closed (all poles closed)','52B':'Breaker position: OPEN (52b contact)',
   'TRIP':'Trip output asserted','TRIP3P':'Three-phase trip output asserted','TRIPA':'Phase A trip','TRIPB':'Phase B trip','TRIPC':'Phase C trip',
   'TR':'Trip equation output (TR := trip logic)','TRIPLED':'TRIP target LED asserted',
+  'CLOSE':'Close output asserted — the relay is commanding (or has commanded) the breaker to close','CL':'Close logic equation output (CL := close logic) — the settings-level definition behind the CLOSE Relay Word bit',
   'CLOSE3P':'Three-phase close command issued','CLOSEA':'Phase A close','CLOSEB':'Phase B close','CLOSEC':'Phase C close',
-  'CC3':'External close command (control contact, 3-phase)','OC3':'External overcurrent/trip contact (3-phase)',
+  'CC':'External/remote close command input (control contact) — typically a SCADA or RTU-initiated close','CC3':'External close command (control contact, 3-phase)','OC3':'External overcurrent/trip contact (3-phase)',
   'OC':'External overcurrent/trip contact input','OCA':'External OC contact phase A','OCB':'External OC B','OCC':'External OC C',
   'ULTRIP':'Unlatch trip — sustains trip after equation clears','ULCL3P':'Unlatch close (3-phase)',
   'SPOA':'Pole A open','SPOB':'Pole B open','SPOC':'Pole C open','SPO':'Single-pole open detected',
@@ -3106,16 +3107,19 @@ function analyzeCEV(P, prevEvent) {
     const deasserts = t.changes.filter(c => !c.asserted).map(c => c.label);
     let desc = '';
     const hasTrip = asserts.some(l => ['TRIP3P','TRIPA','TRIPB','TRIPC','TRIP'].includes(l));
+    const hasClose = asserts.some(l => ['CLOSE','CLOSE3P','CLOSEA','CLOSEB','CLOSEC','CL'].includes(l));
     const hasUV = asserts.some(l => /^27[YZ]/.test(l));
     const hasOV = asserts.some(l => /^59[YZ]/.test(l));
     const hasSVT = asserts.some(l => /^SV\d+T$/.test(l));
     const hasSV = asserts.some(l => /^SV\d+$/.test(l));
-    const hasBkr = asserts.includes('52A3P') || deasserts.includes('52A3P');
+    const hasBkr = ['52A3P', '52A', '52B'].some(l => asserts.includes(l) || deasserts.includes(l));
     const hasOC = asserts.some(l => /^5[01][A-Z]/.test(l));
     const hasFreq = asserts.some(l => /^81D/.test(l));
 
     if (hasTrip) {
       desc = 'TRIP COMMAND ISSUED';
+    } else if (hasClose) {
+      desc = 'CLOSE COMMAND ISSUED';
     } else if (hasSVT) {
       // Describe what the SV timer expiration means using the equation
       const svtLabels = asserts.filter(l => /^SV\d+T$/.test(l));
@@ -3169,6 +3173,133 @@ function analyzeCEV(P, prevEvent) {
   // that was already open; a trip that traces to logic/status bits instead of a measured
   // quantity) so that misreading doesn't happen silently.
   A.investigationFlags = [];
+
+  // ══════════════════════════════════════════════════════════════════════
+  // CLOSE-ATTEMPT ANALYSIS
+  // ══════════════════════════════════════════════════════════════════════
+  // A breaker CLOSE command is a distinct kind of event from a protection trip, and deserves
+  // its own read rather than being folded into the generic trip-cause logic above. Three
+  // outcomes look superficially similar (a close command, maybe followed by a trip) but mean
+  // very different things:
+  //   1. The breaker never confirms closed at all — a genuine close failure (stuck mechanism,
+  //      failed close coil, an interlock/permissive blocking the close). A device-health
+  //      question, not an electrical one.
+  //   2. The breaker confirms closed, then a protection element operates within a few cycles,
+  //      with the fault indication appearing BEFORE the breaker even finished traveling to
+  //      closed — the classic "closing into a pre-existing fault" signature (prestrike arcing
+  //      across the still-closing gap as the contacts approach). The line was faulted, not
+  //      the breaker.
+  //   3. The breaker confirms closed, a protection element operates shortly after, but only
+  //      AFTER full closure was confirmed — consistent with a fault (or inrush) that appeared
+  //      once the circuit was actually energized, a materially different read from case 2.
+  //   4. The breaker confirms closed and stays closed — a normal, successful close; nothing
+  //      flagged, matching this tool's existing philosophy of staying quiet on routine outcomes.
+  // This runs independently of whatever A.tripCause resolved to (or whether it resolved at
+  // all) — a close attempt is worth reading on its own terms.
+  {
+    const dLabels = P.digitalLabels || [];
+    const closeLabel = ['CLOSE', 'CL'].find(l => dLabels.includes(l));
+    const remoteCloseLabel = dLabels.includes('CC') ? 'CC' : null;
+    const bkrCloseLabel = ['52A3P', '52A'].find(l => dLabels.includes(l));
+    const tripLabels = ['TRIP3P', 'TRIPA', 'TRIPB', 'TRIPC', 'TRIP'].filter(l => dLabels.includes(l));
+
+    // First CLOSE assertion actually observed as a transition in this record (an
+    // already-asserted-at-record-start CLOSE can't be timed from here, so it's left undetected
+    // rather than guessed at — consistent with how the breaker-already-open flag above handles
+    // the analogous "can't see the start" case).
+    const closeTransition = closeLabel
+      ? digitalTransitions.find(t => t.changes.some(c => c.label === closeLabel && c.asserted))
+      : null;
+
+    if (closeTransition) {
+      const spcC = P.eventInfo.samPerCycA || 32;
+      const msPerSampleC = 1000 / (freq * spcC);
+      const closeIdx = closeTransition.analogSampleIdx;
+      const closeTransIdx = digitalTransitions.indexOf(closeTransition);
+
+      // Best-effort read of what initiated the close, from whatever else asserted in the same
+      // transition bundle as CLOSE itself.
+      const bundle = closeTransition.changes.filter(c => c.asserted).map(c => c.label);
+      let initiatedBy = 'not determinable from this record';
+      if (remoteCloseLabel && bundle.includes(remoteCloseLabel)) initiatedBy = 'a remote/SCADA close command';
+      else if (bundle.some(l => /^PB\d+_PUL$/.test(l))) initiatedBy = 'the local front-panel close pushbutton';
+
+      // Breaker confirmation: first assertion of the closed-status bit at or after the close cmd.
+      const bkrConfirmTransition = bkrCloseLabel
+        ? digitalTransitions.slice(closeTransIdx).find(t => t.changes.some(c => c.label === bkrCloseLabel && c.asserted))
+        : null;
+      const closeTimeMs = bkrConfirmTransition ? (bkrConfirmTransition.analogSampleIdx - closeIdx) * msPerSampleC : null;
+
+      // Next trip after the close command, if any.
+      const tripTransitionAfterClose = tripLabels.length
+        ? digitalTransitions.slice(closeTransIdx).find(t => t.changes.some(c => tripLabels.includes(c.label) && c.asserted))
+        : null;
+      const tripDelayMs = tripTransitionAfterClose ? (tripTransitionAfterClose.analogSampleIdx - closeIdx) * msPerSampleC : null;
+      const tripElement = tripTransitionAfterClose
+        ? tripLabels.find(l => tripTransitionAfterClose.changes.some(c => c.label === l && c.asserted)) : null;
+
+      // Did a protection ELEMENT pick up (not just the final trip bit) before the breaker
+      // confirmed fully closed? That's the tell for prestrike/closing-into-a-fault — a fault
+      // indication appearing while the contacts were still traveling, not after.
+      const protPickupRe = /^(50|51|59|67|27)[A-Z0-9]*P$/;
+      let firstProtPickup = null;
+      for (const t of digitalTransitions.slice(closeTransIdx)) {
+        if (bkrConfirmTransition && t.analogSampleIdx > bkrConfirmTransition.analogSampleIdx) break;
+        const hit = t.changes.find(c => c.asserted && protPickupRe.test(c.label));
+        if (hit) { firstProtPickup = { label: hit.label, idx: t.analogSampleIdx }; break; }
+      }
+      const pickupBeforeFullyClosed = !!firstProtPickup;
+
+      A.closeAttempt = {
+        closeLabel, initiatedBy, closeMs: closeIdx * msPerSampleC,
+        bkrCloseLabel, bkrConfirmed: !!bkrConfirmTransition, closeTimeMs,
+        tripElement, tripDelayMs, firstProtPickup, pickupBeforeFullyClosed,
+      };
+
+      // ── Breaker never confirmed closed at all — genuine close failure ──
+      if (bkrCloseLabel && !bkrConfirmTransition) {
+        const recordEndMs = (analogData.length - 1 - closeIdx) * msPerSampleC;
+        if (recordEndMs > 10 * (1000 / freq)) {
+          A.investigationFlags.push({
+            severity: 'high',
+            title: 'Close Command Issued — Breaker Never Confirmed Closed',
+            detail: `A close command (${tt(closeLabel, P)}, initiated by ${initiatedBy}) was issued at t=${(closeIdx * msPerSampleC).toFixed(0)} ms, but ${tt(bkrCloseLabel, P)} never asserts anywhere in the following ${recordEndMs.toFixed(0)} ms of record. This looks like a genuine failure of the breaker to close — the operating mechanism, the close coil circuit, or an interlock/permissive blocking the close — rather than an electrical condition on the line. Worth checking the breaker/recloser directly.`,
+          });
+        }
+      }
+
+      // ── Closed, then re-tripped almost immediately ──
+      if (bkrConfirmTransition && tripTransitionAfterClose && tripDelayMs != null && tripDelayMs < (1000 / freq) * 15) {
+        const cyc = (tripDelayMs / (1000 / freq)).toFixed(1);
+        if (pickupBeforeFullyClosed) {
+          const pickupMs = (firstProtPickup.idx - closeIdx) * msPerSampleC;
+          A.investigationFlags.push({
+            severity: 'high',
+            title: 'Closed Into an Existing Fault',
+            detail: `${tt(firstProtPickup.label, P)} picked up ${pickupMs.toFixed(0)} ms after the close command — BEFORE ${tt(bkrCloseLabel, P)} confirmed the breaker fully closed (at ${closeTimeMs.toFixed(0)} ms). A fault indication appearing while the contacts were still traveling is consistent with prestrike arcing across the closing gap — a fault was already present on the line, and the breaker closed directly into it. The trip that followed, ${cyc} cycles after the close command via ${tt(tripElement, P)}, reads as the protection system doing its job, not a device malfunction.`,
+          });
+        } else {
+          A.investigationFlags.push({
+            severity: 'medium',
+            title: 'Breaker Closed, Then Re-Tripped Shortly After',
+            detail: `The breaker confirmed closed (${tt(bkrCloseLabel, P)}, ${closeTimeMs.toFixed(0)} ms after the close command), then tripped again via ${tt(tripElement, P)} ${cyc} cycles later. Unlike a prestrike pattern, no protection element picked up until after full closure was confirmed — consistent with a fault (or inrush) that appeared once the circuit was actually energized, or a condition local to the equipment being closed onto, rather than a fault already sitting on the line before contact.`,
+          });
+        }
+      }
+
+      // ── Slow mechanical close time (only meaningful once the breaker did confirm closed) ──
+      if (bkrConfirmTransition && closeTimeMs != null) {
+        const closeCyc = closeTimeMs / (1000 / freq);
+        if (closeCyc > 10) {
+          A.investigationFlags.push({
+            severity: 'medium',
+            title: 'Slow Breaker Close Time',
+            detail: `${tt(bkrCloseLabel, P)} did not confirm closed until ${closeTimeMs.toFixed(0)} ms (~${closeCyc.toFixed(1)} cycles) after the close command — slower than a typical breaker's closing time. Worth comparing against this breaker's rated closing time if mechanism health is in question.`,
+          });
+        }
+      }
+    }
+  }
 
   if (A.tripCause && !A.tripCause.isEventReport) {
     const cause = A.tripCause;
@@ -4964,6 +5095,61 @@ function buildConsistencyChecksCard(P, A) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// CLOSE ATTEMPT CARD
+// ══════════════════════════════════════════════════════════════════════
+// Always shown when a close command is detected in this record (A.closeAttempt, computed in
+// analyzeCEV) — whether or not anything about it got flagged above. Whatever the outcome, an
+// operator looking at a close attempt wants the plain facts laid out: when the command went
+// out, how it was initiated, whether/when the breaker confirmed closed, and what — if anything
+// — happened right after.
+function buildCloseAttemptCard(P, A) {
+  const ca = A?.closeAttempt;
+  if (!ca) return '';
+
+  let verdict, verdictColor;
+  if (!ca.bkrConfirmed) {
+    verdict = '✕ Breaker never confirmed closed';
+    verdictColor = 'var(--red)';
+  } else if (ca.tripElement && ca.pickupBeforeFullyClosed) {
+    verdict = '⚠ Closed into an existing fault';
+    verdictColor = 'var(--red)';
+  } else if (ca.tripElement) {
+    verdict = '⚠ Closed, then re-tripped shortly after';
+    verdictColor = 'var(--yellow)';
+  } else {
+    verdict = '✓ Close succeeded and held';
+    verdictColor = 'var(--green)';
+  }
+
+  const rows = [];
+  rows.push(['Close command', `${tt(ca.closeLabel, P)} at t=${ca.closeMs.toFixed(0)} ms, initiated by ${ca.initiatedBy}`]);
+  rows.push(['Breaker confirmation', ca.bkrConfirmed
+    ? `${tt(ca.bkrCloseLabel, P)} confirmed closed ${ca.closeTimeMs.toFixed(0)} ms later (~${(ca.closeTimeMs / (1000 / (P.eventInfo.freq || 60))).toFixed(1)} cycles)`
+    : (ca.bkrCloseLabel ? `${tt(ca.bkrCloseLabel, P)} never confirmed closed in the rest of this record` : 'No breaker-status bit (52A/52A3P) found in this file to confirm against')]);
+  if (ca.tripElement) {
+    const freqL = P.eventInfo.freq || 60;
+    rows.push(['Following trip', `${tt(ca.tripElement, P)} asserted ${ca.tripDelayMs.toFixed(0)} ms after the close command (~${(ca.tripDelayMs / (1000 / freqL)).toFixed(1)} cycles)`]);
+    if (ca.firstProtPickup) {
+      rows.push(['First protection pickup', `${tt(ca.firstProtPickup.label, P)}, ${ca.pickupBeforeFullyClosed ? 'before the breaker confirmed fully closed' : 'after the breaker confirmed fully closed'}`]);
+    }
+  } else {
+    rows.push(['Following trip', 'None in this record']);
+  }
+
+  return `<div class="card yellow-accent"><div class="card-header">🔌 Close Attempt</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+      <span style="font-size:13px;font-weight:700;color:${verdictColor};">${verdict}</span>
+    </div>
+    <table class="data-table"><tbody>
+      ${rows.map(([k, v]) => `<tr><td style="font-weight:600;color:var(--text);white-space:nowrap;">${k}</td><td>${v}</td></tr>`).join('')}
+    </tbody></table>
+    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">
+      "Closed into an existing fault" means a protection element picked up while the contacts were still traveling (before the breaker confirmed closed) — a prestrike/arcing signature consistent with a fault already present on the line, not a breaker malfunction. "Re-tripped shortly after" means the pickup came only after full closure was confirmed — consistent with a fault or inrush that appeared once the circuit was actually energized.
+    </div>
+  </div>`;
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // INVESTIGATION FLAGS PANEL
 // ══════════════════════════════════════════════════════════════════════
 // Renders A.investigationFlags (computed in analyzeCEV). Deliberately worded as
@@ -5225,6 +5411,7 @@ function renderContent() {
 
   // ── Diagnostics ──
   html += `<div class="tab-panel" id="panel-diagnostics">
+    ${buildCloseAttemptCard(P, A)}
     ${buildConsistencyChecksCard(P, A)}
   </div>`;
 
