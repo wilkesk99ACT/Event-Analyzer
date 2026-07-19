@@ -879,6 +879,72 @@ body.dragging-file #drop-overlay { display: flex; }
         A false box is only ever shown when it's structurally necessary — e.g. every side of an
         AND, or a set of conditions that all had to fail together to explain a NOT. It's never
         shown just for reference.</p>
+        <h3 id="seqExplainerSection">Understanding Sequence Voltage / Current</h3>
+        <p>Any three-phase voltage or current can be split into three simpler components:
+        <b>positive-</b>, <b>negative-</b>, and <b>zero-sequence</b>. None of these are something
+        you'd read directly off a single wire with a meter — they're calculated from all three
+        phases together, specifically to reveal imbalance that a single-phase reading can't show.</p>
+        <div style="text-align:center;margin:14px 0;">
+          <svg viewBox="0 0 560 190" style="width:100%;max-width:560px;background:var(--bg2);border-radius:8px;">
+            <text x="90" y="20" text-anchor="middle" font-size="11" fill="var(--text-dim)" font-weight="600">BALANCED (healthy)</text>
+            <circle cx="90" cy="100" r="55" fill="none" stroke="var(--card-border)" stroke-width="1"/>
+            <g stroke-width="2.5">
+              <line x1="90" y1="100" x2="90" y2="45" stroke="#ef4444"/>
+              <line x1="90" y1="100" x2="137" y2="127" stroke="#3b82f6"/>
+              <line x1="90" y1="100" x2="43" y2="127" stroke="#22c55e"/>
+            </g>
+            <text x="90" y="38" text-anchor="middle" font-size="10" fill="#ef4444">A</text>
+            <text x="145" y="133" font-size="10" fill="#3b82f6">B</text>
+            <text x="30" y="133" text-anchor="end" font-size="10" fill="#22c55e">C</text>
+            <text x="90" y="175" text-anchor="middle" font-size="9.5" fill="var(--text-muted)">= all positive-sequence</text>
+
+            <text x="290" y="20" text-anchor="middle" font-size="11" fill="var(--text-dim)" font-weight="600">UNBALANCED (fault/imbalance)</text>
+            <circle cx="290" cy="100" r="55" fill="none" stroke="var(--card-border)" stroke-width="1" stroke-dasharray="2,3"/>
+            <g stroke-width="2.5">
+              <line x1="290" y1="100" x2="290" y2="52" stroke="#ef4444"/>
+              <line x1="290" y1="100" x2="325" y2="140" stroke="#3b82f6"/>
+              <line x1="290" y1="100" x2="255" y2="118" stroke="#22c55e"/>
+            </g>
+            <text x="290" y="175" text-anchor="middle" font-size="9.5" fill="var(--text-muted)">= positive + negative + zero</text>
+
+            <text x="470" y="45" text-anchor="middle" font-size="9.5" fill="var(--text-dim)">Neg-seq: mirror set,</text>
+            <text x="470" y="57" text-anchor="middle" font-size="9.5" fill="var(--text-dim)">opposite rotation</text>
+            <g stroke-width="2" transform="translate(470,90) scale(0.55)">
+              <line x1="0" y1="0" x2="0" y2="-45" stroke="#ef4444"/>
+              <line x1="0" y1="0" x2="39" y2="22" stroke="#22c55e"/>
+              <line x1="0" y1="0" x2="-39" y2="22" stroke="#3b82f6"/>
+            </g>
+            <text x="470" y="130" text-anchor="middle" font-size="9.5" fill="var(--text-dim)">Zero-seq: all three</text>
+            <text x="470" y="142" text-anchor="middle" font-size="9.5" fill="var(--text-dim)">in phase together</text>
+            <g stroke-width="2" transform="translate(470,168)">
+              <line x1="-14" y1="0" x2="14" y2="0" stroke="#ef4444"/>
+              <line x1="-14" y1="3" x2="14" y2="3" stroke="#3b82f6"/>
+              <line x1="-14" y1="6" x2="14" y2="6" stroke="#22c55e"/>
+            </g>
+            
+          </svg>
+        </div>
+        <ul>
+          <li><b>Positive-sequence</b> is the "normal" component — three equal magnitudes, 120°
+          apart, rotating in the system's normal order. In a healthy, balanced system, essentially
+          all of the voltage/current is positive-sequence; it's what does the actual work.</li>
+          <li><b>Negative-sequence</b> is a mirror-image set rotating the opposite direction. It's
+          zero in a perfectly balanced system, and only appears when the three phases become
+          unequal relative to each other — a single-phase fault, an open conductor or blown fuse,
+          or a badly unbalanced load are the classic causes.</li>
+          <li><b>Zero-sequence</b> is different in kind: three components all in phase with each
+          other (not spread apart), rising and falling together. It's zero unless there's a path
+          for current to return through the ground/earth instead of the other phases — so it
+          typically shows up around ground faults or wherever an imbalance has somewhere to go
+          besides the other two phases.</li>
+        </ul>
+        <p><b>Operationally:</b> a trip on a sequence quantity means the relay saw an imbalance
+        between the phases — that alone doesn't say what caused it. Pair it with the actual phase
+        current and voltage for the event: real, elevated current alongside the sequence signal
+        points toward an actual fault; little to no current change alongside it points toward
+        something else (an instrumentation issue, a disturbance without local current, inverter
+        response, etc.) — the sequence element tells you "unbalanced," the surrounding data tells
+        you the rest.</p>
         <h3>Using the Tabs</h3>
         <p>The tabs below the summary give you the underlying evidence behind the headline
         determination. None of this data is new — it all comes from the same CEV file QuickSet
@@ -5537,7 +5603,17 @@ function showBitDetail(label) {
   const inChain = !!(ANALYSIS?.tripCause?.causeChain?.some(c => c.label === label)
     || treeHasLabel(ANALYSIS?.tripCause?.logicTree, label));
 
-  let html = `<p style="line-height:1.6;">${desc.replace(/\n/g, '<br>')}</p>`;
+  // Does this bit involve a sequence quantity (negative-sequence or zero-sequence V/I)? If so,
+  // point to the plain-language explainer rather than repeating it in every popup.
+  const svForSeq = svMatch && PARSED ? (PARSED.svSettings || []).find(s => s.num === parseInt(svMatch[1])) : null;
+  const isSequenceRelated = /(^|[^A-Z])Q\d/.test(label) && /^(50|51|59|67|27)/.test(label)
+    || /^(59|27)[YZ]?N\d/.test(label) || /3V0/i.test(label)
+    || (svForSeq && /SEQ|3V0/i.test(svForSeq.equation));
+  const seqLink = isSequenceRelated
+    ? `<div style="margin-top:10px;"><span class="zoom-badge" onclick="toggleHelp(true); setTimeout(()=>document.getElementById('seqExplainerSection')?.scrollIntoView(),50);">What is sequence voltage/current? →</span></div>`
+    : '';
+
+  let html = `<p style="line-height:1.6;">${desc.replace(/\n/g, '<br>')}</p>${seqLink}`;
   if (elInfo) {
     html += `<div style="background:var(--bg2);border-radius:6px;padding:10px 12px;margin-top:12px;font-size:12.5px;line-height:1.6;">
       <div><b style="color:var(--green);">When asserted (ON):</b> ${elInfo.on}</div>
