@@ -471,6 +471,34 @@ body.dragging-file #drop-overlay { display: flex; }
   white-space: nowrap;
 }
 
+/* ── Per-bit local logic graph (inside the bit-detail popup) ── */
+.llg-wrap { display: flex; align-items: center; gap: 4px; overflow-x: auto; padding: 6px 2px 10px; }
+.llg-col { display: flex; flex-direction: column; gap: 6px; justify-content: center; }
+.llg-arrow { color: var(--text-muted); font-size: 14px; flex: 0 0 auto; padding: 0 2px; }
+.llg-box {
+  border-radius: 6px;
+  border: 1px solid var(--card-border);
+  background: var(--bg2);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  padding: 5px 9px;
+  text-align: center;
+}
+.llg-box.llg-center { border-color: var(--accent); border-width: 1.5px; color: var(--accent); font-weight: 700; background: var(--accent-dim); }
+.llg-box.llg-terminal { border-color: var(--red); color: var(--red); font-weight: 700; background: var(--red-dim); }
+.llg-box.llg-hidden { display: none; }
+.llg-box.llg-more { cursor: pointer; color: var(--text-muted); font-style: italic; }
+.llg-box.llg-more:hover { color: var(--accent); border-color: var(--accent); }
+/* The custom dark ::after tooltip (see .has-tip above) is absolutely positioned relative to
+   the hovered span and gets clipped by .llg-wrap's horizontal-scroll overflow — including
+   clipped upward into the heading right above this row, since setting only overflow-x forces
+   overflow-y to clip too. Falling back to the plain native browser tooltip (still driven by
+   the same title="" attribute) here avoids that entirely, since native tooltips render outside
+   the page's layout and are never subject to element overflow. */
+.llg-wrap .has-tip:hover::after { display: none; }
+
 .trip-timing {
   display: flex;
   gap: 20px;
@@ -1479,6 +1507,37 @@ function linkifyEquationBits(eqText, parsed) {
   });
 }
 
+// Bit-detail popups are largely free-text sentences (site comments, generated prose), not raw
+// SELOGIC — so linkifyEquationBits' "wrap every identifier" approach isn't safe to run over
+// them directly; it would just as happily wrap ordinary English words. This instead only
+// touches the two spots inside that prose that are reliably an actual bit reference and
+// nothing else: (1) a raw equation the tool itself quoted in double quotes (e.g. the generated
+// sentence `The logic condition "59G1T AND 52A" is true right now.`), and (2) an explicit
+// SV-timer mention like "SV17T" appearing bare in a sentence (e.g. "...toward SV17T
+// immediately") — SEL's own SV-numbering convention, never a coincidental English word.
+function linkifyBitMentions(text, parsed) {
+  // Split off a trailing "Equation: <raw equation>" line if present (as produced by
+  // getSVTooltip for a timed SV) — that portion is pure SELOGIC and safe to fully linkify;
+  // handled separately so the passes below never see (and re-wrap) its already-linkified output.
+  const eqLineMatch = text.match(/^([\s\S]*?)(\nEquation:\s*)(.+)$/);
+  let head = text, eqSuffix = '';
+  if (eqLineMatch) {
+    head = eqLineMatch[1];
+    eqSuffix = eqLineMatch[2] + linkifyEquationBits(eqLineMatch[3], parsed);
+  }
+  // Within the remaining text, split on quoted segments (each an actual equation the tool
+  // itself quoted) so the bare-SVxxT pass below never reprocesses their linkified output.
+  const parts = head.split(/("[^"]*")/);
+  const linkedHead = parts.map((part, i) => {
+    if (i % 2 === 1) {
+      const inner = part.slice(1, -1);
+      return `"${linkifyEquationBits(inner, parsed)}"`;
+    }
+    return part.replace(/\bSV\d+T?\b/g, tok => tt(tok, parsed));
+  }).join('');
+  return linkedHead + eqSuffix;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // CEV PARSER
 // ════════════════════════════════════════════════════════════════════════════
@@ -1730,6 +1789,7 @@ function parseCEV(text, fileName) {
     settingsStart = 0;
   }
   const S = text.substring(settingsStart);
+  R.settingsText = S;
 
   const m = (re) => { const x = S.match(re); return x ? x[1] : null; };
   const mf = (re) => { const v = m(re); return v ? parseFloat(v) : null; };
@@ -5453,6 +5513,115 @@ function describeSVLogic(sv) {
   return { isBlinker: false, comment: '', referenced, referencedName };
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// PER-BIT LOCAL LOGIC GRAPH — computed on demand, not precomputed for every bit
+// ══════════════════════════════════════════════════════════════════════
+// Builds a lightweight index of "which equation-bearing setting references which other bit",
+// purely from this file's own settings text. This is intentionally lazy and cached on the
+// parsed object (P._equationRefIndex) — built once, the first time ANY bit's logic chart is
+// requested, not precomputed for every bit up front. Subsequent clicks on other bits reuse the
+// same cached index; only the small per-bit graph walk below runs fresh each time.
+function getEquationRefIndex(P) {
+  if (P._equationRefIndex) return P._equationRefIndex;
+
+  const eqByLabel = {};
+  (P.svSettings || []).forEach(sv => {
+    const eq = sv.equation.split('#')[0].trim();
+    if (eq && eq !== 'NA' && !/^[01]$/.test(eq)) eqByLabel[sv.label] = eq;
+  });
+  [
+    [P.tripEquationName || 'TR', P.tripEquation],
+    ['TR3X', P.tripEquationX], ['TRIP3X', P.tripEquationX],
+    [P.erEquationName || 'ER', P.erEquation],
+    ['FAULT', P.faultEquation],
+    ['79RI3P', P.recloseEquation],
+    ['79DTL3P', P.dtlEquation],
+  ].forEach(([label, eq]) => { if (eq && !eqByLabel[label]) eqByLabel[label] = eq.split('#')[0].trim(); });
+
+  // Everything else defined with ":=" anywhere in the raw settings text — this is what picks
+  // up CL, ULTRIP, ULCL, 52A, 52B, every OUTnnn output, etc. without needing their names
+  // enumerated ahead of time. Restricted to RHS values that look like a boolean SELOGIC
+  // expression (all-caps identifiers/operators/parens only) so numeric pickups, curve codes,
+  // and Y/N flags don't get pulled in as if they were logic.
+  if (P.settingsText) {
+    const re = /(?:^|[\r\n])([A-Z][A-Z0-9_]*)\s*:=([^\r\n]+)/g;
+    let m;
+    while ((m = re.exec(P.settingsText)) !== null) {
+      const label = m[1];
+      if (eqByLabel[label]) continue;
+      const rhs = m[2].split('#')[0].trim();
+      if (!/^[A-Z][A-Z0-9_ ()]*$/.test(rhs)) continue; // not boolean-looking — skip
+      if (/^(Y|N|NA|OFF)$/.test(rhs) || /^[A-Z]\d$/.test(rhs)) continue; // Y/N flags, curve codes (U1, C2, ...)
+      // A bare space-separated identifier list with no boolean operator at all (e.g. SER1's
+      // list of bits to record for the sequence-of-events report) isn't a SELOGIC equation,
+      // even though it superficially matches the pattern above — require a real operator once
+      // there's more than one token.
+      const wordCount = rhs.split(/\s+/).filter(Boolean).length;
+      if (wordCount > 1 && !/\b(AND|OR|NOT|R_TRIG|F_TRIG|R_TRIGGER|F_TRIGGER)\b/.test(rhs)) continue;
+      eqByLabel[label] = rhs;
+    }
+  }
+
+  const refIndex = {}; // referencedLabel -> Set of labels whose equation mentions it directly
+  Object.entries(eqByLabel).forEach(([label, eq]) => {
+    const toks = (eq.match(/\bAND\b|\bOR\b|\bNOT\b|\bR_TRIGGER\b|\bF_TRIGGER\b|\bR_TRIG\b|\bF_TRIG\b|[A-Za-z0-9_]+/g) || [])
+      .filter(t => !SELOGIC_KEYWORDS.has(t) && t !== label);
+    toks.forEach(tok => { if (!refIndex[tok]) refIndex[tok] = new Set(); refIndex[tok].add(label); });
+  });
+
+  P._equationRefIndex = { eqByLabel, refIndex };
+  return P._equationRefIndex;
+}
+
+// The set of bits treated as a natural stopping point when tracing forward — the tool's own
+// "final command" bits, matching how the main trip-logic diagram terminates.
+function isTerminalBit(label, P) {
+  return ['TRIP', 'TRIP3P', 'TRIPA', 'TRIPB', 'TRIPC', 'CLOSE', 'CLOSE3P', 'CLOSEA', 'CLOSEB', 'CLOSEC', 'ER']
+    .includes(label) || label === (P.tripEquationName || 'TR') || label === (P.erEquationName || 'ER');
+}
+
+// Builds the small graph for ONE bit: one column of whatever directly feeds its own equation
+// (if it has one), the bit itself, and up to `maxForwardCols` columns of whatever it feeds
+// into, one hop at a time, stopping early at a terminal bit. Two relationships are always
+// walked even though they're not literally "referenced" in another bit's equation text — an
+// SV's own timed output (SVxx -> SVxxT) and the close logic result (CL -> CLOSE) — matching
+// how this tool treats those pairs everywhere else.
+function buildLocalLogicGraph(P, label, maxForwardCols) {
+  maxForwardCols = maxForwardCols || 4;
+  const { eqByLabel, refIndex } = getEquationRefIndex(P);
+
+  let left = [];
+  const svtM = label.match(/^SV(\d+)T$/);
+  if (svtM) {
+    left = [`SV${svtM[1]}`];
+  } else if (eqByLabel[label]) {
+    const toks = (eqByLabel[label].match(/\bAND\b|\bOR\b|\bNOT\b|\bR_TRIGGER\b|\bF_TRIGGER\b|\bR_TRIG\b|\bF_TRIG\b|[A-Za-z0-9_]+/g) || [])
+      .filter(t => !SELOGIC_KEYWORDS.has(t) && t !== label);
+    left = [...new Set(toks)];
+  }
+
+  const forward = [];
+  let frontier = new Set([label]);
+  const seen = new Set([label, ...left]);
+  for (let i = 0; i < maxForwardCols; i++) {
+    const next = new Set();
+    frontier.forEach(l => {
+      const svM = l.match(/^SV(\d+)$/);
+      if (svM) next.add(`SV${svM[1]}T`);
+      if (l === 'CL') next.add('CLOSE');
+      (refIndex[l] || []).forEach(ref => next.add(ref));
+    });
+    const filtered = [...next].filter(l => !seen.has(l));
+    if (!filtered.length) break;
+    filtered.forEach(l => seen.add(l));
+    forward.push(filtered);
+    frontier = new Set(filtered);
+    if (filtered.some(l => isTerminalBit(l, P))) break;
+  }
+
+  return { center: label, left, forward };
+}
+
 function getTripRelevantLabels(P, A) {
   const cause = A?.tripCause;
   const set = new Set();
@@ -6111,6 +6280,13 @@ function toggleHelp(show, tab) {
   const el = document.getElementById('helpModal');
   if (el) el.style.display = show ? 'flex' : 'none';
   if (show && tab) setHelpTab(tab);
+  // Only one overlay should ever be open at a time — otherwise opening this one from a link
+  // inside the bit-detail popup leaves that popup stacked underneath, and closing back out to
+  // the main view takes two separate dismiss clicks instead of one.
+  if (show) {
+    const bitModal = document.getElementById('bitModal');
+    if (bitModal) bitModal.style.display = 'none';
+  }
 }
 
 function setHelpTab(tab) {
@@ -6136,11 +6312,60 @@ function currentBitState(label) {
   return seen ? { state, asOf } : null;
 }
 
+// Renders the graph from buildLocalLogicGraph as a compact, horizontally-scrollable row of
+// columns — deliberately simple (flexbox, not hand-placed SVG coordinates like the main trip
+// diagram) since this is a small on-demand aid, not the primary diagram. Every box is a normal
+// tt() span, so it's already hoverable/clickable, and clicking one calls showBitDetail() again
+// — which naturally re-centers this same graph on the newly-clicked bit, letting someone walk
+// the logic outward one click at a time without leaving the popup.
+// Reveals a logic-chart column's overflow boxes (rendered up front, just hidden) and removes
+// the "+N more" control that triggered it — no re-render of the popup needed.
+function expandLogicColumn(btn) {
+  const col = btn.closest('.llg-col');
+  if (!col) return;
+  col.querySelectorAll('.llg-hidden').forEach(b => b.classList.remove('llg-hidden'));
+  btn.remove();
+}
+
+function renderLocalLogicGraph(graph, P) {
+  const cols = [];
+  if (graph.left.length) cols.push({ labels: graph.left, cls: '' });
+  cols.push({ labels: [graph.center], cls: 'llg-center' });
+  graph.forward.forEach((colLabels, i) => {
+    const isLast = i === graph.forward.length - 1;
+    const anyTerminal = colLabels.some(l => isTerminalBit(l, P));
+    cols.push({ labels: colLabels, cls: (isLast && anyTerminal) ? 'llg-terminal' : '' });
+  });
+  if (cols.length < 2) return ''; // nothing upstream or downstream worth drawing
+
+  const MAX_ROWS = 8;
+  const colHTML = cols.map((col, i) => {
+    const shown = col.labels.slice(0, MAX_ROWS);
+    const hidden = col.labels.slice(MAX_ROWS);
+    const boxesShown = shown.map(l => `<div class="llg-box ${col.cls}">${tt(l, P)}</div>`).join('');
+    // Hidden overflow boxes are rendered up front (not built lazily on click) — clicking "+N
+    // more" just reveals them in place, no re-render of the popup needed.
+    const boxesHidden = hidden.map(l => `<div class="llg-box ${col.cls} llg-hidden">${tt(l, P)}</div>`).join('');
+    const moreBtn = hidden.length
+      ? `<div class="llg-box llg-more" onclick="event.stopPropagation(); expandLogicColumn(this);">+${hidden.length} more</div>` : '';
+    const arrow = i > 0 ? `<div class="llg-arrow">→</div>` : '';
+    return `${arrow}<div class="llg-col">${boxesShown}${boxesHidden}${moreBtn}</div>`;
+  }).join('');
+  return `<div style="margin-top:12px;">
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Logic chart — what feeds this bit, and what it feeds into:</div>
+    <div class="llg-wrap">${colHTML}</div>
+  </div>`;
+}
+
 function showBitDetail(label) {
   const modal = document.getElementById('bitModal');
   const titleEl = document.getElementById('bitModalTitle');
   const bodyEl = document.getElementById('bitModalBody');
   if (!modal || !bodyEl) return;
+  // Same mutual-exclusivity as toggleHelp: if the Help modal happens to be open (e.g. this bit
+  // was clicked from a link inside it), close it first so only one overlay is ever stacked.
+  const helpModal = document.getElementById('helpModal');
+  if (helpModal) helpModal.style.display = 'none';
   titleEl.textContent = label;
 
   const freq = PARSED?.eventInfo?.freq || 60;
@@ -6185,11 +6410,11 @@ function showBitDetail(label) {
     ? `<div style="margin-top:10px;"><span class="zoom-badge" onclick="toggleHelp(true,'seq');">What is sequence voltage/current? →</span></div>`
     : '';
 
-  let html = `<p style="line-height:1.6;">${desc.replace(/\n/g, '<br>')}</p>${seqLink}`;
+  let html = `<p style="line-height:1.6;">${linkifyBitMentions(desc, PARSED).replace(/\n/g, '<br>')}</p>${seqLink}`;
   if (elInfo) {
     html += `<div style="background:var(--bg2);border-radius:6px;padding:10px 12px;margin-top:12px;font-size:12.5px;line-height:1.6;">
-      <div><b style="color:var(--green);">When asserted (ON):</b> ${elInfo.on}</div>
-      <div style="margin-top:8px;"><b style="color:var(--text-muted);">When de-asserted (OFF):</b> ${elInfo.off}</div>
+      <div><b style="color:var(--green);">When asserted (ON):</b> ${linkifyBitMentions(elInfo.on, PARSED)}</div>
+      <div style="margin-top:8px;"><b style="color:var(--text-muted);">When de-asserted (OFF):</b> ${linkifyBitMentions(elInfo.off, PARSED)}</div>
     </div>`;
   } else {
     html += `<div style="background:var(--bg2);border-radius:6px;padding:10px 12px;margin-top:12px;font-size:12.5px;line-height:1.6;">
@@ -6201,7 +6426,7 @@ function showBitDetail(label) {
     const eqClean = sv.equation.split('#')[0].trim();
     html += `<div style="margin-top:12px;font-size:12px;">
       <div style="color:var(--text-dim);margin-bottom:4px;">Equation (${sv.label}):</div>
-      <div style="font-family:var(--mono);background:var(--bg2);border-radius:6px;padding:8px 10px;word-break:break-word;">${eqClean}</div>
+      <div style="font-family:var(--mono);background:var(--bg2);border-radius:6px;padding:8px 10px;word-break:break-word;">${linkifyEquationBits(eqClean, PARSED)}</div>
       <div style="color:var(--text-muted);margin-top:4px;">Pickup: ${sv.pickupDelay} cycles (${(sv.pickupDelay/(PARSED.eventInfo?.freq||60)*1000).toFixed(0)} ms) &nbsp;|&nbsp; Dropout: ${sv.dropoutDelay} cycles</div>
     </div>`;
   }
@@ -6212,6 +6437,10 @@ function showBitDetail(label) {
   }
   if (inChain) {
     html += `<div style="margin-top:10px;font-size:12px;color:var(--red);font-weight:600;">⚡ Part of the logic chain that produced this event's resolved cause.</div>`;
+  }
+  if (PARSED) {
+    const graph = buildLocalLogicGraph(PARSED, label);
+    html += renderLocalLogicGraph(graph, PARSED);
   }
   bodyEl.innerHTML = html;
   modal.style.display = 'flex';
