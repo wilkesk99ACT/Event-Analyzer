@@ -295,13 +295,28 @@ body.dragging-file #drop-overlay { display: flex; }
 .help-modal {
   background: var(--card); border: 1px solid var(--card-border); border-radius: 10px;
   max-width: 720px; width: 90%; max-height: 85vh; overflow-y: auto;
+  display: flex; flex-direction: column;
 }
 .help-modal-header {
   display: flex; justify-content: space-between; align-items: center;
   padding: 16px 20px; border-bottom: 1px solid var(--card-border);
   font-size: 15px; font-weight: 700; position: sticky; top: 0; background: var(--card);
+  flex: 0 0 auto;
 }
-.help-modal-body { padding: 20px; font-size: 13px; line-height: 1.6; color: var(--text-dim); }
+.help-tab-bar {
+  display: flex; gap: 0; border-bottom: 1px solid var(--card-border);
+  background: var(--bg2); overflow-x: auto; padding: 0 12px; flex: 0 0 auto;
+}
+.help-tab {
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  padding: 10px 14px; color: var(--text-muted); font-size: 12px; font-weight: 600;
+  font-family: var(--sans); cursor: pointer; white-space: nowrap; transition: all 0.15s;
+}
+.help-tab:hover { color: var(--text-dim); }
+.help-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.help-tab-panel { display: none; }
+.help-tab-panel.active { display: block; animation: fadeIn 0.3s ease; }
+.help-modal-body { padding: 20px; font-size: 13px; line-height: 1.6; color: var(--text-dim); overflow-y: auto; flex: 1 1 auto; }
 .help-modal-body h3 { color: var(--text); font-size: 14px; margin: 18px 0 8px; }
 .help-modal-body h3:first-child { margin-top: 0; }
 .help-modal-body ul, .help-modal-body ol { padding-left: 20px; margin: 6px 0; }
@@ -837,203 +852,198 @@ body.dragging-file #drop-overlay { display: flex; }
         <span>How to Read This Tool</span>
         <button class="btn" onclick="toggleHelp(false)">Close</button>
       </div>
+      <div class="help-tab-bar">
+        <button class="help-tab active" data-helptab="quickstart" onclick="setHelpTab('quickstart')">&#129517; Quick Start</button>
+        <button class="help-tab" data-helptab="diagram" onclick="setHelpTab('diagram')">&#129513; Logic Diagram</button>
+        <button class="help-tab" data-helptab="tabs" onclick="setHelpTab('tabs')">&#128209; Analysis Tabs</button>
+        <button class="help-tab" data-helptab="seq" onclick="setHelpTab('seq')">&#9889; Sequence Components</button>
+        <button class="help-tab" data-helptab="faq" onclick="setHelpTab('faq')">&#10067; FAQ</button>
+      </div>
       <div class="help-modal-body">
-        <p style="color:var(--text-muted);font-style:italic;">This tool is a diagnostic aid: it works out a likely,
-        evidence-backed explanation from the relay's own recorded data and configured logic. It's meant to be checked
-        against the diagram and supporting tabs, not treated as an unquestionable final answer.</p>
-        <h3>Reading the Logic Chain Diagram</h3>
-        <p>The diagram traces the relay's trip logic from left (earliest contributing
-        condition) to right (the final trip command), reconstructed from the relay's settings
-        and the recorded data for this event.</p>
-        <ul>
-          <li><b>Green, filled box</b> — this condition was <b>true / asserted</b> at the moment of the trip.</li>
-          <li><b>Grey / muted box</b> — this condition was <b>false / not asserted</b> at that moment. It's only
-          shown when it's structurally required to explain the result (e.g. every side of an AND, or every side
-          of a NOT'd condition that failed together) — a false box is never just decoration.</li>
-          <li><b>Boxes with a thicker accent/red border</b> — these are internal <b>SV</b> logic/timer variables
-          (the relay's own named intermediate signals), rather than a directly measured element. Hover any box
-          for its underlying equation or description.</li>
-          <li><b>"ALL required (AND)"</b> — every box in that group had to be true (or false, if explaining a
-          negated condition) for the result shown.</li>
-          <li><b>"ANY of these (OR)"</b> — only one box in that group needed to be true; alternatives that
-          didn't happen are omitted rather than shown as false.</li>
-          <li><b>NOT / R_TRIG / F_TRIG prefixes</b> inside a box (e.g. "NOT SV19", "R_TRIG CLOSE") mean the
-          condition is being evaluated as negated, or only counts at the instant it just changed state
-          (rising/falling edge), not merely whenever it happens to be in that state.</li>
-          <li>The final red box on the right is the trip/event command itself. A note below the diagram
-          indicates how many other, unrelated trip conditions exist in the same equation but weren't part
-          of this event.</li>
-        </ul>
-        <h3>Frequently Asked Questions</h3>
-        <p><b>How is this different from just opening the file in QuickSet or SynchroWAVe?</b><br>
-        QuickSet shows how the relay is configured; SynchroWAVe shows what was recorded. Neither
-        automatically connects the two for a specific event. This tool does that connection
-        automatically — matching the recorded data against the relay's own pickups, timers, and
-        logic for the event in front of you, which otherwise has to be done manually, equation
-        by equation.</p>
-        <p><b>Should I act on a diagnostic flag?</b><br>
-        Flags are informational, not instructions — they call out something worth a closer look
-        (e.g. a trip driven by internal logic, an already-open breaker, or a likely failed
-        voltage-sensing channel) without telling you what to do about it.</p>
-        <p><b>Why do some boxes show a condition that's false?</b><br>
-        A false box is only ever shown when it's structurally necessary — e.g. every side of an
-        AND, or a set of conditions that all had to fail together to explain a NOT. It's never
-        shown just for reference.</p>
-        <h3 id="seqExplainerSection">Understanding Sequence Voltage / Current</h3>
-        <p>Any three-phase voltage or current can be split into three simpler components:
-        <b>positive-</b>, <b>negative-</b>, and <b>zero-sequence</b>. None of these are something
-        you'd read directly off a single wire with a meter — they're calculated from all three
-        phases together, specifically to reveal imbalance that a single-phase reading can't show.</p>
-        <div style="text-align:center;margin:14px 0;">
-          <svg viewBox="0 0 560 190" style="width:100%;max-width:560px;background:var(--bg2);border-radius:8px;">
-            <text x="90" y="20" text-anchor="middle" font-size="11" fill="var(--text-dim)" font-weight="600">BALANCED (healthy)</text>
-            <circle cx="90" cy="100" r="55" fill="none" stroke="var(--card-border)" stroke-width="1"/>
-            <g stroke-width="2.5">
-              <line x1="90" y1="100" x2="90" y2="45" stroke="#ef4444"/>
-              <line x1="90" y1="100" x2="137" y2="127" stroke="#3b82f6"/>
-              <line x1="90" y1="100" x2="43" y2="127" stroke="#22c55e"/>
-            </g>
-            <text x="90" y="38" text-anchor="middle" font-size="10" fill="#ef4444">A</text>
-            <text x="145" y="133" font-size="10" fill="#3b82f6">B</text>
-            <text x="30" y="133" text-anchor="end" font-size="10" fill="#22c55e">C</text>
-            <text x="90" y="175" text-anchor="middle" font-size="9.5" fill="var(--text-muted)">= all positive-sequence</text>
 
-            <text x="290" y="20" text-anchor="middle" font-size="11" fill="var(--text-dim)" font-weight="600">UNBALANCED (fault/imbalance)</text>
-            <circle cx="290" cy="100" r="55" fill="none" stroke="var(--card-border)" stroke-width="1" stroke-dasharray="2,3"/>
-            <g stroke-width="2.5">
-              <line x1="290" y1="100" x2="290" y2="52" stroke="#ef4444"/>
-              <line x1="290" y1="100" x2="325" y2="140" stroke="#3b82f6"/>
-              <line x1="290" y1="100" x2="255" y2="118" stroke="#22c55e"/>
-            </g>
-            <text x="290" y="175" text-anchor="middle" font-size="9.5" fill="var(--text-muted)">= positive + negative + zero</text>
-
-            <text x="470" y="45" text-anchor="middle" font-size="9.5" fill="var(--text-dim)">Neg-seq: mirror set,</text>
-            <text x="470" y="57" text-anchor="middle" font-size="9.5" fill="var(--text-dim)">opposite rotation</text>
-            <g stroke-width="2" transform="translate(470,90) scale(0.55)">
-              <line x1="0" y1="0" x2="0" y2="-45" stroke="#ef4444"/>
-              <line x1="0" y1="0" x2="39" y2="22" stroke="#22c55e"/>
-              <line x1="0" y1="0" x2="-39" y2="22" stroke="#3b82f6"/>
-            </g>
-            <text x="470" y="130" text-anchor="middle" font-size="9.5" fill="var(--text-dim)">Zero-seq: all three</text>
-            <text x="470" y="142" text-anchor="middle" font-size="9.5" fill="var(--text-dim)">in phase together</text>
-            <g stroke-width="2" transform="translate(470,168)">
-              <line x1="-14" y1="0" x2="14" y2="0" stroke="#ef4444"/>
-              <line x1="-14" y1="3" x2="14" y2="3" stroke="#3b82f6"/>
-              <line x1="-14" y1="6" x2="14" y2="6" stroke="#22c55e"/>
-            </g>
-            
-          </svg>
+        <!-- ── Quick Start ── -->
+        <div class="help-tab-panel active" id="helptab-quickstart">
+          <p style="color:var(--text-muted);font-style:italic;">This tool is a diagnostic aid: it works out a likely,
+          evidence-backed explanation from the relay's own recorded data and configured logic. Check it against the
+          logic diagram and the supporting tabs — don't treat it as an unquestionable final answer.</p>
+          <h3>Reading an event, in order</h3>
+          <ol>
+            <li><b>Start with the headline cause</b> at the top of the page — this is the tool's resolution of the
+            relay's own logic for this event, not just a raw relay-word name. It's still worth confirming against
+            the diagram below it.</li>
+            <li><b>Check the logic diagram</b> to see the actual trip path, including any supervisory (AND) conditions
+            that had to be satisfied alongside the main cause. (See the <b>Logic Diagram</b> tab of this help for how
+            to read it.)</li>
+            <li><b>Read any diagnostic flags</b> below the diagram. These call out cases that are easy to misread at a
+            glance — a trip driven by internal logic rather than a measured fault, a trip issued while the breaker was
+            already open, or a voltage/current mismatch suggesting a failed sensing channel rather than a real fault.
+            Flags are informational; they intentionally don't tell you what corrective action to take.</li>
+            <li><b>Confirm the story in the charts.</b> Current, voltage, the most relevant derived quantity, and the
+            digital logic traces are all synchronized on one time axis — the trip and trigger markers land at the same
+            instant on every chart.</li>
+          </ol>
+          <h3>Chart controls</h3>
+          <ul>
+            <li><b>Scroll</b> over any chart to zoom in or out around your mouse position — all charts zoom together
+            so the traces stay lined up.</li>
+            <li><b>Click or drag</b> on a chart to place the measurement cursor; it shows exact values on every chart
+            simultaneously at that instant. Drag the cursor line itself to move it.</li>
+            <li><b>When zoomed,</b> drag empty chart space to pan. <b>Double-click</b> any chart to reset the zoom
+            everywhere.</li>
+          </ul>
         </div>
-        <p style="color:var(--text-muted);font-size:12px;">The phasor view above is one way to see it — but most operators read waveforms the way SynchroWAVe shows them: VA/VB/VC over time. Here's the same three ideas in that form:</p>
-<div style="margin:14px 0;">
-  <svg viewBox="0 0 560 320" style="width:100%;max-width:560px;background:var(--bg2);border-radius:8px;">
-    <text x="10" y="16" font-size="11" fill="var(--text-dim)" font-weight="600">BALANCED (healthy) — VA, VB, VC equal, evenly spaced, sum ≈ 0 at every instant</text>
-    <g transform="translate(10,20)">
-      <line x1="0" y1="45" x2="520" y2="45" stroke="var(--card-border)" stroke-width="1"/>
-      <polyline points="0.0,45.0 6.5,39.5 13.0,34.2 19.5,29.1 26.0,24.4 32.5,20.3 39.0,16.7 45.5,13.8 52.0,11.7 58.5,10.4 65.0,10.0 71.5,10.4 78.0,11.7 84.5,13.8 91.0,16.7 97.5,20.3 104.0,24.4 110.5,29.1 117.0,34.2 123.5,39.5 130.0,45.0 136.5,50.5 143.0,55.8 149.5,60.9 156.0,65.6 162.5,69.7 169.0,73.3 175.5,76.2 182.0,78.3 188.5,79.6 195.0,80.0 201.5,79.6 208.0,78.3 214.5,76.2 221.0,73.3 227.5,69.7 234.0,65.6 240.5,60.9 247.0,55.8 253.5,50.5 260.0,45.0 266.5,39.5 273.0,34.2 279.5,29.1 286.0,24.4 292.5,20.3 299.0,16.7 305.5,13.8 312.0,11.7 318.5,10.4 325.0,10.0 331.5,10.4 338.0,11.7 344.5,13.8 351.0,16.7 357.5,20.3 364.0,24.4 370.5,29.1 377.0,34.2 383.5,39.5 390.0,45.0 396.5,50.5 403.0,55.8 409.5,60.9 416.0,65.6 422.5,69.7 429.0,73.3 435.5,76.2 442.0,78.3 448.5,79.6 455.0,80.0 461.5,79.6 468.0,78.3 474.5,76.2 481.0,73.3 487.5,69.7 494.0,65.6 500.5,60.9 507.0,55.8 513.5,50.5 520.0,45.0" fill="none" stroke="#ef4444" stroke-width="1.8"/>
-      <polyline points="0.0,75.3 6.5,77.7 13.0,79.2 19.5,80.0 26.0,79.8 32.5,78.8 39.0,77.0 45.5,74.4 52.0,71.0 58.5,67.0 65.0,62.5 71.5,57.5 78.0,52.3 84.5,46.8 91.0,41.3 97.5,35.9 104.0,30.8 110.5,25.9 117.0,21.6 123.5,17.8 130.0,14.7 136.5,12.3 143.0,10.8 149.5,10.0 156.0,10.2 162.5,11.2 169.0,13.0 175.5,15.6 182.0,19.0 188.5,23.0 195.0,27.5 201.5,32.5 208.0,37.7 214.5,43.2 221.0,48.7 227.5,54.1 234.0,59.2 240.5,64.1 247.0,68.4 253.5,72.2 260.0,75.3 266.5,77.7 273.0,79.2 279.5,80.0 286.0,79.8 292.5,78.8 299.0,77.0 305.5,74.4 312.0,71.0 318.5,67.0 325.0,62.5 331.5,57.5 338.0,52.3 344.5,46.8 351.0,41.3 357.5,35.9 364.0,30.8 370.5,25.9 377.0,21.6 383.5,17.8 390.0,14.7 396.5,12.3 403.0,10.8 409.5,10.0 416.0,10.2 422.5,11.2 429.0,13.0 435.5,15.6 442.0,19.0 448.5,23.0 455.0,27.5 461.5,32.5 468.0,37.7 474.5,43.2 481.0,48.7 487.5,54.1 494.0,59.2 500.5,64.1 507.0,68.4 513.5,72.2 520.0,75.3" fill="none" stroke="#3b82f6" stroke-width="1.8"/>
-      <polyline points="0.0,14.7 6.5,17.8 13.0,21.6 19.5,25.9 26.0,30.8 32.5,35.9 39.0,41.3 45.5,46.8 52.0,52.3 58.5,57.5 65.0,62.5 71.5,67.0 78.0,71.0 84.5,74.4 91.0,77.0 97.5,78.8 104.0,79.8 110.5,80.0 117.0,79.2 123.5,77.7 130.0,75.3 136.5,72.2 143.0,68.4 149.5,64.1 156.0,59.2 162.5,54.1 169.0,48.7 175.5,43.2 182.0,37.7 188.5,32.5 195.0,27.5 201.5,23.0 208.0,19.0 214.5,15.6 221.0,13.0 227.5,11.2 234.0,10.2 240.5,10.0 247.0,10.8 253.5,12.3 260.0,14.7 266.5,17.8 273.0,21.6 279.5,25.9 286.0,30.8 292.5,35.9 299.0,41.3 305.5,46.8 312.0,52.3 318.5,57.5 325.0,62.5 331.5,67.0 338.0,71.0 344.5,74.4 351.0,77.0 357.5,78.8 364.0,79.8 370.5,80.0 377.0,79.2 383.5,77.7 390.0,75.3 396.5,72.2 403.0,68.4 409.5,64.1 416.0,59.2 422.5,54.1 429.0,48.7 435.5,43.2 442.0,37.7 448.5,32.5 455.0,27.5 461.5,23.0 468.0,19.0 474.5,15.6 481.0,13.0 487.5,11.2 494.0,10.2 500.5,10.0 507.0,10.8 513.5,12.3 520.0,14.7" fill="none" stroke="#22c55e" stroke-width="1.8"/>
-    </g>
 
-    <text x="10" y="118" font-size="11" fill="var(--text-dim)" font-weight="600">NEGATIVE-SEQUENCE example — one phase reduced relative to the others (e.g. single-phase sag/fault)</text>
-    <g transform="translate(10,122)">
-      <line x1="0" y1="45" x2="520" y2="45" stroke="var(--card-border)" stroke-width="1"/>
-      <polyline points="0.0,45.0 6.5,42.7 13.0,40.4 19.5,38.2 26.0,36.2 32.5,34.4 39.0,32.9 45.5,31.6 52.0,30.7 58.5,30.2 65.0,30.0 71.5,30.2 78.0,30.7 84.5,31.6 91.0,32.9 97.5,34.4 104.0,36.2 110.5,38.2 117.0,40.4 123.5,42.7 130.0,45.0 136.5,47.3 143.0,49.6 149.5,51.8 156.0,53.8 162.5,55.6 169.0,57.1 175.5,58.4 182.0,59.3 188.5,59.8 195.0,60.0 201.5,59.8 208.0,59.3 214.5,58.4 221.0,57.1 227.5,55.6 234.0,53.8 240.5,51.8 247.0,49.6 253.5,47.3 260.0,45.0 266.5,42.7 273.0,40.4 279.5,38.2 286.0,36.2 292.5,34.4 299.0,32.9 305.5,31.6 312.0,30.7 318.5,30.2 325.0,30.0 331.5,30.2 338.0,30.7 344.5,31.6 351.0,32.9 357.5,34.4 364.0,36.2 370.5,38.2 377.0,40.4 383.5,42.7 390.0,45.0 396.5,47.3 403.0,49.6 409.5,51.8 416.0,53.8 422.5,55.6 429.0,57.1 435.5,58.4 442.0,59.3 448.5,59.8 455.0,60.0 461.5,59.8 468.0,59.3 474.5,58.4 481.0,57.1 487.5,55.6 494.0,53.8 500.5,51.8 507.0,49.6 513.5,47.3 520.0,45.0" fill="none" stroke="#ef4444" stroke-width="1.8"/>
-      <polyline points="0.0,75.3 6.5,77.7 13.0,79.2 19.5,80.0 26.0,79.8 32.5,78.8 39.0,77.0 45.5,74.4 52.0,71.0 58.5,67.0 65.0,62.5 71.5,57.5 78.0,52.3 84.5,46.8 91.0,41.3 97.5,35.9 104.0,30.8 110.5,25.9 117.0,21.6 123.5,17.8 130.0,14.7 136.5,12.3 143.0,10.8 149.5,10.0 156.0,10.2 162.5,11.2 169.0,13.0 175.5,15.6 182.0,19.0 188.5,23.0 195.0,27.5 201.5,32.5 208.0,37.7 214.5,43.2 221.0,48.7 227.5,54.1 234.0,59.2 240.5,64.1 247.0,68.4 253.5,72.2 260.0,75.3 266.5,77.7 273.0,79.2 279.5,80.0 286.0,79.8 292.5,78.8 299.0,77.0 305.5,74.4 312.0,71.0 318.5,67.0 325.0,62.5 331.5,57.5 338.0,52.3 344.5,46.8 351.0,41.3 357.5,35.9 364.0,30.8 370.5,25.9 377.0,21.6 383.5,17.8 390.0,14.7 396.5,12.3 403.0,10.8 409.5,10.0 416.0,10.2 422.5,11.2 429.0,13.0 435.5,15.6 442.0,19.0 448.5,23.0 455.0,27.5 461.5,32.5 468.0,37.7 474.5,43.2 481.0,48.7 487.5,54.1 494.0,59.2 500.5,64.1 507.0,68.4 513.5,72.2 520.0,75.3" fill="none" stroke="#3b82f6" stroke-width="1.8"/>
-      <polyline points="0.0,14.7 6.5,17.8 13.0,21.6 19.5,25.9 26.0,30.8 32.5,35.9 39.0,41.3 45.5,46.8 52.0,52.3 58.5,57.5 65.0,62.5 71.5,67.0 78.0,71.0 84.5,74.4 91.0,77.0 97.5,78.8 104.0,79.8 110.5,80.0 117.0,79.2 123.5,77.7 130.0,75.3 136.5,72.2 143.0,68.4 149.5,64.1 156.0,59.2 162.5,54.1 169.0,48.7 175.5,43.2 182.0,37.7 188.5,32.5 195.0,27.5 201.5,23.0 208.0,19.0 214.5,15.6 221.0,13.0 227.5,11.2 234.0,10.2 240.5,10.0 247.0,10.8 253.5,12.3 260.0,14.7 266.5,17.8 273.0,21.6 279.5,25.9 286.0,30.8 292.5,35.9 299.0,41.3 305.5,46.8 312.0,52.3 318.5,57.5 325.0,62.5 331.5,67.0 338.0,71.0 344.5,74.4 351.0,77.0 357.5,78.8 364.0,79.8 370.5,80.0 377.0,79.2 383.5,77.7 390.0,75.3 396.5,72.2 403.0,68.4 409.5,64.1 416.0,59.2 422.5,54.1 429.0,48.7 435.5,43.2 442.0,37.7 448.5,32.5 455.0,27.5 461.5,23.0 468.0,19.0 474.5,15.6 481.0,13.0 487.5,11.2 494.0,10.2 500.5,10.0 507.0,10.8 513.5,12.3 520.0,14.7" fill="none" stroke="#22c55e" stroke-width="1.8"/>
-      <text x="0" y="8" font-size="9" fill="#ef4444">VA shrinks — B and C unchanged</text>
-    </g>
+        <!-- ── Logic Diagram ── -->
+        <div class="help-tab-panel" id="helptab-diagram">
+          <p>The diagram traces the relay's trip logic from left (earliest contributing
+          condition) to right (the final trip command), reconstructed from the relay's settings
+          and the recorded data for this event.</p>
+          <ul>
+            <li><b>Green, filled box</b> — this condition was <b>true / asserted</b> at the moment of the trip.</li>
+            <li><b>Grey / muted box</b> — this condition was <b>false / not asserted</b> at that moment. It's only
+            shown when it's structurally required to explain the result (e.g. every side of an AND, or every side
+            of a NOT'd condition that failed together) — a false box is never just decoration.</li>
+            <li><b>Boxes with a thicker accent/red border</b> — these are internal <b>SV</b> logic/timer variables
+            (the relay's own named intermediate signals), rather than a directly measured element. Hover any box
+            for its underlying equation or description, or click it for full detail.</li>
+            <li><b>"ALL required (AND)"</b> — every box in that group had to be true (or false, if explaining a
+            negated condition) for the result shown.</li>
+            <li><b>"ANY of these (OR)"</b> — only one box in that group needed to be true; alternatives that
+            didn't happen are omitted rather than shown as false.</li>
+            <li><b>NOT / R_TRIG / F_TRIG prefixes</b> inside a box (e.g. "NOT SV19", "R_TRIG CLOSE") mean the
+            condition is being evaluated as negated, or only counts at the instant it just changed state
+            (rising/falling edge), not merely whenever it happens to be in that state.</li>
+            <li><b>The final red box</b> on the right is the trip/event command itself. A note below the diagram
+            indicates how many other, unrelated trip conditions exist in the same equation but weren't part
+            of this event.</li>
+          </ul>
+        </div>
 
-    <text x="10" y="220" font-size="11" fill="var(--text-dim)" font-weight="600">ZERO-SEQUENCE example — all three phases pushed the same way together (e.g. ground fault)</text>
-    <g transform="translate(10,224)">
-      <line x1="0" y1="45" x2="520" y2="45" stroke="var(--card-border)" stroke-width="1"/>
-      <polyline points="0.0,45.0 6.5,38.0 13.0,31.1 19.5,24.6 26.0,18.5 32.5,13.2 39.0,8.6 45.5,4.9 52.0,2.2 58.5,0.6 65.0,0.0 71.5,0.6 78.0,2.2 84.5,4.9 91.0,8.6 97.5,13.2 104.0,18.5 110.5,24.6 117.0,31.1 123.5,38.0 130.0,45.0 136.5,52.0 143.0,58.9 149.5,65.4 156.0,71.5 162.5,76.8 169.0,81.4 175.5,85.1 182.0,87.8 188.5,89.4 195.0,90.0 201.5,89.4 208.0,87.8 214.5,85.1 221.0,81.4 227.5,76.8 234.0,71.5 240.5,65.4 247.0,58.9 253.5,52.0 260.0,45.0 266.5,38.0 273.0,31.1 279.5,24.6 286.0,18.5 292.5,13.2 299.0,8.6 305.5,4.9 312.0,2.2 318.5,0.6 325.0,0.0 331.5,0.6 338.0,2.2 344.5,4.9 351.0,8.6 357.5,13.2 364.0,18.5 370.5,24.6 377.0,31.1 383.5,38.0 390.0,45.0 396.5,52.0 403.0,58.9 409.5,65.4 416.0,71.5 422.5,76.8 429.0,81.4 435.5,85.1 442.0,87.8 448.5,89.4 455.0,90.0 461.5,89.4 468.0,87.8 474.5,85.1 481.0,81.4 487.5,76.8 494.0,71.5 500.5,65.4 507.0,58.9 513.5,52.0 520.0,45.0" fill="none" stroke="#ef4444" stroke-width="1.8"/>
-      <polyline points="0.0,75.3 6.5,76.1 13.0,76.1 19.5,75.4 26.0,73.9 32.5,71.7 39.0,68.9 45.5,65.4 52.0,61.5 58.5,57.1 65.0,52.5 71.5,47.7 78.0,42.8 84.5,37.9 91.0,33.3 97.5,28.9 104.0,24.9 110.5,21.4 117.0,18.5 123.5,16.2 130.0,14.7 136.5,13.9 143.0,13.9 149.5,14.6 156.0,16.1 162.5,18.3 169.0,21.1 175.5,24.6 182.0,28.5 188.5,32.9 195.0,37.5 201.5,42.3 208.0,47.2 214.5,52.1 221.0,56.7 227.5,61.1 234.0,65.1 240.5,68.6 247.0,71.5 253.5,73.8 260.0,75.3 266.5,76.1 273.0,76.1 279.5,75.4 286.0,73.9 292.5,71.7 299.0,68.9 305.5,65.4 312.0,61.5 318.5,57.1 325.0,52.5 331.5,47.7 338.0,42.8 344.5,37.9 351.0,33.3 357.5,28.9 364.0,24.9 370.5,21.4 377.0,18.5 383.5,16.2 390.0,14.7 396.5,13.9 403.0,13.9 409.5,14.6 416.0,16.1 422.5,18.3 429.0,21.1 435.5,24.6 442.0,28.5 448.5,32.9 455.0,37.5 461.5,42.3 468.0,47.2 474.5,52.1 481.0,56.7 487.5,61.1 494.0,65.1 500.5,68.6 507.0,71.5 513.5,73.8 520.0,75.3" fill="none" stroke="#3b82f6" stroke-width="1.8"/>
-      <polyline points="0.0,14.7 6.5,16.2 13.0,18.5 19.5,21.4 26.0,24.9 32.5,28.9 39.0,33.3 45.5,37.9 52.0,42.8 58.5,47.7 65.0,52.5 71.5,57.1 78.0,61.5 84.5,65.4 91.0,68.9 97.5,71.7 104.0,73.9 110.5,75.4 117.0,76.1 123.5,76.1 130.0,75.3 136.5,73.8 143.0,71.5 149.5,68.6 156.0,65.1 162.5,61.1 169.0,56.7 175.5,52.1 182.0,47.2 188.5,42.3 195.0,37.5 201.5,32.9 208.0,28.5 214.5,24.6 221.0,21.1 227.5,18.3 234.0,16.1 240.5,14.6 247.0,13.9 253.5,13.9 260.0,14.7 266.5,16.2 273.0,18.5 279.5,21.4 286.0,24.9 292.5,28.9 299.0,33.3 305.5,37.9 312.0,42.8 318.5,47.7 325.0,52.5 331.5,57.1 338.0,61.5 344.5,65.4 351.0,68.9 357.5,71.7 364.0,73.9 370.5,75.4 377.0,76.1 383.5,76.1 390.0,75.3 396.5,73.8 403.0,71.5 409.5,68.6 416.0,65.1 422.5,61.1 429.0,56.7 435.5,52.1 442.0,47.2 448.5,42.3 455.0,37.5 461.5,32.9 468.0,28.5 474.5,24.6 481.0,21.1 487.5,18.3 494.0,16.1 500.5,14.6 507.0,13.9 513.5,13.9 520.0,14.7" fill="none" stroke="#22c55e" stroke-width="1.8"/>
-      <line x1="0" y1="45" x2="520" y2="45" stroke="var(--card-border)" stroke-width="1" transform="translate(0,72)"/>
-      <polyline points="0.0,45.0 6.5,40.3 13.0,35.7 19.5,31.4 26.0,27.4 32.5,23.8 39.0,20.7 45.5,18.3 52.0,16.5 58.5,15.4 65.0,15.0 71.5,15.4 78.0,16.5 84.5,18.3 91.0,20.7 97.5,23.8 104.0,27.4 110.5,31.4 117.0,35.7 123.5,40.3 130.0,45.0 136.5,49.7 143.0,54.3 149.5,58.6 156.0,62.6 162.5,66.2 169.0,69.3 175.5,71.7 182.0,73.5 188.5,74.6 195.0,75.0 201.5,74.6 208.0,73.5 214.5,71.7 221.0,69.3 227.5,66.2 234.0,62.6 240.5,58.6 247.0,54.3 253.5,49.7 260.0,45.0 266.5,40.3 273.0,35.7 279.5,31.4 286.0,27.4 292.5,23.8 299.0,20.7 305.5,18.3 312.0,16.5 318.5,15.4 325.0,15.0 331.5,15.4 338.0,16.5 344.5,18.3 351.0,20.7 357.5,23.8 364.0,27.4 370.5,31.4 377.0,35.7 383.5,40.3 390.0,45.0 396.5,49.7 403.0,54.3 409.5,58.6 416.0,62.6 422.5,66.2 429.0,69.3 435.5,71.7 442.0,73.5 448.5,74.6 455.0,75.0 461.5,74.6 468.0,73.5 474.5,71.7 481.0,69.3 487.5,66.2 494.0,62.6 500.5,58.6 507.0,54.3 513.5,49.7 520.0,45.0" fill="none" stroke="#eab308" stroke-width="2" stroke-dasharray="3,2" transform="translate(0,72)"/>
-      <text x="0" y="80" font-size="9" fill="#eab308">VA+VB+VC — normally flat at zero; here it isn't (this leftover IS the 3V0 the relay measures)</text>
+        <!-- ── Analysis Tabs ── -->
+        <div class="help-tab-panel" id="helptab-tabs">
+          <p>The tabs below the summary hold the underlying evidence behind the headline
+          determination. None of this data is new — it all comes from the same CEV file QuickSet
+          or SynchroWAVe would open — but it's pre-cross-referenced against the relay's own
+          settings and against each other, which normally has to be done by hand.</p>
+          <ul>
+            <li><b>&#128205; Event Timeline</b> — every digital bit that changed, in order, with exact
+            timing. Unlike a raw digital plot, each entry is already labeled with what it means,
+            so you can scan the sequence of events without decoding relay-word bit names.</li>
+            <li><b>&#128268; Voltages</b> — pre-fault vs. fault voltage on every phase and terminal, with
+            percent change already computed and color-flagged, plus every voltage protection
+            element's pickup compared directly against the measured value for this event.</li>
+            <li><b>&#12336;&#65039; Currents</b> — the same pre/fault comparison for every current channel,
+            with the percent change flagged so a large step (fault current) or a near-zero
+            change (no real current flowing) stands out immediately.</li>
+            <li><b>&#128737;&#65039; Protection</b> — every overcurrent element's pickup, measured value, and
+            multiple-of-pickup, computed for this event rather than left for you to calculate by
+            hand from the settings sheet.</li>
+            <li><b>&#129656; Diagnostics</b> — physical consistency checks that cross-reference sequence
+            voltage against sequence current (e.g. zero-sequence voltage vs. ground current). A real,
+            sustained sequence voltage should show up roughly proportionally in the matching current;
+            a large sustained gap points toward a CT wiring issue, a grounding transformer problem, or
+            an open phase — a check neither QuickSet nor SynchroWAVe performs on its own.</li>
+            <li><b>&#128279; SV Logic</b> — every internal SV (timer/logic variable) used in the trip
+            equation, with its pickup/dropout delay and equation shown directly, split out from
+            every other active SV in the relay.</li>
+            <li><b>&#128202; Frequency</b> — frequency protection elements' pickups and measured values
+            for this event, in the same pickup-vs-measured format as the other protection tabs.</li>
+            <li><b>&#128203; Equations</b> — the raw SELogic text for the trip, unconditional trip,
+            fault, and reclose-initiate equations, for anyone who wants to verify the tool's
+            resolution against the relay's own settings directly.</li>
+          </ul>
+        </div>
+
+        <!-- ── Sequence Components ── -->
+        <div class="help-tab-panel" id="helptab-seq">
+          <div id="seqExplainerSection"></div>
+          <p>Any three-phase voltage or current can be split into three simpler components:
+          <b>positive-</b>, <b>negative-</b>, and <b>zero-sequence</b>. None of these are something
+          you'd read directly off a single wire with a meter — they're calculated from all three
+          phases together, specifically to reveal imbalance that a single-phase reading can't show.</p>
+          <ul>
+            <li><b>Positive-sequence</b> is the "normal" component — three equal magnitudes, 120&#176;
+            apart, in the system's normal phase order. In a healthy, balanced system, essentially
+            all of the voltage/current is positive-sequence; it's what does the actual work.</li>
+            <li><b>Negative-sequence</b> is a measure of imbalance <i>between</i> the phases. It's
+            zero in a perfectly balanced system, and appears when the three phases become unequal
+            relative to each other — a single-phase fault, an open conductor or blown fuse, or a
+            badly unbalanced load are the classic causes.</li>
+            <li><b>Zero-sequence</b> is different in kind: a component that's identical in all three
+            phases at once, rising and falling together instead of canceling out. It typically shows
+            up around ground faults — zero-sequence <i>current</i> needs a return path through
+            ground/neutral to flow at all, and zero-sequence <i>voltage</i> (3V0) appears when the
+            system neutral shifts away from ground.</li>
+          </ul>
+          <p>Here's what each looks like as phase waveforms over time (the way SynchroWAVe and this
+          tool's charts display them):</p>
+          <div style="margin:14px 0;">
+          <svg viewBox="0 0 560 508" style="width:100%;max-width:560px;background:var(--bg2);border-radius:8px;">
+    <text x="10" y="18" font-size="11" fill="var(--text-dim)" font-weight="600">BALANCED (healthy) — equal magnitudes, evenly spaced; VA+VB+VC cancels to zero at every instant</text>
+    <g transform="translate(10,26)">
+    <line x1="0" y1="45" x2="520" y2="45" stroke="var(--card-border)" stroke-width="1"/>
+    <polyline points="0.0,45.0 6.5,39.5 13.0,34.2 19.5,29.1 26.0,24.4 32.5,20.3 39.0,16.7 45.5,13.8 52.0,11.7 58.5,10.4 65.0,10.0 71.5,10.4 78.0,11.7 84.5,13.8 91.0,16.7 97.5,20.3 104.0,24.4 110.5,29.1 117.0,34.2 123.5,39.5 130.0,45.0 136.5,50.5 143.0,55.8 149.5,60.9 156.0,65.6 162.5,69.7 169.0,73.3 175.5,76.2 182.0,78.3 188.5,79.6 195.0,80.0 201.5,79.6 208.0,78.3 214.5,76.2 221.0,73.3 227.5,69.7 234.0,65.6 240.5,60.9 247.0,55.8 253.5,50.5 260.0,45.0 266.5,39.5 273.0,34.2 279.5,29.1 286.0,24.4 292.5,20.3 299.0,16.7 305.5,13.8 312.0,11.7 318.5,10.4 325.0,10.0 331.5,10.4 338.0,11.7 344.5,13.8 351.0,16.7 357.5,20.3 364.0,24.4 370.5,29.1 377.0,34.2 383.5,39.5 390.0,45.0 396.5,50.5 403.0,55.8 409.5,60.9 416.0,65.6 422.5,69.7 429.0,73.3 435.5,76.2 442.0,78.3 448.5,79.6 455.0,80.0 461.5,79.6 468.0,78.3 474.5,76.2 481.0,73.3 487.5,69.7 494.0,65.6 500.5,60.9 507.0,55.8 513.5,50.5 520.0,45.0" fill="none" stroke="#ef4444" stroke-width="1.8"/>
+    <polyline points="0.0,75.3 6.5,77.7 13.0,79.2 19.5,80.0 26.0,79.8 32.5,78.8 39.0,77.0 45.5,74.4 52.0,71.0 58.5,67.0 65.0,62.5 71.5,57.5 78.0,52.3 84.5,46.8 91.0,41.3 97.5,35.9 104.0,30.8 110.5,25.9 117.0,21.6 123.5,17.8 130.0,14.7 136.5,12.3 143.0,10.8 149.5,10.0 156.0,10.2 162.5,11.2 169.0,13.0 175.5,15.6 182.0,19.0 188.5,23.0 195.0,27.5 201.5,32.5 208.0,37.7 214.5,43.2 221.0,48.7 227.5,54.1 234.0,59.2 240.5,64.1 247.0,68.4 253.5,72.2 260.0,75.3 266.5,77.7 273.0,79.2 279.5,80.0 286.0,79.8 292.5,78.8 299.0,77.0 305.5,74.4 312.0,71.0 318.5,67.0 325.0,62.5 331.5,57.5 338.0,52.3 344.5,46.8 351.0,41.3 357.5,35.9 364.0,30.8 370.5,25.9 377.0,21.6 383.5,17.8 390.0,14.7 396.5,12.3 403.0,10.8 409.5,10.0 416.0,10.2 422.5,11.2 429.0,13.0 435.5,15.6 442.0,19.0 448.5,23.0 455.0,27.5 461.5,32.5 468.0,37.7 474.5,43.2 481.0,48.7 487.5,54.1 494.0,59.2 500.5,64.1 507.0,68.4 513.5,72.2 520.0,75.3" fill="none" stroke="#3b82f6" stroke-width="1.8"/>
+    <polyline points="0.0,14.7 6.5,17.8 13.0,21.6 19.5,25.9 26.0,30.8 32.5,35.9 39.0,41.3 45.5,46.8 52.0,52.3 58.5,57.5 65.0,62.5 71.5,67.0 78.0,71.0 84.5,74.4 91.0,77.0 97.5,78.8 104.0,79.8 110.5,80.0 117.0,79.2 123.5,77.7 130.0,75.3 136.5,72.2 143.0,68.4 149.5,64.1 156.0,59.2 162.5,54.1 169.0,48.7 175.5,43.2 182.0,37.7 188.5,32.5 195.0,27.5 201.5,23.0 208.0,19.0 214.5,15.6 221.0,13.0 227.5,11.2 234.0,10.2 240.5,10.0 247.0,10.8 253.5,12.3 260.0,14.7 266.5,17.8 273.0,21.6 279.5,25.9 286.0,30.8 292.5,35.9 299.0,41.3 305.5,46.8 312.0,52.3 318.5,57.5 325.0,62.5 331.5,67.0 338.0,71.0 344.5,74.4 351.0,77.0 357.5,78.8 364.0,79.8 370.5,80.0 377.0,79.2 383.5,77.7 390.0,75.3 396.5,72.2 403.0,68.4 409.5,64.1 416.0,59.2 422.5,54.1 429.0,48.7 435.5,43.2 442.0,37.7 448.5,32.5 455.0,27.5 461.5,23.0 468.0,19.0 474.5,15.6 481.0,13.0 487.5,11.2 494.0,10.2 500.5,10.0 507.0,10.8 513.5,12.3 520.0,14.7" fill="none" stroke="#22c55e" stroke-width="1.8"/>
     </g>
-  </svg>
-</div>
-        <ul>
-          <li><b>Positive-sequence</b> is the "normal" component — three equal magnitudes, 120°
-          apart, rotating in the system's normal order. In a healthy, balanced system, essentially
-          all of the voltage/current is positive-sequence; it's what does the actual work.</li>
-          <li><b>Negative-sequence</b> is a mirror-image set rotating the opposite direction. It's
-          zero in a perfectly balanced system, and only appears when the three phases become
-          unequal relative to each other — a single-phase fault, an open conductor or blown fuse,
-          or a badly unbalanced load are the classic causes.</li>
-          <li><b>Zero-sequence</b> is different in kind: three components all in phase with each
-          other (not spread apart), rising and falling together. It's zero unless there's a path
-          for current to return through the ground/earth instead of the other phases — so it
-          typically shows up around ground faults or wherever an imbalance has somewhere to go
-          besides the other two phases.</li>
-        </ul>
-        <p><b>Operationally:</b> a trip on a sequence quantity means the relay saw an imbalance
-        between the phases — that alone doesn't say what caused it. Pair it with the actual phase
-        current and voltage for the event: real, elevated current alongside the sequence signal
-        points toward an actual fault; little to no current change alongside it points toward
-        something else (an instrumentation issue, a disturbance without local current, inverter
-        response, etc.) — the sequence element tells you "unbalanced," the surrounding data tells
-        you the rest.</p>
-        <h3>Using the Tabs</h3>
-        <p>The tabs below the summary give you the underlying evidence behind the headline
-        determination. None of this data is new — it all comes from the same CEV file QuickSet
-        or SynchroWAVe would open — but it's pre-cross-referenced against the relay's own
-        settings and against each other, which normally has to be done by hand.</p>
-        <ul>
-          <li><b>📍 Event Timeline</b> — every digital bit that changed, in order, with exact
-          timing. Unlike a raw digital plot, each entry is already labeled with what it means,
-          so you can scan the sequence of events without reading relay-word bit names.</li>
-          <li><b>🔌 Voltages</b> — pre-fault vs. fault voltage on every phase and terminal, with
-          percent change already computed and color-flagged, plus every voltage protection
-          element's pickup compared directly against the measured value for this event.
-          QuickSet shows you the pickup setting; SynchroWAVe shows you the waveform. This puts
-          the two side by side automatically, for this specific event.</li>
-          <li><b>〰️ Currents</b> — the same pre/fault comparison for every current channel,
-          with the percent change flagged so a large step (fault current) or a near-zero
-          change (no real current flowing) stands out immediately.</li>
-          <li><b>🛡️ Protection</b> — every overcurrent element's pickup, measured value, and
-          multiple-of-pickup, computed for this event rather than left for you to calculate by
-          hand from the settings sheet.</li>
-          <li><b>🩺 Diagnostics</b> — physical consistency checks that cross-reference sequence
-          voltage against sequence current (e.g. zero-sequence voltage vs. zero-sequence
-          current). A real, sustained sequence voltage should show up roughly proportionally in
-          the matching current; a large sustained gap points to a CT wiring issue, a grounding
-          transformer problem, or an open phase — a check neither QuickSet nor SynchroWAVe
-          performs on its own.</li>
-          <li><b>🔗 SV Logic</b> — every internal SV (timer/logic variable) used in the trip
-          equation, with its pickup/dropout delay and equation shown directly, split out from
-          every other active SV in the relay. This is the same information buried in the
-          settings file, surfaced specifically for the SVs that mattered to this event.</li>
-          <li><b>📊 Frequency</b> — frequency protection elements' pickups and measured values
-          for this event, in the same pickup-vs-measured format as the other protection tabs.</li>
-          <li><b>📋 Equations</b> — the raw SELogic text for the trip, unconditional trip,
-          fault, and reclose-initiate equations, for anyone who wants to verify the tool's
-          resolution against the relay's own settings directly.</li>
-        </ul>
-        <p>In short: QuickSet tells you how the relay is <i>configured</i>; SynchroWAVe shows
-        you what was <i>recorded</i>. This tool's tabs exist to connect those two — showing,
-        for this specific event, exactly how the recorded data relates to the relay's own
-        configured pickups, timers, and logic — which is the step that otherwise has to be done
-        manually, equation by equation.</p>
-        <ol>
-          <li><b>Start with the headline cause</b> at the top of the page — this reflects the
-          tool's resolution of the relay's own logic, not a raw relay-word name, though it's
-          still worth confirming against the diagram below it.</li>
-          <li><b>Check the diagram</b> to see the actual path, including any supervisory (AND) conditions
-          that had to be satisfied alongside the main cause.</li>
-          <li><b>Read any diagnostic flags</b> below the diagram. These call out cases that are easy to
-          misread at a glance — e.g. a trip driven by internal logic rather than a measured fault, a trip
-          issued while the breaker was already open, or a voltage/current mismatch suggesting a failed
-          voltage-sensing channel rather than a real fault. Flags are informational; they intentionally
-          don't tell you what corrective action to take.</li>
-          <li><b>Use the charts</b> to confirm the story: current, voltage, and the most relevant derived
-          quantity are synchronized with the digital logic timeline. Scroll to zoom and drag to pan — this
-          applies to all charts at once. Click or drag anywhere to drop the measurement cursor; it shows
-          exact values on every chart simultaneously at that instant. Double-click any chart to reset its zoom.</li>
-        </ol>
+    <text x="10" y="146" font-size="11" fill="var(--text-dim)" font-weight="600">UNBALANCED — one phase sags (single-phase fault, open phase, blown fuse, unbalanced load)</text>
+    <g transform="translate(10,154)">
+    <line x1="0" y1="45" x2="520" y2="45" stroke="var(--card-border)" stroke-width="1"/>
+    <polyline points="0.0,45.0 6.5,42.7 13.0,40.4 19.5,38.2 26.0,36.2 32.5,34.4 39.0,32.9 45.5,31.6 52.0,30.7 58.5,30.2 65.0,30.0 71.5,30.2 78.0,30.7 84.5,31.6 91.0,32.9 97.5,34.4 104.0,36.2 110.5,38.2 117.0,40.4 123.5,42.7 130.0,45.0 136.5,47.3 143.0,49.6 149.5,51.8 156.0,53.8 162.5,55.6 169.0,57.1 175.5,58.4 182.0,59.3 188.5,59.8 195.0,60.0 201.5,59.8 208.0,59.3 214.5,58.4 221.0,57.1 227.5,55.6 234.0,53.8 240.5,51.8 247.0,49.6 253.5,47.3 260.0,45.0 266.5,42.7 273.0,40.4 279.5,38.2 286.0,36.2 292.5,34.4 299.0,32.9 305.5,31.6 312.0,30.7 318.5,30.2 325.0,30.0 331.5,30.2 338.0,30.7 344.5,31.6 351.0,32.9 357.5,34.4 364.0,36.2 370.5,38.2 377.0,40.4 383.5,42.7 390.0,45.0 396.5,47.3 403.0,49.6 409.5,51.8 416.0,53.8 422.5,55.6 429.0,57.1 435.5,58.4 442.0,59.3 448.5,59.8 455.0,60.0 461.5,59.8 468.0,59.3 474.5,58.4 481.0,57.1 487.5,55.6 494.0,53.8 500.5,51.8 507.0,49.6 513.5,47.3 520.0,45.0" fill="none" stroke="#ef4444" stroke-width="1.8"/>
+    <polyline points="0.0,75.3 6.5,77.7 13.0,79.2 19.5,80.0 26.0,79.8 32.5,78.8 39.0,77.0 45.5,74.4 52.0,71.0 58.5,67.0 65.0,62.5 71.5,57.5 78.0,52.3 84.5,46.8 91.0,41.3 97.5,35.9 104.0,30.8 110.5,25.9 117.0,21.6 123.5,17.8 130.0,14.7 136.5,12.3 143.0,10.8 149.5,10.0 156.0,10.2 162.5,11.2 169.0,13.0 175.5,15.6 182.0,19.0 188.5,23.0 195.0,27.5 201.5,32.5 208.0,37.7 214.5,43.2 221.0,48.7 227.5,54.1 234.0,59.2 240.5,64.1 247.0,68.4 253.5,72.2 260.0,75.3 266.5,77.7 273.0,79.2 279.5,80.0 286.0,79.8 292.5,78.8 299.0,77.0 305.5,74.4 312.0,71.0 318.5,67.0 325.0,62.5 331.5,57.5 338.0,52.3 344.5,46.8 351.0,41.3 357.5,35.9 364.0,30.8 370.5,25.9 377.0,21.6 383.5,17.8 390.0,14.7 396.5,12.3 403.0,10.8 409.5,10.0 416.0,10.2 422.5,11.2 429.0,13.0 435.5,15.6 442.0,19.0 448.5,23.0 455.0,27.5 461.5,32.5 468.0,37.7 474.5,43.2 481.0,48.7 487.5,54.1 494.0,59.2 500.5,64.1 507.0,68.4 513.5,72.2 520.0,75.3" fill="none" stroke="#3b82f6" stroke-width="1.8"/>
+    <polyline points="0.0,14.7 6.5,17.8 13.0,21.6 19.5,25.9 26.0,30.8 32.5,35.9 39.0,41.3 45.5,46.8 52.0,52.3 58.5,57.5 65.0,62.5 71.5,67.0 78.0,71.0 84.5,74.4 91.0,77.0 97.5,78.8 104.0,79.8 110.5,80.0 117.0,79.2 123.5,77.7 130.0,75.3 136.5,72.2 143.0,68.4 149.5,64.1 156.0,59.2 162.5,54.1 169.0,48.7 175.5,43.2 182.0,37.7 188.5,32.5 195.0,27.5 201.5,23.0 208.0,19.0 214.5,15.6 221.0,13.0 227.5,11.2 234.0,10.2 240.5,10.0 247.0,10.8 253.5,12.3 260.0,14.7 266.5,17.8 273.0,21.6 279.5,25.9 286.0,30.8 292.5,35.9 299.0,41.3 305.5,46.8 312.0,52.3 318.5,57.5 325.0,62.5 331.5,67.0 338.0,71.0 344.5,74.4 351.0,77.0 357.5,78.8 364.0,79.8 370.5,80.0 377.0,79.2 383.5,77.7 390.0,75.3 396.5,72.2 403.0,68.4 409.5,64.1 416.0,59.2 422.5,54.1 429.0,48.7 435.5,43.2 442.0,37.7 448.5,32.5 455.0,27.5 461.5,23.0 468.0,19.0 474.5,15.6 481.0,13.0 487.5,11.2 494.0,10.2 500.5,10.0 507.0,10.8 513.5,12.3 520.0,14.7" fill="none" stroke="#22c55e" stroke-width="1.8"/>
+    <text x="0" y="10" font-size="9" fill="#ef4444">VA sags — VB and VC unchanged</text>
+    </g>
+    <text x="10" y="258" font-size="9" fill="var(--text-muted)">The phases are no longer equal — this imbalance is what negative-sequence (V2) measures. Unlike 3V0 below, V2 is not a</text>
+    <text x="10" y="269" font-size="9" fill="var(--text-muted)">simple sum of the traces — the relay computes it from the magnitude AND timing of all three phases together.</text>
+    <text x="10" y="300" font-size="11" fill="var(--text-dim)" font-weight="600">GROUND FAULT / NEUTRAL SHIFT — a common component appears in all three phases at once</text>
+    <g transform="translate(10,308)">
+    <line x1="0" y1="45" x2="520" y2="45" stroke="var(--card-border)" stroke-width="1"/>
+    <polyline points="0.0,45.0 6.5,38.0 13.0,31.1 19.5,24.6 26.0,18.5 32.5,13.2 39.0,8.6 45.5,4.9 52.0,2.2 58.5,0.6 65.0,0.0 71.5,0.6 78.0,2.2 84.5,4.9 91.0,8.6 97.5,13.2 104.0,18.5 110.5,24.6 117.0,31.1 123.5,38.0 130.0,45.0 136.5,52.0 143.0,58.9 149.5,65.4 156.0,71.5 162.5,76.8 169.0,81.4 175.5,85.1 182.0,87.8 188.5,89.4 195.0,90.0 201.5,89.4 208.0,87.8 214.5,85.1 221.0,81.4 227.5,76.8 234.0,71.5 240.5,65.4 247.0,58.9 253.5,52.0 260.0,45.0 266.5,38.0 273.0,31.1 279.5,24.6 286.0,18.5 292.5,13.2 299.0,8.6 305.5,4.9 312.0,2.2 318.5,0.6 325.0,0.0 331.5,0.6 338.0,2.2 344.5,4.9 351.0,8.6 357.5,13.2 364.0,18.5 370.5,24.6 377.0,31.1 383.5,38.0 390.0,45.0 396.5,52.0 403.0,58.9 409.5,65.4 416.0,71.5 422.5,76.8 429.0,81.4 435.5,85.1 442.0,87.8 448.5,89.4 455.0,90.0 461.5,89.4 468.0,87.8 474.5,85.1 481.0,81.4 487.5,76.8 494.0,71.5 500.5,65.4 507.0,58.9 513.5,52.0 520.0,45.0" fill="none" stroke="#ef4444" stroke-width="1.8"/>
+    <polyline points="0.0,75.3 6.5,76.1 13.0,76.1 19.5,75.4 26.0,73.9 32.5,71.7 39.0,68.9 45.5,65.4 52.0,61.5 58.5,57.1 65.0,52.5 71.5,47.7 78.0,42.8 84.5,37.9 91.0,33.3 97.5,28.9 104.0,24.9 110.5,21.4 117.0,18.5 123.5,16.2 130.0,14.7 136.5,13.9 143.0,13.9 149.5,14.6 156.0,16.1 162.5,18.3 169.0,21.1 175.5,24.6 182.0,28.5 188.5,32.9 195.0,37.5 201.5,42.3 208.0,47.2 214.5,52.1 221.0,56.7 227.5,61.1 234.0,65.1 240.5,68.6 247.0,71.5 253.5,73.8 260.0,75.3 266.5,76.1 273.0,76.1 279.5,75.4 286.0,73.9 292.5,71.7 299.0,68.9 305.5,65.4 312.0,61.5 318.5,57.1 325.0,52.5 331.5,47.7 338.0,42.8 344.5,37.9 351.0,33.3 357.5,28.9 364.0,24.9 370.5,21.4 377.0,18.5 383.5,16.2 390.0,14.7 396.5,13.9 403.0,13.9 409.5,14.6 416.0,16.1 422.5,18.3 429.0,21.1 435.5,24.6 442.0,28.5 448.5,32.9 455.0,37.5 461.5,42.3 468.0,47.2 474.5,52.1 481.0,56.7 487.5,61.1 494.0,65.1 500.5,68.6 507.0,71.5 513.5,73.8 520.0,75.3" fill="none" stroke="#3b82f6" stroke-width="1.8"/>
+    <polyline points="0.0,14.7 6.5,16.2 13.0,18.5 19.5,21.4 26.0,24.9 32.5,28.9 39.0,33.3 45.5,37.9 52.0,42.8 58.5,47.7 65.0,52.5 71.5,57.1 78.0,61.5 84.5,65.4 91.0,68.9 97.5,71.7 104.0,73.9 110.5,75.4 117.0,76.1 123.5,76.1 130.0,75.3 136.5,73.8 143.0,71.5 149.5,68.6 156.0,65.1 162.5,61.1 169.0,56.7 175.5,52.1 182.0,47.2 188.5,42.3 195.0,37.5 201.5,32.9 208.0,28.5 214.5,24.6 221.0,21.1 227.5,18.3 234.0,16.1 240.5,14.6 247.0,13.9 253.5,13.9 260.0,14.7 266.5,16.2 273.0,18.5 279.5,21.4 286.0,24.9 292.5,28.9 299.0,33.3 305.5,37.9 312.0,42.8 318.5,47.7 325.0,52.5 331.5,57.1 338.0,61.5 344.5,65.4 351.0,68.9 357.5,71.7 364.0,73.9 370.5,75.4 377.0,76.1 383.5,76.1 390.0,75.3 396.5,73.8 403.0,71.5 409.5,68.6 416.0,65.1 422.5,61.1 429.0,56.7 435.5,52.1 442.0,47.2 448.5,42.3 455.0,37.5 461.5,32.9 468.0,28.5 474.5,24.6 481.0,21.1 487.5,18.3 494.0,16.1 500.5,14.6 507.0,13.9 513.5,13.9 520.0,14.7" fill="none" stroke="#22c55e" stroke-width="1.8"/>
+    </g>
+    <g transform="translate(10,408)">
+    <line x1="0" y1="38" x2="520" y2="38" stroke="var(--card-border)" stroke-width="1"/>
+    <polyline points="0.0,38.0 6.5,33.3 13.0,28.7 19.5,24.4 26.0,20.4 32.5,16.8 39.0,13.7 45.5,11.3 52.0,9.5 58.5,8.4 65.0,8.0 71.5,8.4 78.0,9.5 84.5,11.3 91.0,13.7 97.5,16.8 104.0,20.4 110.5,24.4 117.0,28.7 123.5,33.3 130.0,38.0 136.5,42.7 143.0,47.3 149.5,51.6 156.0,55.6 162.5,59.2 169.0,62.3 175.5,64.7 182.0,66.5 188.5,67.6 195.0,68.0 201.5,67.6 208.0,66.5 214.5,64.7 221.0,62.3 227.5,59.2 234.0,55.6 240.5,51.6 247.0,47.3 253.5,42.7 260.0,38.0 266.5,33.3 273.0,28.7 279.5,24.4 286.0,20.4 292.5,16.8 299.0,13.7 305.5,11.3 312.0,9.5 318.5,8.4 325.0,8.0 331.5,8.4 338.0,9.5 344.5,11.3 351.0,13.7 357.5,16.8 364.0,20.4 370.5,24.4 377.0,28.7 383.5,33.3 390.0,38.0 396.5,42.7 403.0,47.3 409.5,51.6 416.0,55.6 422.5,59.2 429.0,62.3 435.5,64.7 442.0,66.5 448.5,67.6 455.0,68.0 461.5,67.6 468.0,66.5 474.5,64.7 481.0,62.3 487.5,59.2 494.0,55.6 500.5,51.6 507.0,47.3 513.5,42.7 520.0,38.0" fill="none" stroke="#eab308" stroke-width="2" stroke-dasharray="3,2"/>
+    <text x="0" y="84" font-size="9" fill="#eab308">VA+VB+VC no longer cancels — this leftover IS the 3V0 (zero-sequence) voltage the relay measures</text>
+    </g>
+    </svg>
+          </div>
+          <p><b>Operationally:</b> a trip on a sequence quantity means the relay saw an imbalance
+          between the phases — that alone doesn't say what caused it. Pair it with the actual phase
+          current and voltage for the event: real, elevated current alongside the sequence signal
+          points toward an actual fault; little to no current change alongside it points toward
+          something else (an instrumentation issue, a disturbance without local current, inverter
+          response, etc.) — the sequence element tells you "unbalanced," the surrounding data tells
+          you the rest. The <b>Diagnostics</b> tab automates exactly this cross-check.</p>
+        </div>
+
+        <!-- ── FAQ ── -->
+        <div class="help-tab-panel" id="helptab-faq">
+          <p><b>How is this different from just opening the file in QuickSet or SynchroWAVe?</b><br>
+          QuickSet shows how the relay is configured; SynchroWAVe shows what was recorded. Neither
+          automatically connects the two for a specific event. This tool does that connection
+          automatically — matching the recorded data against the relay's own pickups, timers, and
+          logic for the event in front of you, which otherwise has to be done manually, equation
+          by equation.</p>
+          <p><b>Should I act on a diagnostic flag?</b><br>
+          Flags are informational, not instructions — they call out something worth a closer look
+          (e.g. a trip driven by internal logic, an already-open breaker, or a likely failed
+          voltage-sensing channel) without telling you what to do about it.</p>
+          <p><b>Can the headline cause be wrong?</b><br>
+          It can. The headline is a resolution of the relay's configured logic against the recorded
+          data — if a setting was captured incompletely, or the event spans multiple records, the
+          resolution can miss context. The <b>Equations</b> tab shows the raw SELogic so you can
+          verify the tool's reading against the relay's own settings directly.</p>
+          <p><b>Why do some boxes in the diagram show a condition that's false?</b><br>
+          A false box is only ever shown when it's structurally necessary — e.g. every side of an
+          AND, or a set of conditions that all had to fail together to explain a NOT. It's never
+          shown just for reference.</p>
+          <p><b>What does "sequence" mean in a trip cause (59Q, 51G, 3V0&#8230;)?</b><br>
+          See the <span class="zoom-badge" onclick="setHelpTab('seq')">Sequence Components tab &#8594;</span></p>
+        </div>
+
       </div>
     </div>
   </div>
@@ -5585,9 +5595,17 @@ function selectEvent(idx) {
   renderContent();
 }
 
-function toggleHelp(show) {
+function toggleHelp(show, tab) {
   const el = document.getElementById('helpModal');
   if (el) el.style.display = show ? 'flex' : 'none';
+  if (show && tab) setHelpTab(tab);
+}
+
+function setHelpTab(tab) {
+  document.querySelectorAll('.help-tab').forEach(b => b.classList.toggle('active', b.dataset.helptab === tab));
+  document.querySelectorAll('.help-tab-panel').forEach(p => p.classList.toggle('active', p.id === 'helptab-' + tab));
+  const body = document.querySelector('#helpModal .help-modal-body');
+  if (body) body.scrollTop = 0;
 }
 
 // Best-effort lookup of this bit's state in the currently loaded event: state at the trip
@@ -5642,7 +5660,7 @@ function showBitDetail(label) {
     || /^(59|27)[YZ]?N\d/.test(label) || /3V0/i.test(label)
     || (svForSeq && /SEQ|3V0/i.test(svForSeq.equation));
   const seqLink = isSequenceRelated
-    ? `<div style="margin-top:10px;"><span class="zoom-badge" onclick="toggleHelp(true); setTimeout(()=>document.getElementById('seqExplainerSection')?.scrollIntoView(),50);">What is sequence voltage/current? →</span></div>`
+    ? `<div style="margin-top:10px;"><span class="zoom-badge" onclick="toggleHelp(true,'seq');">What is sequence voltage/current? →</span></div>`
     : '';
 
   let html = `<p style="line-height:1.6;">${desc.replace(/\n/g, '<br>')}</p>${seqLink}`;
