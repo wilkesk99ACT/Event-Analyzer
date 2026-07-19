@@ -6442,16 +6442,19 @@ function renderLocalLogicGraph(graph, P) {
   // and every edge gets its OWN line between the two specific boxes it actually connects —
   // not one shared arrow standing in for a whole column-to-column relationship.
   const COL_W = 122, ROW_H = 32, BOX_W = 98, BOX_H = 24, MARGIN = 10;
+  const GAP = COL_W - BOX_W; // empty space between one column's right edge and the next one's left edge
+  const gapMidX = ci => MARGIN + ci * COL_W + BOX_W + GAP / 2; // middle of the gap just after column ci
   const colIndexOf = {};
   columns.forEach((col, ci) => col.forEach(lbl => { colIndexOf[lbl] = ci; }));
 
-  // An edge between adjacent columns is drawn as a plain diagonal — there's nothing else in
-  // that single gap for it to cross through. An edge that SKIPS one or more columns (which
-  // happens when a bit was already placed earlier by a different branch) would cut diagonally
-  // across whatever columns sit between it, so those get routed instead as a taxicab path
-  // through a dedicated horizontal lane above the whole diagram — straight up, straight across,
-  // straight down — going around the intervening columns rather than through them. Each skip
-  // edge gets its own lane so multiple skips don't overlap each other.
+  // Every edge routes orthogonally — horizontal stub out of the source, vertical riser sitting
+  // in the MIDDLE of the gap between columns (never over a column's own box range), horizontal
+  // stub into the target. An edge between adjacent columns needs only one riser (there's only
+  // one gap to cross); an edge that SKIPS one or more columns (which happens when a bit was
+  // already placed earlier by a different branch) routes its risers through a shared lane above
+  // the whole diagram instead, so the horizontal leg crossing the skipped columns clears every
+  // box in them rather than cutting across at some in-between row. Each skip edge gets its own
+  // lane so multiple skips don't overlap.
   const adjacentEdges = [], skipEdges = [];
   graph.edges.forEach(e => {
     const ciFrom = colIndexOf[e.from], ciTo = colIndexOf[e.to];
@@ -6463,7 +6466,7 @@ function renderLocalLogicGraph(graph, P) {
   const topPad = MARGIN + skipEdges.length * LANE_H;
   const maxRows = Math.max(...columns.map(c => c.length), 1);
   const totalH = maxRows * ROW_H;
-  const totalW = columns.length * COL_W - (COL_W - BOX_W) + MARGIN * 2;
+  const totalW = columns.length * COL_W - GAP + MARGIN * 2;
   const height = totalH + topPad + MARGIN;
 
   const pos = {}; // label -> {x, y} (top-left of its box)
@@ -6481,21 +6484,113 @@ function renderLocalLogicGraph(graph, P) {
     return 'var(--text-muted)';
   };
 
-  let linesHTML = '';
+  // An edge's "from" and "to" reflect logical dependency, not necessarily left-to-right screen
+  // position — a bit already placed by one branch can turn out to be a direct input for
+  // another branch discovered later, landing it in a column to the RIGHT of the thing it feeds.
+  // Routing must always exit whichever endpoint is actually more leftward from ITS right edge,
+  // and enter whichever is actually more rightward at ITS left edge — using from/to directly
+  // without checking this is exactly what caused stubs to double back through their own box.
+  const leftRight = e => {
+    const ciFrom = colIndexOf[e.from], ciTo = colIndexOf[e.to];
+    return ciFrom <= ciTo ? [e.from, e.to, ciFrom, ciTo] : [e.to, e.from, ciTo, ciFrom];
+  };
+
+  // ── Channel/lane assignment ──
+  // Two different edges routing their vertical riser through the SAME gap must not sit on the
+  // exact same x — that's what made separate connections visually indistinguishable from one
+  // another (and from a single line with a bend). Every riser (one per adjacent edge, two per
+  // skip edge — entry and exit) is registered against the gap it passes through; edges sharing
+  // a gap are then spread across distinct parallel lanes within it, the way parallel traces on
+  // a circuit board never run on top of each other. A vertical riser only ever needs to share
+  // space with OTHER verticals in the same gap (never a column's own box range), so lanes are
+  // scoped per gap, not globally.
+  const gapRisers = {}; // gap index -> array of riser records (mutated with laneIdx/laneCount below)
+  const registerRiser = gap => {
+    const arr = gapRisers[gap] || (gapRisers[gap] = []);
+    const r = {};
+    arr.push(r);
+    return r;
+  };
+
+  const edgeMeta = [];
   adjacentEdges.forEach(e => {
-    const a = pos[e.from], b = pos[e.to];
-    if (!a || !b) return;
-    const x1 = a.x + BOX_W, y1 = a.y + BOX_H / 2;
-    const x2 = b.x, y2 = b.y + BOX_H / 2;
-    linesHTML += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${edgeColor(e)}" stroke-width="1.5"/>`;
+    const [leftLbl, rightLbl, ciL, ciR] = leftRight(e);
+    if (ciL === ciR) { edgeMeta.push({ e, leftLbl, rightLbl, ciL, ciR, sameCol: true }); return; }
+    edgeMeta.push({ e, leftLbl, rightLbl, ciL, ciR, riser: registerRiser(ciL) });
   });
-  skipEdges.forEach((e, i) => {
-    const a = pos[e.from], b = pos[e.to];
+  const skipMeta = [];
+  skipEdges.forEach((e, skipIdx) => {
+    const [leftLbl, rightLbl, ciL, ciR] = leftRight(e);
+    const riserIn = registerRiser(ciL);
+    const riserOut = registerRiser(ciR - 1);
+    skipMeta.push({ e, leftLbl, rightLbl, ciL, ciR, riserIn, riserOut, skipIdx });
+  });
+
+  Object.values(gapRisers).forEach(list => {
+    list.forEach((r, i) => { r.laneIdx = i; r.laneCount = list.length; });
+  });
+  const LANE_PAD = 4; // clearance from each box edge, so a lane never touches a box border
+  const laneX = (gap, riser) => {
+    if (riser.laneCount <= 1) return gapMidX(gap);
+    const usableW = GAP - LANE_PAD * 2;
+    const startX = MARGIN + gap * COL_W + BOX_W + LANE_PAD;
+    return startX + (riser.laneIdx + 0.5) * (usableW / riser.laneCount);
+  };
+
+  // ── Port distribution ──
+  // A box with several incoming (or outgoing) connections previously had all of them meet at
+  // its exact vertical center — fine for one connection, but with several sharing that same
+  // point, their final approaches necessarily ran on top of each other for a stretch, which is
+  // exactly the "parallel lines touching" ambiguity being avoided everywhere else. Real
+  // schematics instead give each connection its own point along the box's edge, like separate
+  // pins on an IC, so every approach is genuinely distinct start-to-finish. Ordered by the far
+  // end's row so the spread also reads top-to-bottom sensibly rather than arbitrarily.
+  const allMeta = [...edgeMeta, ...skipMeta];
+  const outUsers = {}, inUsers = {}; // label -> [{meta, otherY}]
+  allMeta.forEach(m => {
+    const a = pos[m.leftLbl], b = pos[m.rightLbl];
     if (!a || !b) return;
-    const x1 = a.x + BOX_W, y1 = a.y + BOX_H / 2;
-    const x2 = b.x, y2 = b.y + BOX_H / 2;
-    const laneY = MARGIN / 2 + i * LANE_H + LANE_H / 2;
-    linesHTML += `<path d="M ${x1} ${y1} L ${x1} ${laneY} L ${x2} ${laneY} L ${x2} ${y2}" fill="none" stroke="${edgeColor(e)}" stroke-width="1.5"/>`;
+    (outUsers[m.leftLbl] || (outUsers[m.leftLbl] = [])).push({ m, otherY: b.y });
+    (inUsers[m.rightLbl] || (inUsers[m.rightLbl] = [])).push({ m, otherY: a.y });
+  });
+  const distributeFracs = (n, lo, hi, singleFrac) => n <= 1 ? [singleFrac] : Array.from({ length: n }, (_, i) => lo + (hi - lo) * i / (n - 1));
+  const assignFracs = (users, isOutSide) => {
+    Object.values(users).forEach(list => {
+      list.sort((p, q) => p.otherY - q.otherY);
+      // Deliberately different ranges (and different single-connection offsets) for the
+      // outgoing vs incoming side — otherwise an unrelated pair of boxes elsewhere in the
+      // diagram can land their ports on the exact same absolute row purely by arithmetic
+      // coincidence, producing a stray overlap between two connections that have nothing to do
+      // with each other. The single-connection case is the one that matters most here, since
+      // most boxes have exactly one input and one output — using the same 0.5 midpoint for both
+      // sides (as a naive lo/hi average would) reintroduces the exact coincidence this is meant
+      // to avoid, so it gets its own distinct offset instead of the range's midpoint.
+      const fracs = isOutSide ? distributeFracs(list.length, 0.2, 0.8, 0.47) : distributeFracs(list.length, 0.28, 0.72, 0.56);
+      list.forEach((p, i) => { if (isOutSide) p.m.outFrac = fracs[i]; else p.m.inFrac = fracs[i]; });
+    });
+  };
+  assignFracs(outUsers, true);
+  assignFracs(inUsers, false);
+  const portY = (m, p, isOut) => p.y + BOX_H * (isOut ? (m.outFrac ?? 0.5) : (m.inFrac ?? 0.5));
+
+  let linesHTML = '';
+  edgeMeta.forEach(m => {
+    const a = pos[m.leftLbl], b = pos[m.rightLbl];
+    if (!a || !b) return;
+    const x1 = a.x + BOX_W, y1 = portY(m, a, true);
+    const x2 = b.x, y2 = portY(m, b, false);
+    const midX = m.sameCol ? (x1 + x2) / 2 : laneX(m.ciL, m.riser);
+    linesHTML += `<path d="M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}" fill="none" stroke="${edgeColor(m.e)}" stroke-width="1.5"/>`;
+  });
+  skipMeta.forEach(m => {
+    const a = pos[m.leftLbl], b = pos[m.rightLbl];
+    if (!a || !b) return;
+    const x1 = a.x + BOX_W, y1 = portY(m, a, true);
+    const x2 = b.x, y2 = portY(m, b, false);
+    const riserFromX = laneX(m.ciL, m.riserIn);
+    const riserToX = laneX(m.ciR - 1, m.riserOut);
+    const laneY = MARGIN / 2 + m.skipIdx * LANE_H + LANE_H / 2;
+    linesHTML += `<path d="M ${x1} ${y1} L ${riserFromX} ${y1} L ${riserFromX} ${laneY} L ${riserToX} ${laneY} L ${riserToX} ${y2} L ${x2} ${y2}" fill="none" stroke="${edgeColor(m.e)}" stroke-width="1.5"/>`;
   });
 
   let boxesHTML = '';
