@@ -874,7 +874,7 @@ body.dragging-file #drop-overlay { display: flex; }
 
   <!-- Bit detail modal — opened by clicking any relay-bit label -->
   <div id="bitModal" class="help-overlay" style="display:none" onclick="if(event.target===this) hideBitDetail()">
-    <div class="help-modal" style="max-width:520px;">
+    <div class="help-modal" style="width:min(94vw, 900px); max-width:none;">
       <div class="help-modal-header">
         <span id="bitModalTitle">Relay Bit</span>
         <button class="btn" onclick="hideBitDetail()">Close</button>
