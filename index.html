@@ -874,7 +874,7 @@ body.dragging-file #drop-overlay { display: flex; }
 
   <!-- Bit detail modal — opened by clicking any relay-bit label -->
   <div id="bitModal" class="help-overlay" style="display:none" onclick="if(event.target===this) hideBitDetail()">
-    <div class="help-modal" style="width:min(94vw, 900px); max-width:none;">
+    <div class="help-modal" style="width:min(97vw, 1500px); max-width:none;">
       <div class="help-modal-header">
         <span id="bitModalTitle">Relay Bit</span>
         <button class="btn" onclick="hideBitDetail()">Close</button>
@@ -6441,7 +6441,7 @@ function renderLocalLogicGraph(graph, P) {
   // Absolute-positioned grid, same idea as the main trip diagram: every box gets an exact x/y,
   // and every edge gets its OWN line between the two specific boxes it actually connects —
   // not one shared arrow standing in for a whole column-to-column relationship.
-  const COL_W = 122, ROW_H = 32, BOX_W = 98, BOX_H = 24, MARGIN = 10;
+  const COL_W = 150, ROW_H = 32, BOX_W = 98, BOX_H = 24, MARGIN = 10;
   const GAP = COL_W - BOX_W; // empty space between one column's right edge and the next one's left edge
   const gapMidX = ci => MARGIN + ci * COL_W + BOX_W + GAP / 2; // middle of the gap just after column ci
   const colIndexOf = {};
