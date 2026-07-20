@@ -5677,6 +5677,20 @@ function isTerminalBit(label, P) {
     .includes(label) || label === (P.tripEquationName || 'TR') || label === (P.erEquationName || 'ER');
 }
 
+// SEL relays generally have exactly ONE internal trip-logic bit — the equation this tool calls
+// "TR" (P.tripEquationName; occasionally the settings name it "TRIP" or "TRIP3P" directly) —
+// whose value IS the final recorded trip word bit (TRIP / TRIP3P / TRIPA-C), by fixed relay
+// firmware behavior rather than an explicit settings assignment. There's normally no
+// "TRIP := TR" line in the settings text for this tool to discover, so without this the
+// equation-bearing name never resolves a downstream box (nothing "feeds out of" TR) and the
+// recorded terminal name never resolves an equation or backward chain at all (nothing "feeds
+// into" TRIP) — even though clicking either one is asking about the exact same physical bit.
+const TRIP_TERMINAL_NAMES = ['TRIP', 'TRIP3P', 'TRIPA', 'TRIPB', 'TRIPC'];
+function canonicalTripLabel(label, P) {
+  const eqName = P.tripEquationName || 'TR';
+  return (label === eqName || TRIP_TERMINAL_NAMES.includes(label)) ? eqName : label;
+}
+
 // Builds the small graph for ONE bit: one column of whatever directly feeds its own equation
 // (if it has one), the bit itself, and up to `maxForwardCols` columns of whatever it feeds
 // into, one hop at a time, stopping early at a terminal bit. Two relationships are always
@@ -5722,6 +5736,7 @@ function getEdgeModifier(eq, token) {
 function buildLocalLogicGraph(P, label, maxForwardCols, maxBackwardCols) {
   maxForwardCols = maxForwardCols || 6;
   maxBackwardCols = maxBackwardCols || 10;
+  label = canonicalTripLabel(label, P); // TR and TRIP/TRIP3P/etc are the same physical bit — see canonicalTripLabel
   const { eqByLabel, refIndex } = getEquationRefIndex(P);
   const edges = []; // {from, to} — from feeds into to; drawn as an actual connector, not inferred from column position
 
@@ -5768,6 +5783,19 @@ function buildLocalLogicGraph(P, label, maxForwardCols, maxBackwardCols) {
   // won't be re-added as a new box.
   const forward = [];
   {
+    // The trip equation's own name is never referenced by anything else in the settings text
+    // (see canonicalTripLabel above) — but it IS, in effect, the actual recorded terminal trip
+    // bit. Seed that connection explicitly so the forward side of the chart isn't left empty
+    // just because the relationship is fixed relay behavior rather than something spelled out
+    // anywhere in the settings.
+    if (label === (P.tripEquationName || 'TR')) {
+      const terminalLabel = (typeof ANALYSIS !== 'undefined' && ANALYSIS?.tripCause?.finalLabel) || 'TRIP3P';
+      if (terminalLabel !== label && !placed.has(terminalLabel)) {
+        edges.push({ from: label, to: terminalLabel, mod: '' });
+        placed.add(terminalLabel);
+        forward.push([terminalLabel]);
+      }
+    }
     let frontier = new Set([label]);
     for (let i = 0; i < maxForwardCols && frontier.size; i++) {
       const nextFrontier = new Set();
@@ -6713,7 +6741,9 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
   // neighbor) represent genuinely separate logical flows — packing them into one undifferentiated
   // stack of rows makes it hard to tell where one branch ends and an unrelated one begins.
   // Grouping by shared-neighbor connectivity and inserting extra vertical space between groups
-  // (not within one) keeps a real branch visually tight while separating distinct ones.
+  // (not within one) keeps a real branch visually tight while separating distinct ones. This part
+  // (WHICH bits belong together) doesn't depend on column order, so it can be precomputed for
+  // every column up front.
   function clusterColumn(colLabels) {
     const neighborsOf = {};
     colLabels.forEach(l => { neighborsOf[l] = new Set(); });
@@ -6734,32 +6764,76 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
       }
     }
     const rootOf = {}; colLabels.forEach(l => { rootOf[l] = find(l); });
-    const order = []; const seenRoots = new Set();
-    colLabels.forEach(l => { if (!seenRoots.has(rootOf[l])) { seenRoots.add(rootOf[l]); order.push(rootOf[l]); } });
-    const rootRank = {}; order.forEach((r, i) => { rootRank[r] = i; });
-    const sorted = [...colLabels].sort((a, b) => rootRank[rootOf[a]] - rootRank[rootOf[b]]);
-    const isGroupStart = {}; let lastRoot = null;
-    sorted.forEach(l => { isGroupStart[l] = (rootOf[l] !== lastRoot); lastRoot = rootOf[l]; });
-    return { sorted, isGroupStart };
+    return rootOf;
   }
 
-  const colLayout = columns.map(col => {
-    const { sorted, isGroupStart } = clusterColumn(col);
-    const groups = sorted.filter(l => isGroupStart[l]).length;
-    const height = col.length * ROW_H + Math.max(0, groups - 1) * GROUP_GAP;
-    return { sorted, isGroupStart, height };
+  const colGroups = columns.map(col => clusterColumn(col)); // label -> group-root, per column
+  const colHeight = columns.map((col, ci) => {
+    const roots = new Set(col.map(l => colGroups[ci][l]));
+    return col.length * ROW_H + Math.max(0, roots.size - 1) * GROUP_GAP;
   });
 
   const LANE_H = 7;
   const topPad = MARGIN + skipLaneCount * LANE_H;
-  const totalH = Math.max(...colLayout.map(cl => cl.height), ROW_H);
+  const totalH = Math.max(...colHeight, ROW_H);
   const totalW = colX[numCols - 1] + BOX_W + MARGIN;
   const height = totalH + topPad + MARGIN;
 
-  const pos = {}; // label -> {x, y} (top-left of its box)
+  // ── Row ordering within each column — barycenter heuristic ──
+  // WHICH row a bit lands in (within its group) is a completely separate question from which
+  // group it's in, and it's what actually determines how many lines cross one another. Once a
+  // column's neighbors in the PREVIOUS column already have final y-positions, sorting this
+  // column's members (within each group, and the groups themselves) by the average y of their
+  // already-placed neighbors is the standard "barycenter" layered-graph heuristic — it tends to
+  // line connected bits up with each other instead of leaving their order to whatever sequence
+  // the backward/forward BFS happened to discover them in, which is what was actually causing
+  // lines to cross more than they needed to. Processed strictly left-to-right so every column's
+  // ordering can lean on the previous column's FINAL (not provisional) positions.
+  const pos = {}; // label -> {x, y} (top-left of its box), filled in column order below
+  const neighborYs = lbl => {
+    const ys = [];
+    graph.edges.forEach(e => {
+      if (e.from === lbl && pos[e.to]) ys.push(pos[e.to].y);
+      else if (e.to === lbl && pos[e.from]) ys.push(pos[e.from].y);
+    });
+    return ys;
+  };
+
   columns.forEach((col, ci) => {
-    const { sorted, isGroupStart, height: colH } = colLayout[ci];
-    const startY = topPad + (totalH - colH) / 2;
+    const rootOf = colGroups[ci];
+    // Score each bit by its already-placed neighbors' average y (nulls — no placed neighbor
+    // yet — sort after everything with a real score, keeping their original relative order).
+    const scored = col.map((lbl, idx) => {
+      const ys = neighborYs(lbl);
+      return { lbl, idx, bary: ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : null };
+    });
+    const baryOf = {}; scored.forEach(s => { baryOf[s.lbl] = s; });
+    // A group's own position is the average of its members' individual scores (falling back to
+    // first-appearance order when nothing in the group has a score yet), which keeps the whole
+    // group moving together rather than interleaving with another group's members.
+    const groupScore = {};
+    col.forEach(lbl => {
+      const r = rootOf[lbl];
+      if (groupScore[r] !== undefined) return;
+      const members = col.filter(l => rootOf[l] === r);
+      const withBary = members.map(l => baryOf[l]).filter(s => s.bary != null);
+      groupScore[r] = withBary.length
+        ? withBary.reduce((a, s) => a + s.bary, 0) / withBary.length
+        : Math.min(...members.map(l => baryOf[l].idx));
+    });
+    const sorted = [...col].sort((a, b) => {
+      const ga = groupScore[rootOf[a]], gb = groupScore[rootOf[b]];
+      if (ga !== gb) return ga - gb;
+      const sa = baryOf[a], sb = baryOf[b];
+      if (sa.bary != null && sb.bary != null && sa.bary !== sb.bary) return sa.bary - sb.bary;
+      if (sa.bary == null && sb.bary != null) return 1;
+      if (sa.bary != null && sb.bary == null) return -1;
+      return sa.idx - sb.idx;
+    });
+    const isGroupStart = {}; let lastRoot = null;
+    sorted.forEach(l => { isGroupStart[l] = (rootOf[l] !== lastRoot); lastRoot = rootOf[l]; });
+
+    const startY = topPad + (totalH - colHeight[ci]) / 2;
     let y = startY;
     sorted.forEach((lbl, ri) => {
       if (ri > 0 && isGroupStart[lbl]) y += GROUP_GAP;
@@ -6807,7 +6881,7 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
       // most boxes have exactly one input and one output — using the same 0.5 midpoint for both
       // sides (as a naive lo/hi average would) reintroduces the exact coincidence this is meant
       // to avoid, so it gets its own distinct offset instead of the range's midpoint.
-      const fracs = isOutSide ? distributeFracs(list.length, 0.2, 0.8, 0.47) : distributeFracs(list.length, 0.28, 0.72, 0.56);
+      const fracs = isOutSide ? distributeFracs(list.length, 0.08, 0.92, 0.47) : distributeFracs(list.length, 0.12, 0.88, 0.56);
       list.forEach((p, i) => { if (isOutSide) p.m.outFrac = fracs[i]; else p.m.inFrac = fracs[i]; });
     });
   };
@@ -7114,6 +7188,20 @@ function showBitDetail(label) {
       <div style="font-family:var(--mono);background:var(--bg2);border-radius:6px;padding:8px 10px;word-break:break-word;">${linkifyEquationBits(eqClean, PARSED)}</div>
       <div style="color:var(--text-muted);margin-top:4px;">Pickup: ${sv.pickupDelay} cycles (${(sv.pickupDelay/(PARSED.eventInfo?.freq||60)*1000).toFixed(0)} ms) &nbsp;|&nbsp; Dropout: ${sv.dropoutDelay} cycles</div>
     </div>`;
+  } else if (PARSED) {
+    // Non-SV bits (TR, ER, CL, output-mapped relay words like 52A, etc.) can have an equation
+    // too — this used to only ever get shown for SVs, silently dropping it for everything else.
+    // Goes through the TR/TRIP alias so clicking a recorded terminal bit (TRIP, TRIP3P, ...)
+    // still surfaces the equation that's actually defined under the internal trip-logic name.
+    const { eqByLabel } = getEquationRefIndex(PARSED);
+    const canonicalLabel = canonicalTripLabel(label, PARSED);
+    const genericEq = eqByLabel[canonicalLabel];
+    if (genericEq) {
+      html += `<div style="margin-top:12px;font-size:12px;">
+        <div style="color:var(--text-dim);margin-bottom:4px;">Equation (${canonicalLabel}):</div>
+        <div style="font-family:var(--mono);background:var(--bg2);border-radius:6px;padding:8px 10px;word-break:break-word;">${linkifyEquationBits(genericEq, PARSED)}</div>
+      </div>`;
+    }
   }
   if (state) {
     html += `<div style="margin-top:12px;font-size:12px;color:var(--text-dim);">
