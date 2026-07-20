@@ -144,14 +144,18 @@ body.dragging-file #drop-overlay { display: flex; }
   background: var(--bg2);
   border-bottom: 1px solid var(--card-border);
   padding: 12px 24px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.top-bar-inner {
+  max-width: 1280px;
+  margin: 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
-  position: sticky;
-  top: 0;
-  z-index: 100;
 }
 
 .top-bar-left { display: flex; align-items: center; gap: 14px; }
@@ -181,7 +185,9 @@ body.dragging-file #drop-overlay { display: flex; }
   border: 1px solid #5c1a1a;
   border-radius: 12px;
   padding: 28px 28px 24px;
-  margin: 20px 24px 0;
+  margin: 20px auto 0;
+  max-width: 1280px;
+  width: calc(100% - 48px);
   position: relative;
   overflow: hidden;
 }
@@ -502,6 +508,51 @@ body.dragging-file #drop-overlay { display: flex; }
    the same title="" attribute) here avoids that entirely, since native tooltips render outside
    the page's layout and are never subject to element overflow. */
 .llg-wrap .has-tip:hover::after { display: none; }
+
+.llg-tool-btn {
+  background: var(--bg2);
+  border: 1px solid var(--card-border);
+  color: var(--text-dim);
+  border-radius: 5px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+}
+.llg-tool-btn:hover { color: var(--text); border-color: var(--accent); }
+.llg-trip-badge {
+  display: inline-block;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--red);
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.llg-fullscreen-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+  z-index: 3000; display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.llg-fullscreen-modal {
+  background: var(--card); border: 1px solid var(--card-border); border-radius: 10px;
+  max-width: 95vw; max-height: 92vh; display: flex; flex-direction: column; overflow: hidden;
+}
+.llg-fullscreen-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 16px; border-bottom: 1px solid var(--card-border);
+  font-size: 14px; font-weight: 700; color: var(--text); flex: 0 0 auto;
+}
+.llg-fullscreen-body { overflow: auto; padding: 20px; }
 
 .trip-timing {
   display: flex;
@@ -855,20 +906,22 @@ body.dragging-file #drop-overlay { display: flex; }
 <!-- Analysis Screen -->
 <div id="analysis-screen">
   <div class="top-bar">
-    <div class="top-bar-left">
-      <span class="logo">⚡</span>
-      <div>
-        <div class="top-bar-title">CEV Trip Analyzer</div>
-        <div class="top-bar-meta" id="topBarMeta"></div>
+    <div class="top-bar-inner">
+      <div class="top-bar-left">
+        <span class="logo">⚡</span>
+        <div>
+          <div class="top-bar-title">CEV Trip Analyzer</div>
+          <div class="top-bar-meta" id="topBarMeta"></div>
+        </div>
       </div>
-    </div>
-    <div class="top-bar-right">
-      <div style="text-align:right">
-        <div id="topBarTimestamp" style="font-size:12px;color:var(--text-dim)"></div>
-        <div id="topBarRatios" style="font-size:10px;color:var(--text-muted)"></div>
+      <div class="top-bar-right">
+        <div style="text-align:right">
+          <div id="topBarTimestamp" style="font-size:12px;color:var(--text-dim)"></div>
+          <div id="topBarRatios" style="font-size:10px;color:var(--text-muted)"></div>
+        </div>
+        <button class="btn" onclick="toggleHelp(true)">Help</button>
+        <button class="btn" onclick="resetApp()">New Files</button>
       </div>
-      <button class="btn" onclick="toggleHelp(true)">Help</button>
-      <button class="btn" onclick="resetApp()">New Files</button>
     </div>
   </div>
 
@@ -5622,6 +5675,19 @@ function buildLocalLogicGraph(P, label, maxForwardCols, maxBackwardCols) {
   const { eqByLabel, refIndex } = getEquationRefIndex(P);
   const edges = []; // {from, to} — from feeds into to; drawn as an actual connector, not inferred from column position
 
+  // A label may only ever occupy ONE column. Backward and forward used to keep separate "seen"
+  // sets, which let a bit that's simultaneously "an input of the center bit" AND "a bit whose
+  // own equation references the center bit" (a genuine two-way relationship — e.g. an SVxx that
+  // both drives its own SVxxT timer and is itself gated by "NOT SVxxT") get placed TWICE: once
+  // in a backward column, then silently relocated to a forward column by whichever pass ran
+  // last, since column/position lookups are a plain object keyed by label. Edges recorded
+  // against the earlier (backward) placement then had to route across every column in between
+  // to reach the bit's new (forward) position — that's what produced the tangled, crossing
+  // connectors when charting a bit like this. Sharing one `placed` set across both passes means
+  // whichever pass discovers a label FIRST keeps it — the other pass still records its edge
+  // (so the real dependency isn't lost) but never relocates the box.
+  const placed = new Set([label]);
+
   // ── Backward (leftward): walk multiple hops, not just one, so the chain actually reaches ──
   // all the way back to a real measured/protection element (a bit with no further equation of
   // its own) rather than stopping at whatever's immediately behind the clicked bit. Built
@@ -5630,17 +5696,16 @@ function buildLocalLogicGraph(P, label, maxForwardCols, maxBackwardCols) {
   const backward = [];
   {
     let frontier = new Set([label]);
-    const seen = new Set([label]);
     for (let i = 0; i < maxBackwardCols && frontier.size; i++) {
       const nextFrontier = new Set();
       frontier.forEach(l => {
         getDirectInputs(l, eqByLabel).forEach(inp => {
           edges.push({ from: inp, to: l });
-          if (!seen.has(inp)) nextFrontier.add(inp);
+          if (!placed.has(inp)) nextFrontier.add(inp);
         });
       });
       if (!nextFrontier.size) break;
-      nextFrontier.forEach(l => seen.add(l));
+      nextFrontier.forEach(l => placed.add(l));
       backward.push([...nextFrontier]);
       frontier = nextFrontier;
     }
@@ -5648,25 +5713,22 @@ function buildLocalLogicGraph(P, label, maxForwardCols, maxBackwardCols) {
   }
 
   // ── Forward (rightward) ──
-  // Seeded with just the center label, not the backward columns too — a blinker's own
-  // T-variant legitimately belongs on BOTH sides (that's the whole loop), so it shouldn't be
-  // suppressed from the forward side just because it already appeared upstream. Nothing
-  // realistic feeds back into an upstream measured element, so this doesn't reopen loops
-  // elsewhere in practice.
+  // Seeded with just the center label, not the backward columns too — a bit already placed
+  // backward can still legitimately gain a forward EDGE (see `placed` note above), it just
+  // won't be re-added as a new box.
   const forward = [];
   {
     let frontier = new Set([label]);
-    const seen = new Set([label]);
     for (let i = 0; i < maxForwardCols && frontier.size; i++) {
       const nextFrontier = new Set();
       frontier.forEach(l => {
         const svM = l.match(/^SV(\d+)$/);
-        if (svM) { const t = `SV${svM[1]}T`; edges.push({ from: l, to: t }); if (!seen.has(t)) nextFrontier.add(t); }
-        if (l === 'CL') { edges.push({ from: l, to: 'CLOSE' }); if (!seen.has('CLOSE')) nextFrontier.add('CLOSE'); }
-        (refIndex[l] || []).forEach(ref => { edges.push({ from: l, to: ref }); if (!seen.has(ref)) nextFrontier.add(ref); });
+        if (svM) { const t = `SV${svM[1]}T`; edges.push({ from: l, to: t }); if (!placed.has(t)) nextFrontier.add(t); }
+        if (l === 'CL') { edges.push({ from: l, to: 'CLOSE' }); if (!placed.has('CLOSE')) nextFrontier.add('CLOSE'); }
+        (refIndex[l] || []).forEach(ref => { edges.push({ from: l, to: ref }); if (!placed.has(ref)) nextFrontier.add(ref); });
       });
       if (!nextFrontier.size) break;
-      nextFrontier.forEach(l => seen.add(l));
+      nextFrontier.forEach(l => placed.add(l));
       forward.push([...nextFrontier]);
       // A branch that reaches a terminal bit (e.g. ER) stops expanding from there — but that
       // must not cut off OTHER branches produced in this same hop that haven't reached one yet
@@ -5676,7 +5738,39 @@ function buildLocalLogicGraph(P, label, maxForwardCols, maxBackwardCols) {
     }
   }
 
-  return { center: label, backward, forward, edges };
+  // A true two-way relationship (SVxx feeds SVxxT; SVxxT is itself referenced back inside
+  // SVxx's own equation) gets discovered from BOTH directions above, producing a pair of edges
+  // that are exact reverses of one another between the same two boxes. Drawing both as separate
+  // routed lines is what caused the visual tangle — the two lines connect the same pair of
+  // points but get independently assigned crossing port offsets. Since this local graph doesn't
+  // draw arrowheads (direction is implied by column order, and the underlying equation text is
+  // always shown alongside), keeping just one direction per pair is sufficient and removes the
+  // duplicate line entirely.
+  const seenPairs = new Set();
+  const dedupedEdges = [];
+  edges.forEach(e => {
+    if (e.from === e.to) return;
+    const revKey = e.to + '\u0000' + e.from;
+    if (seenPairs.has(revKey)) return;
+    seenPairs.add(e.from + '\u0000' + e.to);
+    dedupedEdges.push(e);
+  });
+
+  return { center: label, backward, forward, edges: dedupedEdges };
+}
+
+// True when `label` is the trip bit itself, another terminal command bit, or something the
+// trip equation references directly — the cases where seeing the FULL chain (not just a
+// handful of hops) actually matters for diagnosing why the relay tripped.
+function isTripFocusLabel(label, P) {
+  const tripName = P.tripEquationName || 'TR';
+  if (label === tripName || isTerminalBit(label, P)) return true;
+  const { eqByLabel } = getEquationRefIndex(P);
+  const tripEq = eqByLabel[tripName];
+  if (!tripEq) return false;
+  const toks = (tripEq.match(/\bAND\b|\bOR\b|\bNOT\b|\bR_TRIGGER\b|\bF_TRIGGER\b|\bR_TRIG\b|\bF_TRIG\b|[A-Za-z0-9_]+/g) || [])
+    .filter(t => !SELOGIC_KEYWORDS.has(t));
+  return toks.includes(label);
 }
 
 function getTripRelevantLabels(P, A) {
@@ -6396,6 +6490,25 @@ function renderLLGLegend() {
   </div>`;
 }
 
+// Small toolbar shown in the corner of every logic-chart instance — "expand" opens an
+// enlarged, scrollable overlay copy (useful once a full trip-chain chart gets wide), and
+// "save as image" renders the current chart to a PNG download. Both act on whichever chart is
+// currently in the bit-detail popup (only one is ever open at a time), located by a fixed id
+// rather than needing per-instance ids threaded through every caller.
+function renderLLGToolbar() {
+  return `<div style="display:flex;gap:6px;flex:0 0 auto;">
+    <button type="button" class="llg-tool-btn" title="Expand to full size" onclick="expandLogicChart()">⛶</button>
+    <button type="button" class="llg-tool-btn" title="Save as image" onclick="downloadLogicChart()">⬇</button>
+  </div>`;
+}
+function renderLLGHeader(text, tripFocus) {
+  const badge = tripFocus ? `<span class="llg-trip-badge">Full trip chain</span>` : '';
+  return `<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:2px;">
+    <div style="font-size:11px;color:var(--text-dim);">${text}${badge}</div>
+    ${renderLLGToolbar()}
+  </div>`;
+}
+
 function renderBlinkerPair(clickedLabel, P) {
   const m = clickedLabel.match(/^SV(\d+)T?$/);
   const num = parseInt(m[1]);
@@ -6412,10 +6525,10 @@ function renderBlinkerPair(clickedLabel, P) {
   const leftCls = `${stateCls(bareLabel)} ${clickedLabel === bareLabel ? 'llg-center' : ''}`;
   const rightCls = `${stateCls(timedLabel)} ${clickedLabel === timedLabel ? 'llg-center' : ''}`;
 
-  return `<div style="margin-top:12px;">
-    <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Logic chart — what feeds this bit, and what it feeds into: <span style="color:var(--text-muted);">(blinker — no diagnostic meaning)</span></div>
+  return `<div class="llg-diagram-outer" style="margin-top:12px;">
+    ${renderLLGHeader('Logic chart — what feeds this bit, and what it feeds into: <span style="color:var(--text-muted);">(blinker — no diagnostic meaning)</span>', false)}
     ${renderLLGLegend()}
-    <div style="position:relative;padding:26px 0 22px;">
+    <div class="llg-diagram-body" id="llgSourceBody" style="position:relative;padding:26px 0 22px;">
       <svg viewBox="0 0 220 74" preserveAspectRatio="none" style="position:absolute;top:0;left:0;width:100%;height:100%;overflow:visible;pointer-events:none;">
         <text x="110" y="10" text-anchor="middle" font-size="10" font-family="var(--mono)" fill="var(--text-muted)">${puMs} ms</text>
         <path d="M 55 30 C 80 8, 140 8, 165 28" fill="none" stroke="var(--text-muted)" stroke-width="1.5"/>
@@ -6432,7 +6545,7 @@ function renderBlinkerPair(clickedLabel, P) {
   </div>`;
 }
 
-function renderLocalLogicGraph(graph, P) {
+function renderLocalLogicGraph(graph, P, tripFocus) {
   if (isBlinkerLabel(graph.center, P)) return renderBlinkerPair(graph.center, P);
 
   const columns = [...graph.backward, [graph.center], ...graph.forward];
@@ -6610,16 +6723,167 @@ function renderLocalLogicGraph(graph, P) {
     boxesHTML += `<div class="llg-box ${stateCls} ${centerCls}" style="position:absolute;left:${p.x}px;top:${p.y}px;width:${BOX_W}px;height:${BOX_H}px;display:flex;align-items:center;justify-content:center;overflow:hidden;text-overflow:ellipsis;">${tt(lbl, P)}</div>`;
   });
 
-  return `<div style="margin-top:12px;">
-    <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Logic chart — what feeds this bit, and what it feeds into:</div>
+  return `<div class="llg-diagram-outer" style="margin-top:12px;">
+    ${renderLLGHeader('Logic chart — what feeds this bit, and what it feeds into:', tripFocus)}
     ${renderLLGLegend()}
-    <div class="llg-wrap" style="display:block;">
+    <div class="llg-wrap llg-diagram-body" id="llgSourceBody" style="display:block;">
       <div style="position:relative;width:${totalW}px;height:${height}px;">
         <svg width="${totalW}" height="${height}" style="position:absolute;top:0;left:0;overflow:visible;">${linesHTML}</svg>
         ${boxesHTML}
       </div>
     </div>
   </div>`;
+}
+
+// Opens an enlarged, scrollable copy of whichever logic chart is currently shown in the bit
+// popup. Operates on a CLONE so the live popup (and its click-to-recenter behavior) is left
+// alone; the clone is purely for viewing/screenshotting at a size that's actually legible once
+// a chart has many columns (e.g. the full trip-chain view).
+function expandLogicChart() {
+  const body = document.getElementById('llgSourceBody');
+  if (!body) return;
+  const titleEl = document.getElementById('bitModalTitle');
+  const title = titleEl ? titleEl.textContent : 'Logic chart';
+
+  const rect = body.getBoundingClientRect();
+  const w = Math.max(1, rect.width), h = Math.max(1, rect.height);
+  const scale = Math.max(1, Math.min(3, (window.innerWidth * 0.85) / w, (window.innerHeight * 0.7) / h));
+
+  const clone = body.cloneNode(true);
+  clone.removeAttribute('id');
+  clone.style.transform = `scale(${scale})`;
+  clone.style.transformOrigin = 'top left';
+  clone.style.width = w + 'px';
+  clone.style.height = h + 'px';
+
+  const spacer = document.createElement('div');
+  spacer.id = 'llgExpandedBody';
+  spacer.style.position = 'relative';
+  spacer.style.width = (w * scale) + 'px';
+  spacer.style.height = (h * scale) + 'px';
+  spacer.appendChild(clone);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'llg-fullscreen-overlay';
+  overlay.id = 'llgFullscreenOverlay';
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeLLGFullscreen(); });
+  overlay.innerHTML = `<div class="llg-fullscreen-modal">
+    <div class="llg-fullscreen-header">
+      <span>${title} — logic chart</span>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button type="button" class="llg-tool-btn" title="Save as image" onclick="downloadLogicChart(true)">⬇</button>
+        <button type="button" class="llg-tool-btn" title="Close" onclick="closeLLGFullscreen()">✕</button>
+      </div>
+    </div>
+    <div class="llg-fullscreen-body"></div>
+  </div>`;
+  overlay.querySelector('.llg-fullscreen-body').appendChild(spacer);
+  document.body.appendChild(overlay);
+}
+
+function closeLLGFullscreen() {
+  const overlay = document.getElementById('llgFullscreenOverlay');
+  if (overlay) overlay.remove();
+}
+
+// Renders whichever chart is on screen (the compact popup version, or the enlarged overlay if
+// `fromExpanded` is true) to a downloadable PNG.
+function downloadLogicChart(fromExpanded) {
+  const body = document.getElementById(fromExpanded ? 'llgExpandedBody' : 'llgSourceBody');
+  if (!body) return;
+  const titleEl = document.getElementById('bitModalTitle');
+  const name = (titleEl ? titleEl.textContent : 'logic_chart').replace(/[^a-z0-9_-]+/gi, '_') + '_logic_chart.png';
+  exportNodeAsPNG(body, name);
+}
+
+// Rasterizes an arbitrary DOM node (divs + inline SVG, as used by the logic charts) to a PNG
+// and triggers a download — no external library, just the standard foreignObject-in-SVG trick:
+// serialize a clone of the node into an SVG document, load that as an Image, then draw the
+// image onto a canvas and export the canvas. Works entirely offline, matching the rest of this
+// tool's no-server design.
+function exportNodeAsPNG(node, filename) {
+  try {
+    const rect = node.getBoundingClientRect();
+    const width = Math.max(1, Math.ceil(rect.width));
+    const height = Math.max(1, Math.ceil(rect.height));
+    const pad = 24;
+
+    const styleText = Array.from(document.querySelectorAll('style')).map(s => s.textContent).join('\n');
+
+    // A foreignObject's content is its own little mini-document — custom properties (--accent,
+    // --green, etc.) set on the real page's root don't reliably cascade in, even though the
+    // stylesheet rules that USE them get copied above. Re-declaring their resolved values
+    // inline on the container sidesteps that entirely.
+    const rootStyle = getComputedStyle(document.documentElement);
+    const varNames = ['--bg', '--bg2', '--card', '--card-border', '--accent', '--accent-dim',
+      '--green', '--green-dim', '--red', '--red-dim', '--yellow', '--yellow-dim', '--orange',
+      '--text', '--text-dim', '--text-muted', '--mono', '--sans'];
+    const varDecls = varNames.map(v => `${v}: ${(rootStyle.getPropertyValue(v) || '').trim()};`).join(' ');
+    const bgColor = (rootStyle.getPropertyValue('--bg') || '').trim() || '#06090f';
+
+    const clone = node.cloneNode(true);
+    clone.removeAttribute('id');
+
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const wrapper = document.createElementNS(svgNS, 'svg');
+    wrapper.setAttribute('xmlns', svgNS);
+    wrapper.setAttribute('width', String(width + pad * 2));
+    wrapper.setAttribute('height', String(height + pad * 2));
+
+    const styleEl = document.createElementNS(svgNS, 'style');
+    styleEl.textContent = styleText;
+    wrapper.appendChild(styleEl);
+
+    const bgRect = document.createElementNS(svgNS, 'rect');
+    bgRect.setAttribute('width', '100%');
+    bgRect.setAttribute('height', '100%');
+    bgRect.setAttribute('fill', bgColor);
+    wrapper.appendChild(bgRect);
+
+    const fo = document.createElementNS(svgNS, 'foreignObject');
+    fo.setAttribute('x', String(pad));
+    fo.setAttribute('y', String(pad));
+    fo.setAttribute('width', String(width));
+    fo.setAttribute('height', String(height));
+    const container = document.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+    container.setAttribute('style', `${varDecls} font-family: var(--sans); width:${width}px; height:${height}px;`);
+    container.appendChild(clone);
+    fo.appendChild(container);
+    wrapper.appendChild(fo);
+
+    const svgData = new XMLSerializer().serializeToString(wrapper);
+    const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(svgBlob);
+
+    const img = new Image();
+    img.onload = () => {
+      const scale = 2; // export at 2x for a crisper screenshot
+      const canvas = document.createElement('canvas');
+      canvas.width = (width + pad * 2) * scale;
+      canvas.height = (height + pad * 2) * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(scale, scale);
+      ctx.drawImage(img, 0, 0, width + pad * 2, height + pad * 2);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(blob => {
+        if (!blob) { alert('Could not generate the image in this browser — try its built-in screenshot tool instead.'); return; }
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }, 'image/png');
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      alert('Could not generate the image in this browser — try its built-in screenshot tool instead.');
+    };
+    img.src = url;
+  } catch (err) {
+    console.error('Logic chart export failed:', err);
+    alert('Could not generate the image in this browser — try its built-in screenshot tool instead.');
+  }
 }
 
 function showBitDetail(label) {
@@ -6704,8 +6968,13 @@ function showBitDetail(label) {
     html += `<div style="margin-top:10px;font-size:12px;color:var(--red);font-weight:600;">⚡ Part of the logic chain that produced this event's resolved cause.</div>`;
   }
   if (PARSED) {
-    const graph = buildLocalLogicGraph(PARSED, label);
-    html += renderLocalLogicGraph(graph, PARSED);
+    // TR itself, and anything wired directly into it, gets the full chain rather than the
+    // usual handful of hops — that's the one case where seeing the whole picture (all the way
+    // back to raw elements, and forward through every SV hop to the final trip command) is
+    // worth more than the compact default.
+    const tripFocus = isTripFocusLabel(label, PARSED);
+    const graph = buildLocalLogicGraph(PARSED, label, tripFocus ? 25 : undefined, tripFocus ? 25 : undefined);
+    html += renderLocalLogicGraph(graph, PARSED, tripFocus);
   }
   bodyEl.innerHTML = html;
   modal.style.display = 'flex';
