@@ -144,18 +144,14 @@ body.dragging-file #drop-overlay { display: flex; }
   background: var(--bg2);
   border-bottom: 1px solid var(--card-border);
   padding: 12px 24px;
-  position: sticky;
-  top: 0;
-  z-index: 100;
-}
-.top-bar-inner {
-  max-width: 1280px;
-  margin: 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
 }
 
 .top-bar-left { display: flex; align-items: center; gap: 14px; }
@@ -185,9 +181,7 @@ body.dragging-file #drop-overlay { display: flex; }
   border: 1px solid #5c1a1a;
   border-radius: 12px;
   padding: 28px 28px 24px;
-  margin: 20px auto 0;
-  max-width: 1280px;
-  width: calc(100% - 48px);
+  margin: 20px 24px 0;
   position: relative;
   overflow: hidden;
 }
@@ -602,7 +596,7 @@ body.dragging-file #drop-overlay { display: flex; }
 .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 
 /* ── Content Area ── */
-.content { padding: 20px 24px 40px; max-width: 1280px; margin: 0 auto; }
+.content { padding: 20px 24px 40px; }
 
 .tab-panel { display: none; animation: fadeIn 0.3s ease; }
 .tab-panel.active { display: block; }
@@ -906,22 +900,20 @@ body.dragging-file #drop-overlay { display: flex; }
 <!-- Analysis Screen -->
 <div id="analysis-screen">
   <div class="top-bar">
-    <div class="top-bar-inner">
-      <div class="top-bar-left">
-        <span class="logo">⚡</span>
-        <div>
-          <div class="top-bar-title">CEV Trip Analyzer</div>
-          <div class="top-bar-meta" id="topBarMeta"></div>
-        </div>
+    <div class="top-bar-left">
+      <span class="logo">⚡</span>
+      <div>
+        <div class="top-bar-title">CEV Trip Analyzer</div>
+        <div class="top-bar-meta" id="topBarMeta"></div>
       </div>
-      <div class="top-bar-right">
-        <div style="text-align:right">
-          <div id="topBarTimestamp" style="font-size:12px;color:var(--text-dim)"></div>
-          <div id="topBarRatios" style="font-size:10px;color:var(--text-muted)"></div>
-        </div>
-        <button class="btn" onclick="toggleHelp(true)">Help</button>
-        <button class="btn" onclick="resetApp()">New Files</button>
+    </div>
+    <div class="top-bar-right">
+      <div style="text-align:right">
+        <div id="topBarTimestamp" style="font-size:12px;color:var(--text-dim)"></div>
+        <div id="topBarRatios" style="font-size:10px;color:var(--text-muted)"></div>
       </div>
+      <button class="btn" onclick="toggleHelp(true)">Help</button>
+      <button class="btn" onclick="resetApp()">New Files</button>
     </div>
   </div>
 
@@ -4092,6 +4084,10 @@ function renderBanner() {
   // Mini waveform charts shown in the banner's right-hand column, regardless of whether
   // the digital-logic cause was resolved — the waveform is often still informative (e.g.
   // visually confirming a fault) even in the rare case the trip term couldn't be traced.
+  // Measure the banner's actual current width first — it's a real, already-laid-out element
+  // in the page (sized by CSS independently of its content), so this reflects whatever the
+  // window's actual width is right now rather than a value tuned for one particular size.
+  updateBannerChartWidth();
   const chartsHTML = `<div class="trip-banner-charts">
     ${buildCurrentMagChart(PARSED, ANALYSIS, true)}
     ${buildVoltageMagChart(PARSED, ANALYSIS, true)}
@@ -4855,9 +4851,43 @@ function renderMagnitudeChartSVG(traces, opts) {
 // axes land on identical pixel positions — that was the root cause of the earlier
 // misalignment (each panel had picked its own margins to fit its own left/right
 // content, which put "t=0" and "t=500ms" at different x positions per panel).
-const BANNER_CHART_WIDTH = 1200;
+//
+// BANNER_CHART_WIDTH used to be a fixed constant (1200), tuned to look right at roughly
+// the width the banner happened to render at. On any OTHER window width — especially a
+// wide monitor — that mismatch between the SVG's fixed logical viewBox width and its
+// actual (CSS-stretched) rendered width forced a non-uniform horizontal scale, which is
+// what made text and lines look "stretched"/blurry. Rather than capping the page to avoid
+// ever hitting that mismatch, this now measures the REAL rendered width of the banner
+// each time a chart is (re)built, so the viewBox always matches the actual pixel size —
+// scale stays 1:1 in both directions at any window size, and the page itself stays fluid.
+let BANNER_CHART_WIDTH = 1200;
 const BANNER_CHART_MARGIN_LEFT = 110;  // must fit the longest SV/flag row label
 const BANNER_CHART_MARGIN_RIGHT = 100; // must fit the magnitude charts' legend
+
+// Measures the trip banner's actual current inner width (its own left/right padding, plus
+// the mini-chart card's own left/right padding, subtracted out) and updates
+// BANNER_CHART_WIDTH to match. Safe to call before any chart has been built yet — the
+// banner element itself is present in the page skeleton from load, sized by CSS
+// independently of its (possibly still-empty) content.
+function updateBannerChartWidth() {
+  const banner = document.getElementById('tripBanner');
+  if (!banner) return;
+  const TRIP_BANNER_PAD = 28, MINI_CHART_PAD = 12; // must match .trip-banner / .banner-mini-chart CSS
+  const inner = banner.getBoundingClientRect().width - TRIP_BANNER_PAD * 2 - MINI_CHART_PAD * 2;
+  if (inner > 0) BANNER_CHART_WIDTH = Math.round(inner);
+}
+
+// Re-measures and redraws every banner chart in place — used on window resize. Debounced
+// since 'resize' can fire continuously while a window is actively being dragged.
+let _bannerResizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(_bannerResizeTimer);
+  _bannerResizeTimer = setTimeout(() => {
+    if (!PARSED || !ANALYSIS) return;
+    updateBannerChartWidth();
+    ZOOM_KINDS.forEach(k => rerenderZoomChart(k));
+  }, 150);
+});
 
 // ══════════════════════════════════════════════════════════════════════
 // TIME-AXIS ZOOM/PAN — scroll to zoom, drag to pan, double-click to reset
