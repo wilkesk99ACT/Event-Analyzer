@@ -6740,17 +6740,38 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
 // alone; the clone is purely for viewing/screenshotting at a size that's actually legible once
 // a chart has many columns (e.g. the full trip-chain view).
 function expandLogicChart() {
+  // Replace, rather than stack on top of, any overlay already open — this is also what makes
+  // clicking a bit INSIDE the fullscreen view work: showBitDetail() re-renders the popup's
+  // chart for the newly-clicked bit, then calls back into this function to refresh the
+  // fullscreen copy to match, and that refresh must fully replace the stale one.
+  closeLLGFullscreen();
+
   const body = document.getElementById('llgSourceBody');
   if (!body) return;
   const titleEl = document.getElementById('bitModalTitle');
   const title = titleEl ? titleEl.textContent : 'Logic chart';
 
-  const rect = body.getBoundingClientRect();
-  const w = Math.max(1, rect.width), h = Math.max(1, rect.height);
-  const scale = Math.max(1, Math.min(3, (window.innerWidth * 0.85) / w, (window.innerHeight * 0.7) / h));
+  // `body` itself scrolls internally when its content is wider than the popup (see .llg-wrap's
+  // overflow-x:auto), so getBoundingClientRect() only reports the visible, CLIPPED viewport —
+  // not the diagram's true full extent. scrollWidth/scrollHeight report the real content size
+  // regardless of clipping, which is what's actually needed to size this so the whole chart
+  // ends up visible at once, not just re-cropped at a different scale.
+  const w = Math.max(1, body.scrollWidth);
+  const h = Math.max(1, body.scrollHeight);
+
+  // Budget the space the fullscreen modal actually has available (95vw / 92vh, minus its own
+  // header and padding), then scale the chart to fit that space exactly — shrinking a chart
+  // that's too big to fit (the whole point of this fix) just as readily as enlarging one that's
+  // small enough to benefit from it. No lower floor on scale: a genuinely huge chart (e.g. the
+  // full TR trip-chain view) needs to be allowed to shrink as far as it takes to fit on screen.
+  const HEADER_H = 49, PAD = 40;
+  const availW = window.innerWidth * 0.95 - PAD;
+  const availH = window.innerHeight * 0.92 - HEADER_H - PAD;
+  const scale = Math.max(0.05, Math.min(3, availW / w, availH / h));
 
   const clone = body.cloneNode(true);
   clone.removeAttribute('id');
+  clone.style.overflow = 'visible'; // the clone is sized exactly to its content — no inner scrollbar needed
   clone.style.transform = `scale(${scale})`;
   clone.style.transformOrigin = 'top left';
   clone.style.width = w + 'px';
@@ -6978,6 +6999,13 @@ function showBitDetail(label) {
   }
   bodyEl.innerHTML = html;
   modal.style.display = 'flex';
+
+  // If the fullscreen chart overlay is open, clicking a bit inside it re-renders THIS popup's
+  // chart (above) but the fullscreen copy is a separate cloned DOM tree, so it wouldn't
+  // otherwise reflect the newly-clicked bit — refresh it to match instead of leaving it stale.
+  if (document.getElementById('llgFullscreenOverlay')) {
+    expandLogicChart();
+  }
 }
 function hideBitDetail() {
   const modal = document.getElementById('bitModal');
