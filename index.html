@@ -6774,10 +6774,22 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
   });
 
   const LANE_H = 7;
-  const topPad = MARGIN + skipLaneCount * LANE_H;
+  // A skip edge's horizontal lane segment only passes OVER the columns strictly BETWEEN its two
+  // endpoints — the source and target columns themselves just need a plain vertical riser out to
+  // that lane, which is fine at any height. Reserving the SAME clearance (based on the busiest
+  // lane stack anywhere in the whole diagram) above every column, including ones no skip edge
+  // ever crosses, is what forced short local hops to route all the way up to whatever height the
+  // busiest, most distant part of the chart happened to need. Reserving clearance per column,
+  // based on the highest lane index that ACTUALLY passes over THAT column, keeps each column —
+  // and each edge's riser — no taller than its own local situation requires.
+  const laneReqByCol = {}; // column index -> number of lanes that need clearance above it
+  skipMeta.forEach(m => {
+    for (let c = m.ciL + 1; c <= m.ciR - 1; c++) laneReqByCol[c] = Math.max(laneReqByCol[c] || 0, m.laneIdx + 1);
+  });
+  const topPadForCol = ci => MARGIN + (laneReqByCol[ci] || 0) * LANE_H;
   const totalH = Math.max(...colHeight, ROW_H);
   const totalW = colX[numCols - 1] + BOX_W + MARGIN;
-  const height = totalH + topPad + MARGIN;
+  const height = Math.max(...columns.map((_, ci) => topPadForCol(ci) + (totalH + colHeight[ci]) / 2)) + MARGIN;
 
   // ── Row ordering within each column — barycenter heuristic ──
   // WHICH row a bit lands in (within its group) is a completely separate question from which
@@ -6833,7 +6845,7 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
     const isGroupStart = {}; let lastRoot = null;
     sorted.forEach(l => { isGroupStart[l] = (rootOf[l] !== lastRoot); lastRoot = rootOf[l]; });
 
-    const startY = topPad + (totalH - colHeight[ci]) / 2;
+    const startY = topPadForCol(ci) + (totalH - colHeight[ci]) / 2;
     let y = startY;
     sorted.forEach((lbl, ri) => {
       if (ri > 0 && isGroupStart[lbl]) y += GROUP_GAP;
