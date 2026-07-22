@@ -5398,7 +5398,7 @@ async function downloadMainGIF() {
     // lengthy descriptive legend, in particular) is dropped by rebuilding a fresh minimal card
     // rather than trying to selectively remove an unwanted element, which is what silently
     // failed to keep it out before.
-    const CHART_SCALE = 1;
+    const CHART_SCALE = 0.95;
     function scaledChartCard(html) {
       const inner = document.createElement('div');
       inner.innerHTML = html;
