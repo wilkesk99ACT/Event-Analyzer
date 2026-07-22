@@ -638,6 +638,66 @@ body.dragging-file #drop-overlay { display: flex; }
 .timing-chip .label { color: var(--text-dim); }
 .timing-chip .value { font-weight: 700; font-family: var(--mono); color: var(--yellow); }
 
+.charted-bit-chip { position: relative; }
+.charted-bit-btn {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--yellow);
+  background: transparent;
+  border: 1px solid var(--card-border);
+  border-radius: 4px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.charted-bit-btn:hover { border-color: var(--accent); color: var(--accent); }
+.charted-bit-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  width: 260px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  padding: 10px;
+}
+.charted-bit-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+.charted-bit-search {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg2);
+  border: 1px solid var(--card-border);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: var(--sans);
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+.charted-bit-search:focus { outline: none; border-color: var(--accent); }
+.charted-bit-list { max-height: 220px; overflow-y: auto; }
+.charted-bit-option {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.charted-bit-option:hover { background: var(--accent-dim); color: var(--accent); }
+.charted-bit-option.active { color: var(--yellow); font-weight: 700; }
+.charted-bit-option-empty { font-size: 12px; color: var(--text-muted); padding: 5px 8px; }
+
 /* ── Tab Bar ── */
 .tab-bar {
   display: flex;
@@ -3922,6 +3982,69 @@ function analyzeCEV(P, prevEvent) {
     }
   }
 
+  // ── Generic "build a causal tree for ANY bit" — backs the main-page "Logic Bit Charted"
+  // picker's "Filter relevant?" (checked) mode. Reuses the exact same bake/prune machinery as
+  // the resolved trip cause above, just rooted at whatever equation the CHOSEN bit (not
+  // necessarily the trip) resolves to, so a user exploring a different SV or equation gets the
+  // same style of pruned, causally-focused diagram instead of only ever seeing the trip's own.
+  // Recomputes a digital-state snapshot at an arbitrary digital-sample index directly from the
+  // transition list — independent of stateAtTripSnapshot/erFoundAt above (which are scoped to
+  // their own trip/ER branches), so this works uniformly regardless of which path produced A.
+  function stateSetAtDigitalIdx(digIdx) {
+    const running = new Set(P.initialDigitalState || []);
+    for (const t of digitalTransitions) {
+      if (t.digitalSampleIdx > digIdx) break;
+      for (const c of t.changes) { if (c.asserted) running.add(c.label); else running.delete(c.label); }
+    }
+    return running;
+  }
+  // Finds the raw SELogic text (if any) that defines `label` — a top-level named equation
+  // (TR/TR3X/ER/FAULT/79RI3P/79DTL3P) or an SV (bare or timed form). Returns null for a plain
+  // recorded bit with no equation of its own (a leaf, not a defined point).
+  function resolveEquationForLabel(label) {
+    const clean = eq => (eq || '').split('#')[0].trim();
+    if (label === (P.tripEquationName || 'TR') && clean(P.tripEquation)) return clean(P.tripEquation);
+    if (label === 'TR3X' && clean(P.tripEquationX)) return clean(P.tripEquationX);
+    if (label === (P.erEquationName || 'ER') && clean(P.erEquation)) return clean(P.erEquation);
+    if (label === 'FAULT' && clean(P.faultEquation)) return clean(P.faultEquation);
+    if (label === '79RI3P' && clean(P.recloseEquation)) return clean(P.recloseEquation);
+    if (label === '79DTL3P' && clean(P.dtlEquation)) return clean(P.dtlEquation);
+    const svm = label.match(/^SV(\d+)T?$/);
+    if (svm) {
+      const sv = svSettings.find(s => s.num === parseInt(svm[1]));
+      const eq = sv && clean(sv.equation);
+      if (eq && eq !== 'NA') return eq;
+    }
+    return null;
+  }
+  function buildTreeForBit(label) {
+    const eqText = resolveEquationForLabel(label);
+    if (!eqText) return null;
+    let ast;
+    try { ast = parseEq(tokenizeEq(eqText)); } catch (e) { return null; }
+    const refDigIdx = (A.tripCause && A.tripCause.tripTransition && A.tripCause.tripTransition.digitalSampleIdx != null)
+      ? A.tripCause.tripTransition.digitalSampleIdx
+      : (digitalTransitions.length ? digitalTransitions[digitalTransitions.length - 1].digitalSampleIdx : 0);
+    const refState = stateSetAtDigitalIdx(refDigIdx);
+    const isAssertedFn = name => refState.has(name);
+    // If the top level is a big OR of independent conditions (very common for a top-level trip
+    // equation), focus on whichever single branch is actually true right now — same "show the
+    // one relevant path, not every unrelated protection function" behavior as the resolved trip
+    // cause — falling back to the whole equation when none is currently true.
+    let rootAst = ast, otherBranchCount = 0;
+    try {
+      const branches = splitTopOr(ast);
+      if (branches.length > 1) {
+        const trueBranch = branches.find(b => evalAst(b, isAssertedFn).value);
+        if (trueBranch) { rootAst = trueBranch; otherBranchCount = branches.length - 1; }
+      }
+    } catch (e) { /* fall through with the whole equation */ }
+    let baked;
+    try { baked = pruneLogicTree(bakeFullLogicTree(rootAst, isAssertedFn, new Set(), 0)); } catch (e) { return null; }
+    return { logicTree: baked, finalLabel: label, logicTreeOtherBranchCount: otherBranchCount };
+  }
+  A._buildTreeForBit = buildTreeForBit;
+
   return A;
 }
 
@@ -4258,6 +4381,164 @@ function buildEvidenceBlock(P, cause) {
   </div>`;
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// "LOGIC BIT CHARTED" PICKER — lets the main-page charted-logic slot show any bit's
+// diagram, not just the resolved trip cause; see CHARTED_BIT/CHARTED_FILTER_RELEVANT above.
+// ══════════════════════════════════════════════════════════════════════
+function getDefaultChartedBitLabel(P, A) {
+  return (A && A.tripCause && A.tripCause.finalLabel) || (P && P.tripEquationName) || 'TR';
+}
+function currentChartedBitLabel() {
+  if (!PARSED) return '';
+  return CHARTED_BIT || getDefaultChartedBitLabel(PARSED, ANALYSIS);
+}
+// Every real bit worth searching for: everything actually recorded in the digital word (initial
+// state + every transition), every SV (bare and timed form), and every named top-level equation
+// this file defines — with the resolved trip/ER cause (or else TR) always pinned first.
+function getAllChartableBitLabels(P, A) {
+  const set = new Set();
+  (P.initialDigitalState || []).forEach(l => set.add(l));
+  (P.digitalTransitions || []).forEach(t => t.changes.forEach(c => set.add(c.label)));
+  (P.svSettings || []).forEach(sv => { set.add(`SV${sv.num}`); set.add(`SV${sv.num}T`); });
+  set.add(P.tripEquationName || 'TR');
+  if (P.tripEquationX) set.add('TR3X');
+  if (P.erEquation) set.add(P.erEquationName || 'ER');
+  if (P.faultEquation) set.add('FAULT');
+  if (P.recloseEquation) set.add('79RI3P');
+  if (P.dtlEquation) set.add('79DTL3P');
+  const pinned = getDefaultChartedBitLabel(P, A);
+  set.add(pinned);
+  const rest = [...set].filter(l => l !== pinned).sort((a, b) => a.localeCompare(b));
+  return [pinned, ...rest];
+}
+// Resolves the { logicTree, finalLabel, logicTreeOtherBranchCount }-shaped object for whichever
+// bit is currently charted, in "Filter relevant?" (pruned/causal) mode — the default bit reuses
+// the already-resolved trip cause exactly as before; any other bit gets a freshly baked tree
+// rooted at its own equation via ANALYSIS._buildTreeForBit (see analyzeCEV). Returns null if
+// nothing can be built, so callers can fall back gracefully.
+function getCurrentChartedCauseForTree() {
+  if (!PARSED || !ANALYSIS) return null;
+  const label = currentChartedBitLabel();
+  const isDefault = !CHARTED_BIT || CHARTED_BIT === getDefaultChartedBitLabel(PARSED, ANALYSIS);
+  if (isDefault) return (ANALYSIS.tripCause && ANALYSIS.tripCause.logicTree) ? ANALYSIS.tripCause : null;
+  return (typeof ANALYSIS._buildTreeForBit === 'function') ? ANALYSIS._buildTreeForBit(label) : null;
+}
+// Builds a READ-ONLY embed of the same local logic graph the per-bit tooltip popup shows (the
+// fuller, unpruned "what feeds this bit, and what it feeds into" chart), for "Filter relevant?"
+// unchecked mode. Safe to show alongside an actual bit-detail popup elsewhere on the page: it
+// saves/restores LLG_CURRENT (which renderLocalLogicGraph always overwrites as a side effect for
+// the popup's own timeline/GIF/export buttons) and strips the popup's fixed element ids so the
+// two never collide.
+function buildChartedLocalGraphHTML(label) {
+  if (!PARSED || !label) return '';
+  if (isBlinkerLabel(label, PARSED)) return renderBlinkerPair(label, PARSED);
+  const savedLLGCurrent = LLG_CURRENT;
+  let fullHTML = '';
+  try {
+    const tripFocus = isTripFocusLabel(label, PARSED);
+    const graph = buildLocalLogicGraph(PARSED, label, tripFocus ? 25 : 20, tripFocus ? 25 : 1, !tripFocus);
+    fullHTML = renderLocalLogicGraph(graph, PARSED, tripFocus);
+  } catch (e) {
+    fullHTML = '';
+  } finally {
+    LLG_CURRENT = savedLLGCurrent;
+  }
+  if (!fullHTML) return '';
+  const tmp = document.createElement('div');
+  tmp.innerHTML = fullHTML;
+  const innerDiagram = tmp.querySelector('#llgInnerDiagram');
+  if (!innerDiagram) return '';
+  const legendHTML = renderLLGLegend().replace(/\sid="llgSourceLegend"/, '');
+  return `<div class="llg-diagram-outer main-charted-local-graph" style="margin-top:12px;">
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Full logic chart — what feeds ${tt(label, PARSED)}, and what it feeds into:</div>
+    ${legendHTML}
+    <div class="llg-wrap" id="mainChartedLocalBody">
+      <div id="mainChartedLocalInner">${innerDiagram.innerHTML}</div>
+    </div>
+  </div>`;
+}
+// Decides what belongs in the main charted-logic slot right now (pruned tree vs. local graph,
+// for whichever bit is selected) and renders it in full — called on initial banner render, and
+// whenever the picker's bit or "Filter relevant?" checkbox changes.
+function renderChartedLogicSlot() {
+  const slot = document.getElementById('mainChartedLogicSlot');
+  if (!slot || !PARSED || !ANALYSIS) return;
+  const label = currentChartedBitLabel();
+  const isDefault = !CHARTED_BIT || CHARTED_BIT === getDefaultChartedBitLabel(PARSED, ANALYSIS);
+
+  if (CHARTED_FILTER_RELEVANT) {
+    const causeForTree = getCurrentChartedCauseForTree();
+    if (causeForTree && causeForTree.logicTree) {
+      const patchedAnalysis = Object.assign({}, ANALYSIS, { tripCause: causeForTree });
+      const html = buildLogicTreeSection(PARSED, patchedAnalysis);
+      if (html) { slot.innerHTML = html; return; }
+    }
+    slot.innerHTML = isDefault ? LAST_SEQ_HTML
+      : `<div style="color:var(--text-dim);font-size:12px;padding:8px 2px;">No equation-based logic tree available for ${tt(label, PARSED)} — try unchecking "Filter relevant?" to see its full local logic graph instead.</div>`;
+    return;
+  }
+
+  slot.innerHTML = buildChartedLocalGraphHTML(label) ||
+    `<div style="color:var(--text-dim);font-size:12px;padding:8px 2px;">Nothing to show for ${tt(label, PARSED)}.</div>`;
+}
+function renderChartedBitChipHTML(P, A) {
+  if (!P || !A) return '';
+  const current = currentChartedBitLabel();
+  return `<div class="timing-chip charted-bit-chip" id="chartedBitChip">
+    <span class="label">Logic Bit Charted:</span>
+    <button type="button" class="charted-bit-btn" onclick="event.stopPropagation(); toggleChartedBitDropdown();">${current} ▾</button>
+    <div class="charted-bit-dropdown" id="chartedBitDropdown" style="display:none;">
+      <label class="charted-bit-filter-row">
+        <input type="checkbox" ${CHARTED_FILTER_RELEVANT ? 'checked' : ''} onchange="setChartedFilterRelevant(this.checked)">
+        Filter relevant?
+      </label>
+      <input type="text" class="charted-bit-search" id="chartedBitSearch" placeholder="Search bits…" oninput="renderChartedBitOptions(this.value)">
+      <div class="charted-bit-list" id="chartedBitList"></div>
+    </div>
+  </div>`;
+}
+function toggleChartedBitDropdown() {
+  const dd = document.getElementById('chartedBitDropdown');
+  if (!dd) return;
+  const opening = dd.style.display === 'none';
+  dd.style.display = opening ? 'block' : 'none';
+  if (opening) {
+    renderChartedBitOptions('');
+    const search = document.getElementById('chartedBitSearch');
+    if (search) { search.value = ''; search.focus(); }
+  }
+}
+function renderChartedBitOptions(filterText) {
+  const list = document.getElementById('chartedBitList');
+  if (!list || !PARSED) return;
+  const all = getAllChartableBitLabels(PARSED, ANALYSIS);
+  const q = (filterText || '').trim().toUpperCase();
+  const filtered = q ? all.filter(l => l.toUpperCase().includes(q)) : all;
+  const current = currentChartedBitLabel();
+  list.innerHTML = filtered.slice(0, 300).map(l =>
+    `<div class="charted-bit-option ${l === current ? 'active' : ''}" onclick="selectChartedBit('${l.replace(/'/g, "\\'")}')">${l}</div>`
+  ).join('') || `<div class="charted-bit-option-empty">No matching bits</div>`;
+}
+function selectChartedBit(label) {
+  CHARTED_BIT = label;
+  const dd = document.getElementById('chartedBitDropdown');
+  if (dd) dd.style.display = 'none';
+  const btn = document.querySelector('#chartedBitChip .charted-bit-btn');
+  if (btn) btn.textContent = label + ' ▾';
+  renderChartedLogicSlot();
+}
+function setChartedFilterRelevant(checked) {
+  CHARTED_FILTER_RELEVANT = !!checked;
+  renderChartedLogicSlot();
+}
+// Close the bit-picker dropdown when clicking anywhere outside it.
+document.addEventListener('click', (e) => {
+  const dd = document.getElementById('chartedBitDropdown');
+  if (!dd || dd.style.display === 'none') return;
+  const chip = document.getElementById('chartedBitChip');
+  if (chip && !chip.contains(e.target)) dd.style.display = 'none';
+});
+
 function renderBanner() {
   const el = document.getElementById('tripBanner');
   const cause = ANALYSIS.tripCause;
@@ -4416,11 +4697,12 @@ function renderBanner() {
         ${cause.crossEvent ? '<div style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:4px;background:var(--yellow-dim);color:var(--yellow);font-size:11px;font-weight:600;margin-bottom:10px;border:1px solid #5c4506"><span>🔗</span> CROSS-EVENT: Condition started in a prior event record</div>' : ''}
         <p style="color:${cause.isEventReport ? '#bfdbfe' : '#fecaca'};font-size:13px;margin-bottom:16px;line-height:1.6;">${cause.causeDetail}</p>
         ${buildEvidenceBlock(PARSED, cause)}
-        ${buildLogicTreeSection(PARSED, ANALYSIS) || seqHTML}
+        <div id="mainChartedLogicSlot"></div>
         <div class="trip-timing">
           <div class="timing-chip"><span class="label">${cause.isEventReport ? 'Timer Delay:' : 'Total Timer Delay:'}</span> <span class="value">${totalCycles} cycles (${totalMs.toFixed(0)} ms)</span></div>
           <div class="timing-chip"><span class="label">Immediate Cause:</span> <span class="value">${cause.immediateCause || '—'}</span></div>
           <div class="timing-chip"><span class="label">${cause.isEventReport ? 'Event Report Equation:' : 'Trip Equation:'}</span> <span class="value">${(cause.isEventReport ? (PARSED.erEquationName || 'ER') : (cause.sourceEquationName || PARSED.tripEquationName || 'TR'))}${cause.immediateCause ? ' via ' + cause.immediateCause : ''}</span></div>
+          ${renderChartedBitChipHTML(PARSED, ANALYSIS)}
         </div>
         ${buildConsistencyWarningBanner(PARSED, ANALYSIS)}
         ${buildInvestigationPanel(PARSED, ANALYSIS)}
@@ -4428,7 +4710,9 @@ function renderBanner() {
       ${chartsHTML}
     </div>
   `;
+  LAST_SEQ_HTML = seqHTML;
   wireChartInteractivity();
+  renderChartedLogicSlot();
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -5177,6 +5461,16 @@ let CURSOR_DRAG = null;  // { kind } while actively dragging the cursor line
 // or null when unset), and MAIN_PLAY_TIMER holds the running playback interval. MARKER_DRAG
 // tracks dragging one of the A/B markers.
 let PLAY_MARK_A = null, PLAY_MARK_B = null;
+// Which bit's logic graph the main-page charted-logic slot shows, and how — null CHARTED_BIT
+// means "use the default (the resolved trip/ER cause)". CHARTED_FILTER_RELEVANT true shows the
+// same kind of pruned, causally-relevant tree as the resolved trip cause (just rooted at
+// whatever bit is chosen); false shows the fuller, unpruned local logic graph — the same one
+// the per-bit tooltip popup uses — for that bit instead.
+let CHARTED_BIT = null;
+let CHARTED_FILTER_RELEVANT = true;
+// Captured by renderBanner each render — the plain sequence-diagram fallback used only when the
+// DEFAULT bit has no bakeable logic tree at all (mirrors the tool's original fallback).
+let LAST_SEQ_HTML = '';
 let MAIN_PLAY_TIMER = null;
 let MARKER_DRAG = null;   // { which: 'A'|'B', kind } while dragging a range marker
 // Whether to keep showing the trip-instant's own value-readout box even while a cursor is also
@@ -5300,21 +5594,47 @@ function syncLogicChartToCursor(analogIdx) {
 // animates alongside the four waveform/flag charts during playback or cursor-dragging instead of
 // staying frozen at the original trip-moment snapshot it was built with.
 function redrawMainLogicTree() {
-  if (!PARSED || !ANALYSIS || !ANALYSIS.tripCause || !ANALYSIS.tripCause.logicTree) return;
-  const slot = document.getElementById('mainLogicTreeCanvas');
-  if (!slot) return;
-  const freshTree = reEvaluateLogicTree(ANALYSIS.tripCause.logicTree);
-  // Render through a shallow-patched copy of tripCause/ANALYSIS so the refreshed values flow
-  // through buildLogicTreeSection without mutating the canonical trip-moment tree that other
-  // parts of the page (the Evidence block, etc.) still rely on.
-  const patchedCause = Object.assign({}, ANALYSIS.tripCause, { logicTree: freshTree });
-  const patchedAnalysis = Object.assign({}, ANALYSIS, { tripCause: patchedCause });
-  const html = buildLogicTreeSection(PARSED, patchedAnalysis);
-  if (!html) return;
-  const tmp = document.createElement('div');
-  tmp.innerHTML = html;
-  const freshCanvas = tmp.querySelector('#mainLogicTreeCanvas');
-  if (freshCanvas) slot.innerHTML = freshCanvas.innerHTML;
+  if (!PARSED || !ANALYSIS) return;
+
+  if (CHARTED_FILTER_RELEVANT) {
+    const slot = document.getElementById('mainLogicTreeCanvas');
+    if (!slot) return; // nothing baked right now (e.g. the sequence-diagram/no-tree fallback is showing) — leave as-is
+    const causeForTree = getCurrentChartedCauseForTree();
+    if (!causeForTree || !causeForTree.logicTree) return;
+    const freshTree = reEvaluateLogicTree(causeForTree.logicTree);
+    // Render through a shallow-patched copy of tripCause/ANALYSIS so the refreshed values flow
+    // through buildLogicTreeSection without mutating the canonical trip-moment tree that other
+    // parts of the page (the Evidence block, etc.) still rely on.
+    const patchedCause = Object.assign({}, causeForTree, { logicTree: freshTree });
+    const patchedAnalysis = Object.assign({}, ANALYSIS, { tripCause: patchedCause });
+    const html = buildLogicTreeSection(PARSED, patchedAnalysis);
+    if (!html) return;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    const freshCanvas = tmp.querySelector('#mainLogicTreeCanvas');
+    if (freshCanvas) slot.innerHTML = freshCanvas.innerHTML;
+    return;
+  }
+
+  // "Filter relevant?" unchecked — re-derive and patch just the local graph's inner diagram,
+  // mirroring redrawLogicChartInner's own approach for the popup.
+  const inner = document.getElementById('mainChartedLocalInner');
+  if (!inner) return;
+  const label = currentChartedBitLabel();
+  const savedLLGCurrent = LLG_CURRENT;
+  try {
+    const tripFocus = isTripFocusLabel(label, PARSED);
+    const graph = buildLocalLogicGraph(PARSED, label, tripFocus ? 25 : 20, tripFocus ? 25 : 1, !tripFocus);
+    const fullHTML = renderLocalLogicGraph(graph, PARSED, tripFocus);
+    const tmp = document.createElement('div');
+    tmp.innerHTML = fullHTML;
+    const freshInner = tmp.querySelector('#llgInnerDiagram');
+    if (freshInner) inner.innerHTML = freshInner.innerHTML;
+  } catch (e) {
+    // leave the last good render in place on failure
+  } finally {
+    LLG_CURRENT = savedLLGCurrent;
+  }
 }
 
 // ── Main-page playback (cursor sweeps all charts in sync) ──
@@ -5538,8 +5858,9 @@ async function downloadMainGIF() {
     // Build one off-screen container: a time-indicator header, the logic tree — enlarged — at
     // full width beneath it, then the four waveform/flag charts in a row at the bottom — reused
     // across frames, only the cursor/view-time (hence each frame's colors/dot-readouts and the
-    // time label) changes.
-    const hasLogicTree = !!(ANALYSIS.tripCause && ANALYSIS.tripCause.logicTree);
+    // time label) changes. Mirrors whatever the "Logic Bit Charted" picker currently has
+    // selected (default trip cause or any other bit; pruned tree or full local graph), so the
+    // exported GIF always matches what's actually on screen.
     const probe = document.createElement('div');
     probe.style.position = 'fixed';
     probe.style.left = '-99999px';
@@ -5635,15 +5956,22 @@ async function downloadMainGIF() {
         if (dIdx != null) setLogicChartViewIdx(dIdx);
         timeHeader.textContent = mainTimeLabel(idx);
         chartsRow.innerHTML = '';
-        // Logic tree, re-evaluated at this frame's instant — enlarged, first, most prominent.
-        if (hasLogicTree) {
-          const freshTree = reEvaluateLogicTree(ANALYSIS.tripCause.logicTree);
-          const patchedCause = Object.assign({}, ANALYSIS.tripCause, { logicTree: freshTree });
-          const patchedAnalysis = Object.assign({}, ANALYSIS, { tripCause: patchedCause });
-          const treeHtml = buildLogicTreeSection(PARSED, patchedAnalysis);
-          if (treeHtml) plainTreeCard(treeHtml); else treeSlot.innerHTML = '';
+        // Logic tree/graph, re-evaluated at this frame's instant — enlarged, first, most
+        // prominent — matching whatever the "Logic Bit Charted" picker currently shows.
+        if (CHARTED_FILTER_RELEVANT) {
+          const causeForTree = getCurrentChartedCauseForTree();
+          if (causeForTree && causeForTree.logicTree) {
+            const freshTree = reEvaluateLogicTree(causeForTree.logicTree);
+            const patchedCause = Object.assign({}, causeForTree, { logicTree: freshTree });
+            const patchedAnalysis = Object.assign({}, ANALYSIS, { tripCause: patchedCause });
+            const treeHtml = buildLogicTreeSection(PARSED, patchedAnalysis);
+            if (treeHtml) plainTreeCard(treeHtml); else treeSlot.innerHTML = '';
+          } else {
+            treeSlot.innerHTML = '';
+          }
         } else {
-          treeSlot.innerHTML = '';
+          const localHtml = buildChartedLocalGraphHTML(currentChartedBitLabel());
+          if (localHtml) plainTreeCard(localHtml); else treeSlot.innerHTML = '';
         }
         // The four waveform/flag charts, rebuilt fresh (compact) so their cursor/marker overlays
         // reflect this frame's idx, laid out in one fixed-width row underneath the tree.
@@ -5670,17 +5998,23 @@ async function downloadMainGIF() {
         const elapsedMs = nextIdx != null ? (nextIdx - idx) * msPerSampleForGif : 400;
         const delayCs = Math.max(8, Math.min(600, (elapsedMs / (MAIN_PLAYBACK_SPEED * BASE_TIME_DILATION)) / 10));
         frames.push({ imageData: ctx.getImageData(0, 0, W, H), delayCs });
+        btns.forEach(b => { b.textContent = `${fi + 1}/${frameIdxs.length}`; });
       }
     } finally {
       probe.remove();
     }
     if (!frames.length) throw new Error('no frames captured');
 
-    const gifBytes = encodeGIF(frames, W, H, 140);
+    // encodeGIF is async and yields between frames — keeps this responsive (and the button's
+    // progress text updating) instead of freezing the tab for the whole encode in one go, which
+    // is what could trip the browser's own "page unresponsive" prompt on a larger event.
+    const gifBytes = await encodeGIF(frames, W, H, 140, (done, total) => {
+      btns.forEach(b => { b.textContent = `Encoding ${done}/${total}`; });
+    });
     const blob = new Blob([gifBytes], { type: 'image/gif' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    const selectedLabel = ANALYSIS?.tripCause?.finalLabel || ANALYSIS?.tripCause?.sourceEquationName || PARSED?.tripEquationName || 'TRIP';
+    const selectedLabel = currentChartedBitLabel() || ANALYSIS?.tripCause?.finalLabel || PARSED?.tripEquationName || 'TRIP';
     a.download = buildExportFilename(PARSED, ANALYSIS, selectedLabel, 'Event Playback', 'gif');
     document.body.appendChild(a); a.click(); a.remove();
   } catch (err) {
@@ -7635,6 +7969,8 @@ function selectEvent(idx) {
   CURRENT_IDX = idx;
   PARSED = ALL_EVENTS[idx].parsed;
   ANALYSIS = ALL_EVENTS[idx].analysis;
+  CHARTED_BIT = null;
+  CHARTED_FILTER_RELEVANT = true;
 
   // Update header
   const ts = PARSED.timestamp;
@@ -8698,14 +9034,20 @@ async function downloadLogicChartGIF() {
         const elapsedMs = nextIdx != null ? (nextIdx - idx) * intervalMsForGif : 400;
         const delayCs = Math.max(8, Math.min(600, (elapsedMs / (LLG_PLAYBACK_SPEED * BASE_TIME_DILATION)) / 10));
         frames.push({ imageData: ctx.getImageData(0, 0, W, H), delayCs });
+        document.querySelectorAll('.llgGifBtn').forEach(b => { b.textContent = `${fi + 1}/${frameIdxs.length}`; });
       }
     } finally {
       probe.remove();
     }
     if (!frames.length) throw new Error('no frames captured');
 
-    // Per-frame delays above already carry the correct, speed-scaled pacing.
-    const gifBytes = encodeGIF(frames, W, H, 140);
+    // Per-frame delays above already carry the correct, speed-scaled pacing. encodeGIF is async
+    // and yields between frames — keeps the tab responsive (and the button's progress text
+    // updating) rather than freezing for the whole encode at once, which is what could trip the
+    // browser's own "page unresponsive" prompt on a larger event.
+    const gifBytes = await encodeGIF(frames, W, H, 140, (done, total) => {
+      document.querySelectorAll('.llgGifBtn').forEach(b => { b.textContent = `Encoding ${done}/${total}`; });
+    });
     const blob = new Blob([gifBytes], { type: 'image/gif' });
     const titleEl = document.getElementById('bitModalTitle');
     const selectedLabel = titleEl ? titleEl.textContent : (graph?.centerLabel || 'logic_chart');
@@ -8732,7 +9074,17 @@ async function downloadLogicChartGIF() {
 // its actual colors (the diagram uses only a small handful — background, red, muted, text,
 // borders), so a 256-entry palette is always plenty and quantization is lossless in practice.
 // delayCs is the per-frame delay in centiseconds (1/100 s). No dependencies.
-function encodeGIF(frames, width, height, delayCs) {
+// Async so the caller can await it and the browser stays responsive: quantizing + LZW-encoding
+// every frame is real CPU work (a full pass over every pixel, more than once, per frame), and
+// running all of it synchronously in one go — especially now that exported frames are a fixed,
+// comfortably large size — was long enough to trip Chrome/Firefox's own "page unresponsive"
+// hang detector on bigger events. Yielding back to the event loop between frames (a plain
+// setTimeout(0), not requestAnimationFrame — this tab may not even be visible/foreground during
+// a long export, and rAF callbacks are throttled or skipped entirely for background tabs) keeps
+// each blocking chunk of work short enough that the browser never considers the page hung, even
+// though the total wall-clock time is about the same. onProgress(done, total), if given, is
+// called after each frame so the caller can show real progress instead of a static "…".
+async function encodeGIF(frames, width, height, delayCs, onProgress) {
   const bytes = [];
   const push = (...b) => bytes.push(...b);
   const pushStr = s => { for (let i = 0; i < s.length; i++) push(s.charCodeAt(i)); };
@@ -8744,7 +9096,8 @@ function encodeGIF(frames, width, height, delayCs) {
   // Netscape looping extension (loop forever)
   push(0x21, 0xff, 0x0b); pushStr('NETSCAPE2.0'); push(0x03, 0x01, 0x00, 0x00, 0x00);
 
-  frames.forEach(frame => {
+  for (let fi = 0; fi < frames.length; fi++) {
+    const frame = frames[fi];
     // Build this frame's palette + indexed pixels.
     const { palette, indices } = quantizeFrame(frame.imageData, width, height);
     // Palette must be a power-of-two size for the GIF color-table-size bits.
@@ -8773,7 +9126,10 @@ function encodeGIF(frames, width, height, delayCs) {
       push(chunk.length, ...chunk);
     }
     push(0x00); // block terminator
-  });
+
+    if (onProgress) onProgress(fi + 1, frames.length);
+    await new Promise(r => setTimeout(r, 0));
+  }
 
   push(0x3b); // trailer
   return new Uint8Array(bytes);
