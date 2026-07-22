@@ -562,6 +562,34 @@ body.dragging-file #drop-overlay { display: flex; }
   border-radius: 6px;
 }
 .llg-timeline .llgGifBtn { width: auto; padding: 0 8px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; }
+.llg-scrubber-wrap { position: relative; flex: 1 1 140px; min-width: 120px; display: flex; align-items: center; }
+.llg-scrubber-wrap .llgScrubber { width: 100%; }
+.llg-scrub-mark {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 18px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  display: none;
+}
+.llg-scrub-mark::after {
+  position: absolute;
+  top: -13px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--sans);
+  border-radius: 3px;
+  padding: 0 3px;
+  background: var(--card);
+  white-space: nowrap;
+}
+.llg-scrub-mark-a { background: var(--green); }
+.llg-scrub-mark-a::after { content: 'A'; color: var(--green); }
+.llg-scrub-mark-b { background: var(--red); }
+.llg-scrub-mark-b::after { content: 'B'; color: var(--red); }
 .llg-time-readout {
   font-family: var(--mono);
   font-size: 11px;
@@ -4207,7 +4235,34 @@ function buildLogicTreeSection(P, A) {
   }
   const dashAttr = d => d ? ` stroke-dasharray="${d}"` : '';
 
-  function renderNode(node) {
+  // A short, readable summary of any node for use in an edge's hover title — a plain leaf/SV/
+  // timer just gives its own name; a compound AND/OR group (e.g. the "(59Q1 OR 59G1)" fork
+  // feeding into a bigger AND) spells out its members so the title still means something even
+  // when the edge's actual source is a whole sub-expression, not a single bit.
+  function describeLogicNode(node) {
+    if (!node) return '?';
+    const prefix = (node.modifiers && node.modifiers.length) ? node.modifiers.join(' ') + ' ' : '';
+    if (node.op === 'VAR') return prefix + node.name;
+    if (node.op === 'SVNODE' || node.op === 'TIMERNODE') return prefix + node.label;
+    if (node.op === 'AND' || node.op === 'OR') {
+      const parts = (node._flat || []).map(describeLogicNode);
+      return prefix + '(' + parts.join(node.op === 'AND' ? ' AND ' : ' OR ') + ')';
+    }
+    return '?';
+  }
+  // Draws one edge as a titled, hoverable line: a wide transparent copy underneath (a bare
+  // 1.5-2px stroke is a tiny hit target) carrying the SAME <title> as the visible line on top of
+  // it, so hovering anywhere near the connection — not just exactly on its pixel-thin path —
+  // shows what it actually represents. Matches the tooltip logic chart's own hit-area technique.
+  function titledEdge(x1, y1, x2, y2, color, dash, titleText, strokeWidth) {
+    const sw = strokeWidth || 1.5;
+    const esc = String(titleText).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const title = `<title>${esc}</title>`;
+    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="transparent" stroke-width="10">${title}</line>` +
+      `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="${sw}"${dashAttr(dash)}>${title}</line>`;
+  }
+
+  function renderNode(node, consumerLabel) {
     const x = xOf(node.depth), y = yOf(node.row);
     const prefix = (node.modifiers && node.modifiers.length) ? node.modifiers.join(' ') + ' ' : '';
     if (node.op === 'VAR') {
@@ -4219,10 +4274,10 @@ function buildLogicTreeSection(P, A) {
         const cx = xOf(node.child.depth) + LOGIC_BOX_W, cy = yOf(node.child.row) + LOGIC_BOX_H / 2;
         const ny = y + LOGIC_BOX_H / 2;
         const es = edgeStyleFor(node.child);
-        linesHTML += `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${ny}" stroke="${es.color}" stroke-width="1.5"${dashAttr(es.dash)}/>`;
+        linesHTML += titledEdge(cx, cy, x, ny, es.color, es.dash, `${describeLogicNode(node.child)} → ${node.label}`);
       }
       boxesHTML += `<div class="logic-box logic-sv-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${prefix}${tt(node.label, P)}</div>`;
-      renderNode(node.child);
+      renderNode(node.child, node.label);
       return;
     }
     if (node.op === 'TIMERNODE') {
@@ -4232,13 +4287,14 @@ function buildLogicTreeSection(P, A) {
       // diagram exactly where it sits in the real logic.
       const cx = xOf(node.child.depth) + LOGIC_BOX_W, cy = yOf(node.child.row) + LOGIC_BOX_H / 2;
       const ny = y + LOGIC_BOX_H / 2;
-      linesHTML += `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${ny}" stroke="${node.value ? trueColor : falseColor}" stroke-width="1.5" stroke-dasharray="2,3"/>`;
       const freqForDelay = (typeof PARSED !== 'undefined' && PARSED?.eventInfo?.freq) || 60;
       const delayMs = Math.round((node.pickupDelay / freqForDelay) * 1000);
+      linesHTML += titledEdge(cx, cy, x, ny, node.value ? trueColor : falseColor, '2,3',
+        `${node.child.label} → ${node.label} (${node.pickupDelay} cyc / ${delayMs} ms pickup timer)`);
       const midX = (cx + x) / 2 - 16;
       boxesHTML += `<div class="logic-timer-label" style="left:${midX}px;top:${ny - 16}px;" title="Pickup delay: ${node.pickupDelay} cyc (${delayMs} ms)">⏱ ${delayMs}ms</div>`;
       boxesHTML += `<div class="logic-box logic-sv-box logic-timer-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${prefix}${tt(node.label, P)}</div>`;
-      renderNode(node.child);
+      renderNode(node.child, node.label);
       return;
     }
     if (node.op === 'AND' || node.op === 'OR') {
@@ -4273,12 +4329,13 @@ function buildLogicTreeSection(P, A) {
           const cy = yOf(c.row) + LOGIC_BOX_H / 2;
           const py = portYs[i];
           const es = edgeStyleFor(c);
-          linesHTML += `<line x1="${xOf(c.depth) + LOGIC_BOX_W}" y1="${cy}" x2="${bracketX}" y2="${cy}" stroke="${es.color}" stroke-width="1.5"${dashAttr(es.dash)}/>`;
-          linesHTML += `<line x1="${bracketX}" y1="${cy}" x2="${bracketX}" y2="${py}" stroke="${es.color}" stroke-width="1.5"${dashAttr(es.dash)}/>`;
-          linesHTML += `<line x1="${bracketX}" y1="${py}" x2="${consumerX}" y2="${py}" stroke="${es.color}" stroke-width="1.5"${dashAttr(es.dash)}/>`;
+          const edgeTitle = `${describeLogicNode(c)} → ${consumerLabel}`;
+          linesHTML += titledEdge(xOf(c.depth) + LOGIC_BOX_W, cy, bracketX, cy, es.color, es.dash, edgeTitle);
+          linesHTML += titledEdge(bracketX, cy, bracketX, py, es.color, es.dash, edgeTitle);
+          linesHTML += titledEdge(bracketX, py, consumerX, py, es.color, es.dash, edgeTitle);
         });
         const topY = Math.min(...portYs), botY = Math.max(...portYs);
-        linesHTML += `<line x1="${crossX}" y1="${topY}" x2="${crossX}" y2="${botY}" stroke="${node.value ? trueColor : falseColor}" stroke-width="1.5"/>`;
+        linesHTML += `<line x1="${crossX}" y1="${topY}" x2="${crossX}" y2="${botY}" stroke="${node.value ? trueColor : falseColor}" stroke-width="1.5"><title>All inputs AND-ed together</title></line>`;
       } else {
         // OR (or a degenerate single-input group): inputs merge into ONE shared line before
         // continuing on — unchanged fork-join behavior, correct for "any one of these suffices".
@@ -4288,13 +4345,13 @@ function buildLogicTreeSection(P, A) {
         flat.forEach(c => {
           const cy = yOf(c.row) + LOGIC_BOX_H / 2;
           const es = edgeStyleFor(c);
-          linesHTML += `<line x1="${xOf(c.depth) + LOGIC_BOX_W}" y1="${cy}" x2="${bracketX}" y2="${cy}" stroke="${es.color}" stroke-width="1.5"${dashAttr(es.dash)}/>`;
+          linesHTML += titledEdge(xOf(c.depth) + LOGIC_BOX_W, cy, bracketX, cy, es.color, es.dash, `${describeLogicNode(c)} → ${consumerLabel}`);
         });
-        linesHTML += `<line x1="${bracketX}" y1="${outY}" x2="${outX}" y2="${outY}" stroke="${node.value ? trueColor : falseColor}" stroke-width="1.5"/>`;
-        if (flat.length > 1) linesHTML += `<line x1="${bracketX}" y1="${topY}" x2="${bracketX}" y2="${botY}" stroke="${node.value ? trueColor : falseColor}" stroke-width="1.5"/>`;
+        linesHTML += `<line x1="${bracketX}" y1="${outY}" x2="${outX}" y2="${outY}" stroke="${node.value ? trueColor : falseColor}" stroke-width="1.5"><title>Any one of these is enough (OR)</title></line>`;
+        if (flat.length > 1) linesHTML += `<line x1="${bracketX}" y1="${topY}" x2="${bracketX}" y2="${botY}" stroke="${node.value ? trueColor : falseColor}" stroke-width="1.5"><title>Any one of these is enough (OR)</title></line>`;
       }
       boxesHTML += modifierBadge(node, x, y);
-      flat.forEach(renderNode);
+      flat.forEach(c => renderNode(c, consumerLabel));
       return;
     }
   }
@@ -4306,7 +4363,8 @@ function buildLogicTreeSection(P, A) {
     return node && node.op === 'AND' && node._flat && node._flat.length > 1;
   }
 
-  renderNode(root);
+  const finalLabel = A.tripCause.finalLabel || 'TRIP';
+  renderNode(root, finalLabel);
 
   // Final synthetic "trip" box, one column right of the root — unless the root itself is a
   // multi-input AND, which has already routed each of its own inputs directly into this box's
@@ -4314,13 +4372,13 @@ function buildLogicTreeSection(P, A) {
   if (!isMultiPortAnd(root)) {
     const rootOutX = xOf(root.depth) + LOGIC_BOX_W, rootOutY = yOf(root.row) + LOGIC_BOX_H / 2;
     const rootEs = edgeStyleFor(root);
-    linesHTML += `<line x1="${rootOutX}" y1="${rootOutY}" x2="${finalX}" y2="${finalY + LOGIC_BOX_H / 2}" stroke="${rootEs.color}" stroke-width="2"${dashAttr(rootEs.dash)}/>`;
+    linesHTML += titledEdge(rootOutX, rootOutY, finalX, finalY + LOGIC_BOX_H / 2, rootEs.color, rootEs.dash, `${describeLogicNode(root)} → ${finalLabel}`, 2);
   }
   // The terminal TRIP/TR3P/etc. box must reflect whether it's ACTUALLY asserted at the instant
   // being shown (root.value, refreshed on every frame by reEvaluateLogicTree) — previously this
   // box's own CSS class was unconditionally styled red/"asserted", so it looked permanently
   // tripped no matter what point in the event playback was selected.
-  boxesHTML += `<div class="logic-box logic-final-box${root.value ? '' : ' final-off'}" style="left:${finalX}px;top:${finalY}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${tt(A.tripCause.finalLabel || 'TRIP', P)}</div>`;
+  boxesHTML += `<div class="logic-box logic-final-box${root.value ? '' : ' final-off'}" style="left:${finalX}px;top:${finalY}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${tt(finalLabel, P)}</div>`;
 
   const otherCount = A.tripCause.logicTreeOtherBranchCount || 0;
   const totalW = finalX + LOGIC_BOX_W + LOGIC_MARGIN;
@@ -4334,7 +4392,7 @@ function buildLogicTreeSection(P, A) {
     <div class="logic-tree-block">
       <div class="logic-tree-wrap" style="height:${totalHeight}px;">
         <div class="logic-tree-canvas" id="mainLogicTreeCanvas" style="width:${totalW}px;height:${totalHeight}px;">
-          <svg width="${totalW}" height="${totalHeight}" style="position:absolute;left:0;top:0;pointer-events:none;">${linesHTML}</svg>
+          <svg width="${totalW}" height="${totalHeight}" style="position:absolute;left:0;top:0;">${linesHTML}</svg>
           ${boxesHTML}
         </div>
       </div>
@@ -4436,7 +4494,7 @@ function buildChartedLocalGraphHTML(label) {
   let fullHTML = '';
   try {
     const tripFocus = isTripFocusLabel(label, PARSED);
-    const graph = buildLocalLogicGraph(PARSED, label, tripFocus ? 25 : 20, tripFocus ? 25 : 1, !tripFocus);
+    const graph = buildLocalLogicGraph(PARSED, label, tripFocus ? 25 : 20, tripFocus ? 25 : 14, !tripFocus);
     fullHTML = renderLocalLogicGraph(graph, PARSED, tripFocus);
   } catch (e) {
     fullHTML = '';
@@ -5624,7 +5682,7 @@ function redrawMainLogicTree() {
   const savedLLGCurrent = LLG_CURRENT;
   try {
     const tripFocus = isTripFocusLabel(label, PARSED);
-    const graph = buildLocalLogicGraph(PARSED, label, tripFocus ? 25 : 20, tripFocus ? 25 : 1, !tripFocus);
+    const graph = buildLocalLogicGraph(PARSED, label, tripFocus ? 25 : 20, tripFocus ? 25 : 14, !tripFocus);
     const fullHTML = renderLocalLogicGraph(graph, PARSED, tripFocus);
     const tmp = document.createElement('div');
     tmp.innerHTML = fullHTML;
@@ -8729,8 +8787,12 @@ function renderLogicTimeline(P) {
   return `<div class="llg-timeline" data-maxidx="${maxIdx}">
     <button type="button" class="llg-tool-btn llgPlayBtn" title="Play through the event" onclick="toggleLogicChartPlay()">▶</button>
     <button type="button" class="llg-tool-btn llgSpeedBtn" title="Playback speed (also sets the GIF's pace)" onclick="cycleLlgSpeed()" style="width:auto;padding:0 7px;font-weight:700;">${LLG_PLAYBACK_SPEED}×</button>
-    <input type="range" class="llgScrubber" min="0" max="${maxIdx}" value="${startIdx}" step="1"
-      oninput="onLogicChartScrub(this.value)" style="flex:1;min-width:120px;accent-color:var(--accent);">
+    <div class="llg-scrubber-wrap">
+      <input type="range" class="llgScrubber" min="0" max="${maxIdx}" value="${startIdx}" step="1"
+        oninput="onLogicChartScrub(this.value)" style="accent-color:var(--accent);">
+      <div class="llg-scrub-mark llg-scrub-mark-a" title="Window start (A)"></div>
+      <div class="llg-scrub-mark llg-scrub-mark-b" title="Window end (B)"></div>
+    </div>
     <span class="llg-time-readout llgTimeReadout"></span>
     <span class="main-timeline-sep"></span>
     <button type="button" class="llg-tool-btn" title="Set window start (A) to the current position" onclick="setLlgPlayMarker('A')" style="width:auto;padding:0 8px;">Set A</button>
@@ -8838,6 +8900,7 @@ function expandLogicChart() {
     ? LLG_VIEW_SAMPLE_IDX
     : (ANALYSIS?.tripCause?.tripTransition?.digitalSampleIdx ?? null);
   if (curIdx != null) { syncScrubbers(curIdx); updateLlgTimeReadout(curIdx); }
+  updateLlgMarkerPositions();
 }
 
 function closeLLGFullscreen() {
@@ -8872,6 +8935,28 @@ function updateLlgMarkerReadout() {
   const label = idx => idx != null ? llgTimeLabelForIdx(PARSED, idx) : '—';
   const text = `A ${label(LLG_MARK_A)}  ·  B ${label(LLG_MARK_B)}`;
   document.querySelectorAll('.llgMarkerReadout').forEach(el => { el.textContent = text; });
+  updateLlgMarkerPositions();
+}
+// Positions the small A/B tick markers overlaid on every visible logic-chart timeline scrubber
+// (the popup's own copy and, if open, the fullscreen copy) to sit directly above wherever
+// LLG_MARK_A/LLG_MARK_B currently point — hidden entirely when a mark isn't set. A plain
+// percentage-of-track position (value/max) rather than pixel-measuring the native slider's own
+// thumb geometry; close enough to be a clear visual reference without depending on
+// browser-specific range-input internals.
+function updateLlgMarkerPositions() {
+  document.querySelectorAll('.llg-scrubber-wrap').forEach(wrap => {
+    const scrubber = wrap.querySelector('.llgScrubber');
+    if (!scrubber) return;
+    const maxIdx = parseFloat(scrubber.max) || 0;
+    const markA = wrap.querySelector('.llg-scrub-mark-a');
+    const markB = wrap.querySelector('.llg-scrub-mark-b');
+    [[markA, LLG_MARK_A], [markB, LLG_MARK_B]].forEach(([el, idx]) => {
+      if (!el) return;
+      if (idx == null || maxIdx <= 0) { el.style.display = 'none'; return; }
+      el.style.left = Math.max(0, Math.min(100, (idx / maxIdx) * 100)) + '%';
+      el.style.display = 'block';
+    });
+  });
 }
 
 // Human-readable time for a given digital-sample index, relative to the trigger where possible.
@@ -9590,13 +9675,16 @@ function showBitDetail(label) {
     // back to raw elements, and forward through every SV hop to the final trip command) is
     // worth more than the compact default.
     const tripFocus = isTripFocusLabel(label, PARSED);
-    // Non-focal bits: exactly ONE backward hop (this bit's own direct equation — every input it
-    // has, not filtered by state) and a forward walk deep enough to reach the terminal trip bit,
-    // built in SCOPED mode so each forward hop only pulls in the specific AND-group it actually
-    // connects through (e.g. "52A" alongside SV06 in TR's "SV06 AND 52A") rather than that
-    // consumer's entire other, unrelated logic — which is what made these charts balloon into
-    // showing nearly every SV in the settings.
-    const graph = buildLocalLogicGraph(PARSED, label, tripFocus ? 25 : 20, tripFocus ? 25 : 1, !tripFocus);
+    // Non-focal bits: several backward hops (not just this bit's own direct equation) so the
+    // chain keeps walking through intermediate SVs and actually reaches a real measured/status
+    // element — previously capped at one hop, which stopped right at the first upstream SV
+    // instead of continuing back to an actual sensor/contact/measuring device. The walk still
+    // naturally stops on its own once a hop discovers nothing new (a genuine leaf), so this cap
+    // is a safety ceiling, not a target depth. Forward stays in SCOPED mode so each hop only
+    // pulls in the specific AND-group it actually connects through (e.g. "52A" alongside SV06 in
+    // TR's "SV06 AND 52A") rather than that consumer's entire other, unrelated logic — which is
+    // what made these charts balloon into showing nearly every SV in the settings.
+    const graph = buildLocalLogicGraph(PARSED, label, tripFocus ? 25 : 20, tripFocus ? 25 : 14, !tripFocus);
     html += renderLocalLogicGraph(graph, PARSED, tripFocus);
   }
   bodyEl.innerHTML = html;
@@ -9611,6 +9699,7 @@ function showBitDetail(label) {
   // Initialize the timeline's time readout to its starting (trip-moment) position.
   const scrubber = document.querySelector('.llgScrubber');
   if (scrubber) updateLlgTimeReadout(parseInt(scrubber.value, 10));
+  updateLlgMarkerPositions();
 }
 function hideBitDetail() {
   if (typeof stopLogicChartPlay === 'function') stopLogicChartPlay();
