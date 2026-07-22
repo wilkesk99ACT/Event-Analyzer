@@ -452,6 +452,25 @@ body.dragging-file #drop-overlay { display: flex; }
   color: var(--red);
   font-weight: 700;
 }
+.logic-final-box.final-off {
+  border-color: var(--card-border);
+  background: var(--bg2);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.logic-timer-box {
+  border-style: dashed;
+}
+.logic-timer-label {
+  position: absolute;
+  font-size: 9px;
+  font-family: var(--mono);
+  color: var(--yellow);
+  white-space: nowrap;
+  background: var(--card);
+  padding: 0 3px;
+  border-radius: 3px;
+}
 .logic-group-label {
   position: absolute;
   font-size: 9px;
@@ -498,11 +517,14 @@ body.dragging-file #drop-overlay { display: flex; }
 /* Deliberately simple, unified color scheme — red = asserted (whether it's a raw measured/
    status bit or an internal SV logic variable; the earlier version colored those two cases
    differently, which read as more meaningful than it was), muted default = not asserted /
-   unknown, and the final trip/close/ER bit always reads red regardless of state (.llg-terminal),
-   matching the main diagram's final-command box. The clicked bit gets an accent ring layered on
-   top, independent of its true/false color, so both are visible at once. */
+   unknown. The final trip/close/ER bit gets a bolder outline (.llg-terminal) to mark it as the
+   destination of the diagram, but its color still follows real state like every other box —
+   it previously stayed red unconditionally, which made it look permanently tripped even before
+   the trip actually occurred. The clicked bit gets an accent ring layered on top, independent
+   of its true/false color, so both are visible at once. */
 .llg-box.llg-true { border-color: var(--red); background: var(--red-dim); color: var(--red); font-weight: 600; }
-.llg-box.llg-terminal { border-color: var(--red); color: var(--red); font-weight: 700; background: var(--red-dim); }
+.llg-box.llg-terminal { font-weight: 700; }
+.llg-box.llg-terminal.llg-true { border-color: var(--red); color: var(--red); background: var(--red-dim); }
 .llg-box.llg-center { box-shadow: 0 0 0 2px var(--accent); }
 /* The custom dark ::after tooltip (see .has-tip above) is absolutely positioned relative to
    the hovered span and gets clipped by .llg-wrap's horizontal-scroll overflow — including
@@ -733,7 +755,19 @@ body.dragging-file #drop-overlay { display: flex; }
 }
 
 /* ── Timeline ── */
+.timeline-scroll {
+  max-height: 520px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 6px;
+  scroll-behavior: smooth;
+}
 .timeline { position: relative; padding-left: 28px; }
+.tl-event.tl-cursor-active {
+  background: var(--accent-dim);
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px var(--accent);
+}
 .timeline::before {
   content: '';
   position: absolute;
@@ -2276,15 +2310,24 @@ function analyzeCEV(P, prevEvent) {
     if (!node || depth > 14) return { op: 'VAR', name: node ? '(too deep)' : '?', value: false };
     switch (node.op) {
       case 'VAR': {
-        const svm = node.name.match(/^SV(\d+)T?$/);
+        const svm = node.name.match(/^SV(\d+)(T)?$/);
         if (svm) {
           const num = parseInt(svm[1]);
+          const isTimedRef = !!svm[2];
           if (!visited.has(num)) {
             const info = svEquationInfo(num);
             if (info) {
               const nextVisited = new Set(visited); nextVisited.add(num);
               const child = bakeFullLogicTree(info.ast, isAsserted, nextVisited, depth + 1);
-              return { op: 'SVNODE', label: info.label, comment: info.comment, value: !!isAsserted(node.name), child, refName: node.name };
+              const bareSvNode = { op: 'SVNODE', label: info.label, comment: info.comment, value: !!isAsserted(info.label), child, refName: info.label };
+              // When the reference is the TIMED form (SVxxT) and this SV actually has a pickup
+              // delay configured, the timer is a real hop of its own — SVxx and SVxxT can read
+              // differently for up to that whole delay — so show it as a distinct node rather
+              // than silently treating the two as the same point (which hid the timer entirely).
+              if (isTimedRef && info.pickupDelay > 0) {
+                return { op: 'TIMERNODE', label: info.label + 'T', pickupDelay: info.pickupDelay, value: !!isAsserted(node.name), child: bareSvNode, refName: node.name };
+              }
+              return Object.assign({}, bareSvNode, { value: !!isAsserted(node.name), refName: node.name });
             }
           }
         }
@@ -2329,7 +2372,7 @@ function analyzeCEV(P, prevEvent) {
     if (!node) return node;
     switch (node.op) {
       case 'VAR': return node;
-      case 'SVNODE': return Object.assign({}, node, { child: pruneLogicTree(node.child) });
+      case 'SVNODE': case 'TIMERNODE': return Object.assign({}, node, { child: pruneLogicTree(node.child) });
       case 'NOT': case 'REDGE': case 'FEDGE':
         return Object.assign({}, node, { child: pruneLogicTree(node.child) });
       case 'AND': case 'OR': {
@@ -3903,7 +3946,7 @@ function badge(asserted, label) {
 // groups converge rightward through brace+line connectors (no box of their own — only real
 // signals get boxes), continuing through any nested SV logic, and terminating in the final
 // trip box on the right. This replaces the old stack of disconnected per-step cards.
-const LOGIC_COL_W = 190, LOGIC_ROW_H = 40, LOGIC_BOX_W = 152, LOGIC_BOX_H = 28, LOGIC_MARGIN = 18;
+let LOGIC_COL_W = 190, LOGIC_ROW_H = 40, LOGIC_BOX_W = 152, LOGIC_BOX_H = 28, LOGIC_MARGIN = 18;
 
 // Strip NOT/R_TRIG/F_TRIG wrapper nodes out of the tree shape entirely, folding them into a
 // `.modifiers` label list attached to the real node underneath (VAR/SVNODE/AND/OR). This keeps
@@ -3920,7 +3963,7 @@ function unwrapLogicModifiers(node) {
   const result = Object.assign({}, n, { value: node.value, modifiers: mods });
   if (result.op === 'AND' || result.op === 'OR') {
     result.children = result.children.map(unwrapLogicModifiers);
-  } else if (result.op === 'SVNODE') {
+  } else if (result.op === 'SVNODE' || result.op === 'TIMERNODE') {
     result.child = unwrapLogicModifiers(result.child);
   }
   return result;
@@ -3934,7 +3977,7 @@ function logicCollectFlat(node, op) {
 function logicAssignDepth(node, depth, maxRef) {
   node.depth = depth;
   maxRef.v = Math.max(maxRef.v, depth);
-  if (node.op === 'SVNODE') { logicAssignDepth(node.child, depth + 1, maxRef); return; }
+  if (node.op === 'SVNODE' || node.op === 'TIMERNODE') { logicAssignDepth(node.child, depth + 1, maxRef); return; }
   if (node.op === 'AND' || node.op === 'OR') {
     const flat = logicCollectFlat(node, node.op);
     node._flat = flat;
@@ -3944,7 +3987,7 @@ function logicAssignDepth(node, depth, maxRef) {
 
 function logicAssignRows(node, counter) {
   if (node.op === 'VAR') { node.row = counter.v++; return; }
-  if (node.op === 'SVNODE') { logicAssignRows(node.child, counter); node.row = node.child.row; return; }
+  if (node.op === 'SVNODE' || node.op === 'TIMERNODE') { logicAssignRows(node.child, counter); node.row = node.child.row; return; }
   if (node.op === 'AND' || node.op === 'OR') {
     const flat = node._flat || logicCollectFlat(node, node.op);
     flat.forEach(c => logicAssignRows(c, counter));
@@ -3973,6 +4016,12 @@ function reEvaluateLogicTree(node) {
       // actually checked when this tree was first baked — added specifically so re-evaluation
       // later queries the SAME bit, not a guessed variant. Older trees baked before this field
       // existed fall back to the bare label, which is usually — but not always — the right bit.
+      const checkName = node.refName || node.label;
+      const st = currentBitState(checkName);
+      return Object.assign({}, node, { value: !!(st && st.state), child });
+    }
+    case 'TIMERNODE': {
+      const child = reEvaluateLogicTree(node.child);
       const checkName = node.refName || node.label;
       const st = currentBitState(checkName);
       return Object.assign({}, node, { value: !!(st && st.state), child });
@@ -4012,12 +4061,28 @@ function buildLogicTreeSection(P, A) {
   const finalX = xOf(-1), finalY = yOf(root.row);
 
   let boxesHTML = '', linesHTML = '';
-  const trueColor = 'var(--green)', falseColor = 'var(--card-border)';
+  const trueColor = 'var(--green)', falseColor = 'var(--text-muted)';
 
   function modifierBadge(node, x, y) {
     if (!node.modifiers || !node.modifiers.length) return '';
     return `<div class="logic-modifier-badge" style="left:${x}px;top:${y - 15}px;">${node.modifiers.join(' · ')}</div>`;
   }
+
+  // Matches the tooltip logic chart's own convention for a NOT/R_TRIG/F_TRIG connection: the
+  // LINE itself goes dashed (a longer dash for a plain NOT, a tighter dotted pattern for an
+  // edge-triggered condition — see LLG_NOT_DASH/LLG_TRIG_DASH), colored red when the condition
+  // is actually contributing to a true result right now and muted when it isn't. An unmodified
+  // connection keeps this diagram's own existing green/false-color scheme untouched.
+  function edgeStyleFor(node) {
+    const mods = node && node.modifiers;
+    if (mods && mods.length) {
+      const dash = mods.some(m => /TRIG/.test(m)) ? LLG_TRIG_DASH : LLG_NOT_DASH;
+      const color = node.value ? 'var(--red)' : 'var(--text-muted)';
+      return { color, dash };
+    }
+    return { color: node && node.value ? trueColor : falseColor, dash: '' };
+  }
+  const dashAttr = d => d ? ` stroke-dasharray="${d}"` : '';
 
   function renderNode(node) {
     const x = xOf(node.depth), y = yOf(node.row);
@@ -4030,9 +4095,26 @@ function buildLogicTreeSection(P, A) {
       if (!isMultiPortAnd(node.child)) {
         const cx = xOf(node.child.depth) + LOGIC_BOX_W, cy = yOf(node.child.row) + LOGIC_BOX_H / 2;
         const ny = y + LOGIC_BOX_H / 2;
-        linesHTML += `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${ny}" stroke="${node.child.value ? trueColor : falseColor}" stroke-width="1.5"/>`;
+        const es = edgeStyleFor(node.child);
+        linesHTML += `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${ny}" stroke="${es.color}" stroke-width="1.5"${dashAttr(es.dash)}/>`;
       }
       boxesHTML += `<div class="logic-box logic-sv-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${prefix}${tt(node.label, P)}</div>`;
+      renderNode(node.child);
+      return;
+    }
+    if (node.op === 'TIMERNODE') {
+      // A genuine pickup timer between an SV's own combinational result and its downstream
+      // timed reference — drawn as its own hop (dashed connector + delay readout) rather than
+      // silently folding SVxx and SVxxT into a single point, so the timer is visible on the
+      // diagram exactly where it sits in the real logic.
+      const cx = xOf(node.child.depth) + LOGIC_BOX_W, cy = yOf(node.child.row) + LOGIC_BOX_H / 2;
+      const ny = y + LOGIC_BOX_H / 2;
+      linesHTML += `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${ny}" stroke="${node.value ? trueColor : falseColor}" stroke-width="1.5" stroke-dasharray="2,3"/>`;
+      const freqForDelay = (typeof PARSED !== 'undefined' && PARSED?.eventInfo?.freq) || 60;
+      const delayMs = Math.round((node.pickupDelay / freqForDelay) * 1000);
+      const midX = (cx + x) / 2 - 16;
+      boxesHTML += `<div class="logic-timer-label" style="left:${midX}px;top:${ny - 16}px;" title="Pickup delay: ${node.pickupDelay} cyc (${delayMs} ms)">⏱ ${delayMs}ms</div>`;
+      boxesHTML += `<div class="logic-box logic-sv-box logic-timer-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${prefix}${tt(node.label, P)}</div>`;
       renderNode(node.child);
       return;
     }
@@ -4067,10 +4149,10 @@ function buildLogicTreeSection(P, A) {
         flat.forEach((c, i) => {
           const cy = yOf(c.row) + LOGIC_BOX_H / 2;
           const py = portYs[i];
-          const color = c.value ? trueColor : falseColor;
-          linesHTML += `<line x1="${xOf(c.depth) + LOGIC_BOX_W}" y1="${cy}" x2="${bracketX}" y2="${cy}" stroke="${color}" stroke-width="1.5"/>`;
-          linesHTML += `<line x1="${bracketX}" y1="${cy}" x2="${bracketX}" y2="${py}" stroke="${color}" stroke-width="1.5"/>`;
-          linesHTML += `<line x1="${bracketX}" y1="${py}" x2="${consumerX}" y2="${py}" stroke="${color}" stroke-width="1.5"/>`;
+          const es = edgeStyleFor(c);
+          linesHTML += `<line x1="${xOf(c.depth) + LOGIC_BOX_W}" y1="${cy}" x2="${bracketX}" y2="${cy}" stroke="${es.color}" stroke-width="1.5"${dashAttr(es.dash)}/>`;
+          linesHTML += `<line x1="${bracketX}" y1="${cy}" x2="${bracketX}" y2="${py}" stroke="${es.color}" stroke-width="1.5"${dashAttr(es.dash)}/>`;
+          linesHTML += `<line x1="${bracketX}" y1="${py}" x2="${consumerX}" y2="${py}" stroke="${es.color}" stroke-width="1.5"${dashAttr(es.dash)}/>`;
         });
         const topY = Math.min(...portYs), botY = Math.max(...portYs);
         linesHTML += `<line x1="${crossX}" y1="${topY}" x2="${crossX}" y2="${botY}" stroke="${node.value ? trueColor : falseColor}" stroke-width="1.5"/>`;
@@ -4082,7 +4164,8 @@ function buildLogicTreeSection(P, A) {
         const topY = Math.min(...ys), botY = Math.max(...ys);
         flat.forEach(c => {
           const cy = yOf(c.row) + LOGIC_BOX_H / 2;
-          linesHTML += `<line x1="${xOf(c.depth) + LOGIC_BOX_W}" y1="${cy}" x2="${bracketX}" y2="${cy}" stroke="${c.value ? trueColor : falseColor}" stroke-width="1.5"/>`;
+          const es = edgeStyleFor(c);
+          linesHTML += `<line x1="${xOf(c.depth) + LOGIC_BOX_W}" y1="${cy}" x2="${bracketX}" y2="${cy}" stroke="${es.color}" stroke-width="1.5"${dashAttr(es.dash)}/>`;
         });
         linesHTML += `<line x1="${bracketX}" y1="${outY}" x2="${outX}" y2="${outY}" stroke="${node.value ? trueColor : falseColor}" stroke-width="1.5"/>`;
         if (flat.length > 1) linesHTML += `<line x1="${bracketX}" y1="${topY}" x2="${bracketX}" y2="${botY}" stroke="${node.value ? trueColor : falseColor}" stroke-width="1.5"/>`;
@@ -4107,16 +4190,21 @@ function buildLogicTreeSection(P, A) {
   // position itself (see isAndGroup above); drawing this single connector too would duplicate it.
   if (!isMultiPortAnd(root)) {
     const rootOutX = xOf(root.depth) + LOGIC_BOX_W, rootOutY = yOf(root.row) + LOGIC_BOX_H / 2;
-    linesHTML += `<line x1="${rootOutX}" y1="${rootOutY}" x2="${finalX}" y2="${finalY + LOGIC_BOX_H / 2}" stroke="${trueColor}" stroke-width="2"/>`;
+    const rootEs = edgeStyleFor(root);
+    linesHTML += `<line x1="${rootOutX}" y1="${rootOutY}" x2="${finalX}" y2="${finalY + LOGIC_BOX_H / 2}" stroke="${rootEs.color}" stroke-width="2"${dashAttr(rootEs.dash)}/>`;
   }
-  boxesHTML += `<div class="logic-box logic-final-box" style="left:${finalX}px;top:${finalY}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${tt(A.tripCause.finalLabel || 'TRIP', P)}</div>`;
+  // The terminal TRIP/TR3P/etc. box must reflect whether it's ACTUALLY asserted at the instant
+  // being shown (root.value, refreshed on every frame by reEvaluateLogicTree) — previously this
+  // box's own CSS class was unconditionally styled red/"asserted", so it looked permanently
+  // tripped no matter what point in the event playback was selected.
+  boxesHTML += `<div class="logic-box logic-final-box${root.value ? '' : ' final-off'}" style="left:${finalX}px;top:${finalY}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${tt(A.tripCause.finalLabel || 'TRIP', P)}</div>`;
 
   const otherCount = A.tripCause.logicTreeOtherBranchCount || 0;
   const totalW = finalX + LOGIC_BOX_W + LOGIC_MARGIN;
   // Compute actual height from the max row assigned across the tree (rows are set during
   // logicAssignRows; internal AND/OR nodes get the AVERAGE of their children, which can be
   // fractional and less than a deep child's row, so walk the tree for the true max).
-  const maxRowSeen = Math.max(root.row, (function findMaxRow(n){ if(n.op==='VAR') return n.row; if(n.op==='SVNODE') return Math.max(n.row, findMaxRow(n.child)); if(n.op==='AND'||n.op==='OR') return Math.max(n.row, ...n._flat.map(findMaxRow)); return n.row; })(root));
+  const maxRowSeen = Math.max(root.row, (function findMaxRow(n){ if(n.op==='VAR') return n.row; if(n.op==='SVNODE'||n.op==='TIMERNODE') return Math.max(n.row, findMaxRow(n.child)); if(n.op==='AND'||n.op==='OR') return Math.max(n.row, ...n._flat.map(findMaxRow)); return n.row; })(root));
   const totalHeight = yOf(maxRowSeen) + LOGIC_BOX_H + LOGIC_MARGIN + 16;
 
   return `
@@ -5135,6 +5223,37 @@ function setCursorAll(idxFull) {
   syncLogicChartToCursor(idxFull);
   // Animate the main-page logic tree to the same instant as the four waveform/flag charts.
   redrawMainLogicTree();
+  // Keep the Digital Event Timeline's own scroll position following the cursor too, whether or
+  // not that tab happens to be the active one right now (see the tab-click handler in
+  // renderTabs, which re-syncs it again on activation just in case the browser didn't retain
+  // scrollTop while the panel was hidden).
+  scrollTimelineToCursor(idxFull);
+}
+
+// Finds the digital-transition row (by its own index into PARSED.digitalTransitions /
+// A.digitalTimeline, which line up 1:1) whose state is in effect at `analogIdx` — the last
+// transition at or before it — mirroring analogIdxToDigitalIdx's own "last one at or before"
+// rule so the two stay consistent.
+function findTimelineEventIdxForAnalogIdx(analogIdx) {
+  const trans = (PARSED && PARSED.digitalTransitions) || [];
+  let best = -1;
+  for (let i = 0; i < trans.length; i++) {
+    if (trans[i].analogSampleIdx <= analogIdx) best = i; else break;
+  }
+  return best;
+}
+// Scrolls the Digital Event Timeline panel (its own independent scrollbar — see #timelineScroll
+// in the CSS) so the row matching the cursor's current instant is centered and highlighted.
+function scrollTimelineToCursor(analogIdx) {
+  const container = document.getElementById('timelineScroll');
+  if (!container || analogIdx == null) return;
+  const idx = findTimelineEventIdxForAnalogIdx(analogIdx);
+  const target = container.querySelector(`.tl-event[data-tl-idx="${idx}"]`);
+  container.querySelectorAll('.tl-cursor-active').forEach(el => el.classList.remove('tl-cursor-active'));
+  if (!target) return;
+  target.classList.add('tl-cursor-active');
+  const targetTop = target.offsetTop - container.clientHeight / 2 + target.clientHeight / 2;
+  container.scrollTop = Math.max(0, targetTop);
 }
 function syncMainScrubber(idxFull) {
   const s = document.querySelector('.mainScrubber');
@@ -5335,33 +5454,91 @@ function mainTimeLabelStatic(analogIdx, P, A) {
 // current A/B window (or the whole record if no window is set) and saves an animated GIF — the
 // main-page equivalent of the logic chart's GIF export, same encoder, same "one frame per
 // change" and ~1.4s-per-frame pacing.
+// Strips characters that are illegal (or awkward) in a downloaded filename on any common OS.
+function sanitizeFilenamePart(s) {
+  return String(s == null ? '' : s).replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
+}
+// Builds a descriptive filename for an exported GIF/PNG from the event's own metadata — site
+// (RID), device (TID, falling back to the relay model), date/time of the record, event number,
+// and whatever flag/trip is the focus of this particular export — rather than a generic fixed
+// name, so a folder of downloads is actually distinguishable at a glance.
+function buildExportFilename(P, A, selectedLabel, kind, ext) {
+  const pad2 = n => String(n).padStart(2, '0');
+  const site = P?.settings?.RID?.trim() || '';
+  const device = P?.settings?.TID?.trim() || P?.device || '';
+  const ts = P?.timestamp || {};
+  const dateStr = ts.year != null ? `${pad2(ts.month)}-${pad2(ts.day)}-${ts.year}` : '';
+  const timeStr = ts.hour != null ? `${pad2(ts.hour)}${pad2(ts.min)}${pad2(ts.sec)}` : '';
+  const evtNum = A?.eventInfo?.refNum || P?.eventInfo?.refNum || '';
+  const baseParts = [site, device, dateStr, timeStr, evtNum ? `Event ${evtNum}` : '']
+    .map(sanitizeFilenamePart).filter(Boolean);
+  const flag = sanitizeFilenamePart(selectedLabel);
+  const suffix = [flag, kind].filter(Boolean).join(' ');
+  const base = baseParts.join(' - ');
+  const full = suffix ? (base ? `${base} - ${suffix}` : suffix) : (base || 'CEV_Export');
+  return `${full}.${ext}`;
+}
+
+// Fixed, viewport-INDEPENDENT sizing for the exported composite — deliberately never derived
+// from the live page's own (window-width-dependent) BANNER_CHART_WIDTH, which is what let an
+// ultrawide monitor (or really any window width other than whatever the code happened to be
+// tuned at) push the four-chart row to a wildly different, sometimes enormous, total width from
+// one export to the next. Using a constant here is what makes "constant size and resolution"
+// actually true regardless of the viewer's own screen.
+const GIF_CHART_WIDTH = 460;      // per-mini-chart width used ONLY for this export composite
+const GIF_CHART_HEIGHT = 260;     // taller than the live banner's 190px — the export has the room to spare
+const GIF_TREE_SCALE = 1.4;       // enlarge the logic tree relative to its normal on-page size
 async function downloadMainGIF() {
   if (!PARSED || !ANALYSIS) return;
   const trans = PARSED.digitalTransitions || [];
   if (!trans.length) return;
   const savedCursor = CURSOR_IDX;
   const savedViewIdx = LLG_VIEW_SAMPLE_IDX;
+  const savedBannerWidth = BANNER_CHART_WIDTH;
+  const savedZoom = { current: CHART_ZOOM.current, voltage: CHART_ZOOM.voltage, relevant: CHART_ZOOM.relevant, svflags: CHART_ZOOM.svflags };
+  const savedLogicColW = LOGIC_COL_W, savedLogicRowH = LOGIC_ROW_H, savedLogicBoxW = LOGIC_BOX_W, savedLogicBoxH = LOGIC_BOX_H, savedLogicMargin = LOGIC_MARGIN;
   stopMainPlay();
   const btns = document.querySelectorAll('.mainGifBtn');
   const origLabel = 'GIF';
   try {
     btns.forEach(b => { b.textContent = '…'; b.disabled = true; });
+    // Use a fixed chart width for the DURATION of this export only — every mini chart this
+    // builds while it's set reads BANNER_CHART_WIDTH internally, so this single override is what
+    // decouples the exported media's size from whatever width the live page happens to be at.
+    BANNER_CHART_WIDTH = GIF_CHART_WIDTH;
+    // Scale the logic-tree diagram's own native layout constants up for this export (rather than
+    // a CSS transform on the rendered card): the tree's connecting lines are plain SVG <line>
+    // elements with hardcoded numeric coordinates, walked and drawn onto the export canvas by
+    // reading those raw attribute values — a CSS transform scales the boxes (whose position is
+    // read live via getBoundingClientRect) but NOT those raw coordinates, so the two drifted
+    // apart and most edges ended up drawn in the wrong place. Enlarging the actual constants the
+    // tree is built from keeps every box and every line consistent at the bigger size.
+    LOGIC_COL_W = Math.round(savedLogicColW * GIF_TREE_SCALE);
+    LOGIC_ROW_H = Math.round(savedLogicRowH * GIF_TREE_SCALE);
+    LOGIC_BOX_W = Math.round(savedLogicBoxW * GIF_TREE_SCALE);
+    LOGIC_BOX_H = Math.round(savedLogicBoxH * GIF_TREE_SCALE);
+    LOGIC_MARGIN = Math.round(savedLogicMargin * GIF_TREE_SCALE);
 
     const totalLen = PARSED.analogData.length;
     const loA = PLAY_MARK_A != null ? PLAY_MARK_A : 0;
     const loB = PLAY_MARK_B != null ? PLAY_MARK_B : totalLen - 1;
     const start = Math.min(loA, loB), end = Math.max(loA, loB);
+    // Crop every mini chart to exactly the A/B playback window (or the whole record if no
+    // window is set) instead of always showing the full record with the window merely marked —
+    // matches what's actually being played/exported, and gives the visible portion much more of
+    // the chart's own width to work with.
+    const gifZoomRange = (PLAY_MARK_A != null || PLAY_MARK_B != null) ? { start, end } : null;
+    CHART_ZOOM.current = gifZoomRange; CHART_ZOOM.voltage = gifZoomRange;
+    CHART_ZOOM.relevant = gifZoomRange; CHART_ZOOM.svflags = gifZoomRange;
     let frameIdxs = [start, ...trans.map(t => t.analogSampleIdx).filter(a => a >= start && a <= end), end];
     frameIdxs = [...new Set(frameIdxs)].sort((a, b) => a - b);
     const samplesPerCycleForGif = PARSED.eventInfo?.samPerCycA || 32;
     const msPerSampleForGif = 1000 / ((PARSED.eventInfo?.freq || 60) * samplesPerCycleForGif);
 
-    // Build one off-screen container: a time-indicator header, the logic tree prominent at full
-    // width beneath it, then the four waveform/flag charts scaled down into a single row of
-    // columns at the bottom — reused across frames, only the cursor/view-time (hence each
-    // frame's colors/dot-readouts and the time label) changes.
-    const liveWrap = document.querySelector('.trip-banner-charts');
-    if (!liveWrap) throw new Error('no charts to capture');
+    // Build one off-screen container: a time-indicator header, the logic tree — enlarged — at
+    // full width beneath it, then the four waveform/flag charts in a row at the bottom — reused
+    // across frames, only the cursor/view-time (hence each frame's colors/dot-readouts and the
+    // time label) changes.
     const hasLogicTree = !!(ANALYSIS.tripCause && ANALYSIS.tripCause.logicTree);
     const probe = document.createElement('div');
     probe.style.position = 'fixed';
@@ -5390,15 +5567,27 @@ async function downloadMainGIF() {
     chartsRow.style.alignItems = 'flex-start';
     probe.appendChild(chartsRow);
 
-    // Each mini chart renders at its normal (wide) banner size, then gets scaled down and
-    // wrapped in a container sized to match the SCALED footprint exactly, so the flex row lays
-    // them out by their true visual size — both width AND height — rather than the unscaled
-    // layout size a CSS transform leaves behind in normal flow. Only the title + the actual
-    // chart-svg-slot are kept for this composite — everything else (the SV Flags chart's own
-    // lengthy descriptive legend, in particular) is dropped by rebuilding a fresh minimal card
-    // rather than trying to selectively remove an unwanted element, which is what silently
-    // failed to keep it out before.
-    const CHART_SCALE = 1;
+    // The logic tree card — built directly at its (now enlarged) native size, no CSS transform
+    // involved at all.
+    function plainTreeCard(treeHtml) {
+      treeSlot.innerHTML = '';
+      const card = document.createElement('div');
+      card.style.background = resolveCssColor('var(--card)') || '#0c1220';
+      card.style.border = '1px solid ' + (resolveCssColor('var(--card-border)') || '#1c2434');
+      card.style.borderRadius = '8px';
+      card.style.padding = '10px';
+      card.innerHTML = treeHtml;
+      treeSlot.appendChild(card);
+    }
+
+    // Each mini chart renders at the fixed GIF_CHART_WIDTH set above (and, for the three
+    // waveform charts, a taller GIF_CHART_HEIGHT — there's ample vertical room to spare in this
+    // composite that the live banner doesn't have), then gets wrapped in a container sized to
+    // match its true footprint exactly, so the flex row lays them out by their real visual size.
+    // Only the title + the actual chart-svg-slot are kept for this composite — everything else
+    // (the SV Flags chart's own lengthy descriptive legend, in particular) is dropped by
+    // rebuilding a fresh minimal card rather than trying to selectively remove an unwanted
+    // element.
     function scaledChartCard(html) {
       const inner = document.createElement('div');
       inner.innerHTML = html;
@@ -5418,22 +5607,25 @@ async function downloadMainGIF() {
       card.appendChild(slot);
       const wrapper = document.createElement('div');
       wrapper.style.flex = '0 0 auto';
-      card.style.width = BANNER_CHART_WIDTH + 'px';
-      card.style.transform = `scale(${CHART_SCALE})`;
-      card.style.transformOrigin = 'top left';
+      card.style.width = GIF_CHART_WIDTH + 'px';
       wrapper.appendChild(card);
-      chartsRow.appendChild(wrapper); // attach FIRST so getBoundingClientRect reflects the true post-transform size
+      chartsRow.appendChild(wrapper); // attach FIRST so getBoundingClientRect reflects the true size
       const cardRect = card.getBoundingClientRect();
-      // Width only — the scaled visual width has been reliable. Height is deliberately left to
-      // auto-size (no clipping, no explicit override): a CSS transform doesn't shrink the space
-      // an element reserves in normal layout flow, and repeatedly trying to measure/override that
-      // exact post-transform height has been the recurring source of charts getting cut off.
-      // Auto height guarantees the full chart is always captured, even if it leaves some harmless
-      // extra space below a shorter chart.
       wrapper.style.width = Math.ceil(cardRect.width) + 'px';
+      wrapper.style.height = Math.ceil(cardRect.height) + 'px';
     }
 
     const frames = [];
+    // Canvas size is locked ONCE, from the first frame's measured content, then reused for
+    // EVERY frame — this is what actually fixes the cut-off/corrupted bottoms: previously this
+    // was recomputed every iteration but only the LAST frame's size was ever passed to
+    // encodeGIF, so any earlier frame captured at a smaller size got its pixel buffer
+    // reinterpreted at the wrong (larger) width/height, shearing/blacking out its bottom rows.
+    // Locking it up front — with a comfortable safety pad — also directly delivers the
+    // requested "constant size/resolution" output, independent of the browser window at capture
+    // time.
+    const EXPORT_SCALE = 1.3;
+    const SIZE_SAFETY_PAD = 40; // extra px (pre-scale) so a slightly taller/wider later frame never clips
     let W = 0, H = 0;
     try {
       for (let fi = 0; fi < frameIdxs.length; fi++) {
@@ -5443,42 +5635,36 @@ async function downloadMainGIF() {
         if (dIdx != null) setLogicChartViewIdx(dIdx);
         timeHeader.textContent = mainTimeLabel(idx);
         chartsRow.innerHTML = '';
-        treeSlot.innerHTML = '';
-        // Logic tree, re-evaluated at this frame's instant — full size, first, most prominent.
+        // Logic tree, re-evaluated at this frame's instant — enlarged, first, most prominent.
         if (hasLogicTree) {
           const freshTree = reEvaluateLogicTree(ANALYSIS.tripCause.logicTree);
           const patchedCause = Object.assign({}, ANALYSIS.tripCause, { logicTree: freshTree });
           const patchedAnalysis = Object.assign({}, ANALYSIS, { tripCause: patchedCause });
           const treeHtml = buildLogicTreeSection(PARSED, patchedAnalysis);
-          if (treeHtml) {
-            const card = document.createElement('div');
-            card.style.background = resolveCssColor('var(--card)') || '#0c1220';
-            card.style.border = '1px solid ' + (resolveCssColor('var(--card-border)') || '#1c2434');
-            card.style.borderRadius = '8px';
-            card.style.padding = '10px';
-            card.innerHTML = treeHtml;
-            treeSlot.appendChild(card);
-          }
+          if (treeHtml) plainTreeCard(treeHtml); else treeSlot.innerHTML = '';
+        } else {
+          treeSlot.innerHTML = '';
         }
         // The four waveform/flag charts, rebuilt fresh (compact) so their cursor/marker overlays
-        // reflect this frame's idx, scaled down into one row underneath the tree.
-        [buildCurrentMagChart, buildVoltageMagChart, buildRelevantQuantityChart, buildSVFlagsChart].forEach(fn => {
-          const html = fn(PARSED, ANALYSIS, true);
-          if (!html) return;
-          scaledChartCard(html);
-        });
+        // reflect this frame's idx, laid out in one fixed-width row underneath the tree.
+        scaledChartCard(buildCurrentMagChart(PARSED, ANALYSIS, true, GIF_CHART_HEIGHT));
+        scaledChartCard(buildVoltageMagChart(PARSED, ANALYSIS, true, GIF_CHART_HEIGHT));
+        const relevantHtml = buildRelevantQuantityChart(PARSED, ANALYSIS, true, GIF_CHART_HEIGHT);
+        if (relevantHtml) scaledChartCard(relevantHtml);
+        const svflagsHtml = buildSVFlagsChart(PARSED, ANALYSIS, true);
+        if (svflagsHtml) scaledChartCard(svflagsHtml);
         await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
         const rect = probe.getBoundingClientRect();
-        const scale = 1.3;
-        const safetyPad = 5; // extra bottom margin so nothing right at the edge gets clipped
-        W = Math.max(1, Math.ceil(rect.width * scale));
-        H = Math.max(1, Math.ceil((rect.height + safetyPad) * scale));
+        if (fi === 0) {
+          W = Math.max(1, Math.ceil((rect.width + SIZE_SAFETY_PAD) * EXPORT_SCALE));
+          H = Math.max(1, Math.ceil((rect.height + SIZE_SAFETY_PAD) * EXPORT_SCALE));
+        }
         const canvas = document.createElement('canvas');
         canvas.width = W; canvas.height = H;
         const ctx = canvas.getContext('2d');
-        ctx.scale(scale, scale);
+        ctx.scale(EXPORT_SCALE, EXPORT_SCALE);
         ctx.fillStyle = resolveCssColor('var(--bg)') || '#06090f';
-        ctx.fillRect(0, 0, rect.width, rect.height + safetyPad);
+        ctx.fillRect(0, 0, W / EXPORT_SCALE, H / EXPORT_SCALE);
         llgRenderDomToCanvas(probe, ctx, rect);
         const nextIdx = frameIdxs[fi + 1];
         const elapsedMs = nextIdx != null ? (nextIdx - idx) * msPerSampleForGif : 400;
@@ -5494,12 +5680,18 @@ async function downloadMainGIF() {
     const blob = new Blob([gifBytes], { type: 'image/gif' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'event_playback.gif';
+    const selectedLabel = ANALYSIS?.tripCause?.finalLabel || ANALYSIS?.tripCause?.sourceEquationName || PARSED?.tripEquationName || 'TRIP';
+    a.download = buildExportFilename(PARSED, ANALYSIS, selectedLabel, 'Event Playback', 'gif');
     document.body.appendChild(a); a.click(); a.remove();
   } catch (err) {
     console.error('Main GIF export failed:', err);
     alert('Could not generate the GIF in this browser. The play button and scrubber still work for stepping through the event.');
   } finally {
+    BANNER_CHART_WIDTH = savedBannerWidth;
+    CHART_ZOOM.current = savedZoom.current; CHART_ZOOM.voltage = savedZoom.voltage;
+    CHART_ZOOM.relevant = savedZoom.relevant; CHART_ZOOM.svflags = savedZoom.svflags;
+    LOGIC_COL_W = savedLogicColW; LOGIC_ROW_H = savedLogicRowH; LOGIC_BOX_W = savedLogicBoxW;
+    LOGIC_BOX_H = savedLogicBoxH; LOGIC_MARGIN = savedLogicMargin;
     CURSOR_IDX = savedCursor;
     setLogicChartViewIdx(savedViewIdx);
     ZOOM_KINDS.forEach(k => rerenderZoomChart(k));
@@ -5655,7 +5847,7 @@ function sliceChartWindow(kind, fullTraces, tripIdxFull, triggerIdxFull, msPerSa
   return { slicedTraces, tripIdx, triggerIdx, cursorIdx, markAIdx, markBIdx, xOffsetMs: startIdx * msPerSample };
 }
 
-function buildCurrentMagChart(P, A, compact) {
+function buildCurrentMagChart(P, A, compact, heightOverride) {
   const data = P.analogData || [];
   if (!data.length) return '';
   const samplesPerCycle = P.eventInfo.samPerCycA || 32;
@@ -5678,7 +5870,7 @@ function buildCurrentMagChart(P, A, compact) {
   if (compact) {
     const { slicedTraces, tripIdx, triggerIdx, cursorIdx, markAIdx, markBIdx, xOffsetMs } = sliceChartWindow('current', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.current);
     const svg = renderMagnitudeChartSVG(slicedTraces, {
-      width: BANNER_CHART_WIDTH, height: 190,
+      width: BANNER_CHART_WIDTH, height: heightOverride || 190,
       marginLeft: BANNER_CHART_MARGIN_LEFT, marginRight: BANNER_CHART_MARGIN_RIGHT,
       marginTop: 12, marginBottom: 22,
       numHGrid: 4, numVGrid: 8, fontSize: 12, msPerSample, yUnit: unit,
@@ -5695,7 +5887,7 @@ function buildCurrentMagChart(P, A, compact) {
 
 // Build the voltage-magnitude chart (VAY.Mag/VBY.Mag/VCY.Mag, or VA/VB/VC — whichever
 // this file actually uses) for a parsed+analyzed event.
-function buildVoltageMagChart(P, A, compact) {
+function buildVoltageMagChart(P, A, compact, heightOverride) {
   const data = P.analogData || [];
   if (!data.length) return '';
   const samplesPerCycle = P.eventInfo.samPerCycA || 32;
@@ -5721,7 +5913,7 @@ function buildVoltageMagChart(P, A, compact) {
   if (compact) {
     const { slicedTraces, tripIdx, triggerIdx, cursorIdx, markAIdx, markBIdx, xOffsetMs } = sliceChartWindow('voltage', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.voltage);
     const svg = renderMagnitudeChartSVG(slicedTraces, {
-      width: BANNER_CHART_WIDTH, height: 190,
+      width: BANNER_CHART_WIDTH, height: heightOverride || 190,
       marginLeft: BANNER_CHART_MARGIN_LEFT, marginRight: BANNER_CHART_MARGIN_RIGHT,
       marginTop: 12, marginBottom: 22,
       numHGrid: 4, numVGrid: 8, fontSize: 12, msPerSample, yUnit: unit,
@@ -5880,7 +6072,7 @@ function renderBooleanFlagsSVG(rows, opts, P) {
 // overvoltage trip can have all three phase voltages sitting near nominal right up to
 // the trip. This panel shows whichever derived quantity actually corresponds to
 // A.tripCause.family, computed fresh from the same raw analog samples.
-function buildRelevantQuantityChart(P, A, compact) {
+function buildRelevantQuantityChart(P, A, compact, heightOverride) {
   const data = P.analogData || [];
   const family = A?.tripCause?.family;
   if (!data.length || !family) return '';
@@ -5941,7 +6133,7 @@ function buildRelevantQuantityChart(P, A, compact) {
   if (compact) {
     const { slicedTraces, tripIdx, triggerIdx, cursorIdx, markAIdx, markBIdx, xOffsetMs } = sliceChartWindow('relevant', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.relevant);
     const svg = renderMagnitudeChartSVG(slicedTraces, {
-      width: BANNER_CHART_WIDTH, height: 190,
+      width: BANNER_CHART_WIDTH, height: heightOverride || 190,
       marginLeft: BANNER_CHART_MARGIN_LEFT, marginRight: BANNER_CHART_MARGIN_RIGHT,
       marginTop: 12, marginBottom: 22,
       numHGrid: 4, numVGrid: 8, fontSize: 12, msPerSample, yUnit,
@@ -6949,6 +7141,7 @@ function renderTabs() {
       btn.classList.add('active');
       document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
       document.getElementById('panel-' + btn.dataset.tab)?.classList.add('active');
+      if (btn.dataset.tab === 'timeline' && CURSOR_IDX != null) scrollTimelineToCursor(CURSOR_IDX);
     });
   });
 }
@@ -6981,11 +7174,14 @@ function renderContent() {
         <input type="checkbox" id="timelineTripOnlyToggle" onchange="toggleTimelineTripFilter(this.checked)">
         Show only bits relevant to the trip
       </label>` : ''}
+      <div class="timeline-scroll" id="timelineScroll">
       <div class="timeline">`;
 
   // Show initial state summary — always visible regardless of the trip-relevant filter, since
   // it's orientation for the whole record rather than a candidate step to filter out.
-  html += `<div class="tl-event tl-initial">
+  // data-tl-idx="-1" marks this as the "before every transition" row, so cursor-sync scrolling
+  // can still land here when the playback position is earlier than the first recorded change.
+  html += `<div class="tl-event tl-initial" data-tl-idx="-1">
     <div class="tl-time">t = 0 ms (record start)</div>
     <div class="tl-label">Initial State</div>
     <div class="tl-desc">Key initial conditions: ${(P.initialDigitalState || []).filter(l =>
@@ -6993,11 +7189,14 @@ function renderContent() {
     ).map(l => `<span class="tl-bit assert" style="background:var(--green-dim);color:var(--green)">${tt(l,P)}</span>`).join(' ') || 'None notable'}</div>
   </div>`;
 
-  A.digitalTimeline.forEach(evt => {
+  A.digitalTimeline.forEach((evt, evtIdx) => {
     const relevantAsserts = evt.asserts.filter(l => tripRelevant.has(l));
     const relevantDeasserts = evt.deasserts.filter(l => tripRelevant.has(l));
     const rowRelevant = relevantAsserts.length || relevantDeasserts.length;
-    html += `<div class="tl-event ${evt.isTrip ? 'trip' : ''}" data-tl-relevant="${rowRelevant ? '1' : '0'}">
+    // data-tl-idx lines up 1:1 with PARSED.digitalTransitions / A.digitalTimeline's own order,
+    // so dragging the cursor in the charts above can scroll straight to the matching row here
+    // (see scrollTimelineToCursor) without re-deriving it from the displayed time text.
+    html += `<div class="tl-event ${evt.isTrip ? 'trip' : ''}" data-tl-relevant="${rowRelevant ? '1' : '0'}" data-tl-idx="${evtIdx}">
       <div class="tl-time">t = ${evt.timeMs.toFixed(1)} ms</div>
       <div class="tl-label">${evt.desc}</div>
       ${evt.asserts.length ? `<div class="tl-bits">${evt.asserts.map(l =>
@@ -7007,7 +7206,7 @@ function renderContent() {
     </div>`;
   });
 
-  html += `</div></div></div>`;
+  html += `</div></div></div></div>`;
 
 
   // ── Voltages ──
@@ -7110,13 +7309,13 @@ function renderContent() {
     const eqClean = eq.split('#')[0].trim();
     html += `<div class="sv-card in-trip">
       <div class="sv-header">
-        <span class="sv-name">${sv.label}</span>
+        <span class="sv-name">${tt(sv.label, P)}</span>
         <div class="sv-delays">
           <span class="pu">PU: ${sv.pickupDelay} cyc (${(sv.pickupDelay / (P.eventInfo.freq||60) * 1000).toFixed(1)} ms)</span>
           <span class="do">DO: ${sv.dropoutDelay} cyc</span>
         </div>
       </div>
-      <div class="sv-eq">${eqClean}${comment ? ` <span class="sv-comment"># ${comment}</span>` : ''}</div>
+      <div class="sv-eq">${linkifyEquationBits(eqClean, P)}${comment ? ` <span class="sv-comment"># ${comment}</span>` : ''}</div>
     </div>`;
   });
   html += `</div>`;
@@ -7128,13 +7327,13 @@ function renderContent() {
     const eqClean = eq.split('#')[0].trim();
     html += `<div class="sv-card ${sv.inTrip ? 'in-trip' : ''}">
       <div class="sv-header">
-        <span class="sv-name">${sv.label}</span>
+        <span class="sv-name">${tt(sv.label, P)}</span>
         <div class="sv-delays">
           <span class="pu">PU: ${sv.pickupDelay} cyc (${(sv.pickupDelay / (P.eventInfo.freq||60) * 1000).toFixed(1)} ms)</span>
           <span class="do">DO: ${sv.dropoutDelay} cyc</span>
         </div>
       </div>
-      <div class="sv-eq">${eqClean}${comment ? ` <span class="sv-comment"># ${comment}</span>` : ''}</div>
+      <div class="sv-eq">${linkifyEquationBits(eqClean, P)}${comment ? ` <span class="sv-comment"># ${comment}</span>` : ''}</div>
     </div>`;
   });
   html += `</div></div>`;
@@ -7168,7 +7367,7 @@ function renderContent() {
   ].forEach(([label, eq]) => {
     html += `<div style="margin-bottom:16px">
       <div style="font-size:11px;color:var(--accent);font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.08em">${label}</div>
-      <div class="code-block">${eq || '—'}</div>
+      <div class="code-block">${eq && eq !== '—' ? linkifyEquationBits(eq, P) : '—'}</div>
     </div>`;
   });
   html += `</div>`;
@@ -8122,9 +8321,8 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
     // Terminal (the final trip/close/ER bit) always reads red, matching the main diagram's
     // final-command box; otherwise red if actually asserted (measured bit or SV logic alike),
     // muted default if false/unknown.
-    let stateCls = '';
-    if (isTerm) stateCls = 'llg-terminal';
-    else if (isTrue) stateCls = 'llg-true';
+    let stateCls = isTrue ? 'llg-true' : '';
+    if (isTerm) stateCls += ' llg-terminal';
     const centerCls = lbl === graph.center ? 'llg-center' : '';
     boxesHTML += `<div class="llg-box ${stateCls} ${centerCls}" style="position:absolute;left:${p.x}px;top:${p.y}px;width:${BOX_W}px;height:${BOX_H}px;display:flex;align-items:center;justify-content:center;overflow:hidden;text-overflow:ellipsis;">${tt(displayLbl, P)}</div>`;
   });
@@ -8459,6 +8657,13 @@ async function downloadLogicChartGIF() {
     document.body.appendChild(probe);
 
     const frames = [];
+    // Canvas size is locked from the FIRST frame (plus a safety pad) and reused for every
+    // subsequent frame — this diagram's own layout doesn't depend on the live state being
+    // shown, only on its (fixed, per-event) structure, so this both guarantees every frame's
+    // pixel buffer matches the single width/height later passed to encodeGIF (previously only
+    // the LAST frame's measured size was used there, which could mismatch and corrupt earlier
+    // frames) and gives the export a constant, viewport-independent size/resolution.
+    const SIZE_SAFETY_PAD = 30;
     let W = 0, H = 0;
     try {
       for (let fi = 0; fi < frameIdxs.length; fi++) {
@@ -8478,14 +8683,16 @@ async function downloadLogicChartGIF() {
         probe.appendChild(inner);
         // Measure & rasterize.
         await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-        W = Math.max(1, Math.ceil(fw * scale));
-        H = Math.max(1, Math.ceil(fh * scale));
+        if (fi === 0) {
+          W = Math.max(1, Math.ceil((fw + SIZE_SAFETY_PAD) * scale));
+          H = Math.max(1, Math.ceil((fh + SIZE_SAFETY_PAD) * scale));
+        }
         const canvas = document.createElement('canvas');
         canvas.width = W; canvas.height = H;
         const ctx = canvas.getContext('2d');
         ctx.scale(scale, scale);
         ctx.fillStyle = resolveCssColor('var(--bg)') || '#06090f';
-        ctx.fillRect(0, 0, fw, fh);
+        ctx.fillRect(0, 0, W / scale, H / scale);
         llgRenderDomToCanvas(inner, ctx, inner.getBoundingClientRect());
         const nextIdx = frameIdxs[fi + 1];
         const elapsedMs = nextIdx != null ? (nextIdx - idx) * intervalMsForGif : 400;
@@ -8501,10 +8708,10 @@ async function downloadLogicChartGIF() {
     const gifBytes = encodeGIF(frames, W, H, 140);
     const blob = new Blob([gifBytes], { type: 'image/gif' });
     const titleEl = document.getElementById('bitModalTitle');
-    const name = (titleEl ? titleEl.textContent : 'logic_chart').replace(/[^a-z0-9_-]+/gi, '_') + '_playback.gif';
+    const selectedLabel = titleEl ? titleEl.textContent : (graph?.centerLabel || 'logic_chart');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = name;
+    a.download = buildExportFilename(PARSED, ANALYSIS, selectedLabel, 'Logic Chart', 'gif');
     document.body.appendChild(a); a.click(); a.remove();
   } catch (err) {
     console.error('GIF export failed:', err);
@@ -8651,7 +8858,8 @@ function downloadLogicChart() {
   if (!body) return;
   const legend = document.getElementById('llgSourceLegend');
   const titleEl = document.getElementById('bitModalTitle');
-  const name = (titleEl ? titleEl.textContent : 'logic_chart').replace(/[^a-z0-9_-]+/gi, '_') + '_logic_chart.png';
+  const selectedLabel = titleEl ? titleEl.textContent : 'logic_chart';
+  const name = buildExportFilename(PARSED, ANALYSIS, selectedLabel, 'Logic Chart', 'png');
 
   // Stack a clone of the legend above a clone of the diagram in an off-screen (but still laid
   // out — position:fixed, not display:none) container so both export together as one image.
