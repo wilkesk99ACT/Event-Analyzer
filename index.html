@@ -8159,8 +8159,9 @@ function renderLLGLegend() {
     <span>${swatch('background:var(--bg2);border:1px solid var(--card-border);')} Not asserted / unknown</span>
     <span>${swatch('background:var(--bg2);border:1px solid var(--card-border);box-shadow:0 0 0 2px var(--accent);')} Bit you clicked</span>
     <span>${dashSample(LLG_NOT_DASH)} Negated (NOT)</span>
-    <span>${dashSample(LLG_TRIG_DASH)} Edge-triggered (R_TRIG/F_TRIG) — hover a line for the exact condition</span>
+    <span>${dashSample(LLG_TRIG_DASH)} Edge-triggered (R_TRIG/F_TRIG)</span>
     <span>${mergeSample} Bracket (&amp;) marks inputs AND-ed together (colored by whether ALL are met); inputs with no bracket are alternative OR inputs</span>
+    <span>🖱️ Hover any line to see exactly what it connects</span>
   </div>`;
 }
 
@@ -8563,12 +8564,17 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
   // that hover easy to land, the same "hit-area padding" technique used for thin SVG lines
   // generally.
   const edgeDash = mod => !mod ? '' : (/TRIG/.test(mod) ? LLG_TRIG_DASH : LLG_NOT_DASH);
-  const edgeTitleTag = mod => mod ? `<title>${mod}</title>` : '';
-  const hitArea = (d, mod) => !mod ? '' :
-    `<path d="${d}" fill="none" stroke="transparent" stroke-width="12">${edgeTitleTag(mod)}</path>`;
-  const edgeLine = (d, color, mod) => {
-    const dash = edgeDash(mod);
-    return `${hitArea(d, mod)}<path d="${d}" fill="none" stroke="${color}" stroke-width="1.5"${dash ? ` stroke-dasharray="${dash}"` : ''}>${edgeTitleTag(mod)}</path>`;
+  // Every edge gets a real, descriptive hover title — "SOURCE → TARGET", with the modifier
+  // (NOT/R_TRIG/F_TRIG) prefixed when present — not just the modified ones as before, and not
+  // just the bare modifier text on its own. A wide invisible hit-area copy is drawn under every
+  // edge now too (previously only modified edges got one), since a bare 1.5px stroke is a tiny
+  // target to actually land a cursor on regardless of whether it's dashed.
+  const edgeTitleText = e => `${e && e.mod ? e.mod + ' ' : ''}${e ? e.from : '?'} → ${e ? e.to : '?'}`.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const edgeTitleTag = e => `<title>${edgeTitleText(e)}</title>`;
+  const hitArea = (d, e) => `<path d="${d}" fill="none" stroke="transparent" stroke-width="12">${edgeTitleTag(e)}</path>`;
+  const edgeLine = (d, color, e) => {
+    const dash = edgeDash(e && e.mod);
+    return `${hitArea(d, e)}<path d="${d}" fill="none" stroke="${color}" stroke-width="1.5"${dash ? ` stroke-dasharray="${dash}"` : ''}>${edgeTitleTag(e)}</path>`;
   };
 
   // ── Fork-join for parenthesized sub-expressions ──
@@ -8613,7 +8619,7 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
     const x2 = bar ? bar.x : b.x;
     const y2 = bar ? portY(m, b, false) : portY(m, b, false);
     const midX = m.sameCol ? (x1 + x2) / 2 : laneX(m.ciL, m.riser);
-    linesHTML += edgeLine(`M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`, edgeColor(m.e), m.e.mod);
+    linesHTML += edgeLine(`M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`, edgeColor(m.e), m.e);
   });
   skipMeta.forEach(m => {
     const a = pos[m.leftLbl], b = pos[m.rightLbl];
@@ -8634,7 +8640,7 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
     let spanTop = Infinity;
     for (let c = m.ciL + 1; c <= m.ciR - 1; c++) spanTop = Math.min(spanTop, colStartY[c]);
     const laneY = spanTop - 5 - m.laneIdx * LANE_H;
-    linesHTML += edgeLine(`M ${x1} ${y1} L ${riserFromX} ${y1} L ${riserFromX} ${laneY} L ${riserToX} ${laneY} L ${riserToX} ${y2} L ${x2} ${y2}`, edgeColor(m.e), m.e.mod);
+    linesHTML += edgeLine(`M ${x1} ${y1} L ${riserFromX} ${y1} L ${riserFromX} ${laneY} L ${riserToX} ${laneY} L ${riserToX} ${y2} L ${x2} ${y2}`, edgeColor(m.e), m.e);
   });
 
   // Draw each sub-group's fork: the vertical bar joining its members, plus the single line
