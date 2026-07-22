@@ -5470,8 +5470,9 @@ async function downloadMainGIF() {
         await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
         const rect = probe.getBoundingClientRect();
         const scale = 1.3;
+        const safetyPad = 5; // extra bottom margin so nothing right at the edge gets clipped
         W = Math.max(1, Math.ceil(rect.width * scale));
-        H = Math.max(1, Math.ceil(rect.height * scale));
+        H = Math.max(1, Math.ceil((rect.height + safetyPad) * scale));
         const canvas = document.createElement('canvas');
         canvas.width = W; canvas.height = H;
         const ctx = canvas.getContext('2d');
