@@ -6793,6 +6793,16 @@ function describeSVLogic(sv) {
 // parsed object (P._equationRefIndex) — built once, the first time ANY bit's logic chart is
 // requested, not precomputed for every bit up front. Subsequent clicks on other bits reuse the
 // same cached index; only the small per-bit graph walk below runs fresh each time.
+// Every label actually recorded in the digital word (initial state + every transition), cached
+// on the parsed event itself since this gets consulted a lot (once per candidate bit, on every
+// local-logic-graph build) and the underlying data never changes for a given file.
+function realBitLabelSet(P) {
+  if (P._realBitLabelSet) return P._realBitLabelSet;
+  const set = new Set(P.initialDigitalState || []);
+  (P.digitalTransitions || []).forEach(t => t.changes.forEach(c => set.add(c.label)));
+  P._realBitLabelSet = set;
+  return set;
+}
 function getEquationRefIndex(P) {
   if (P._equationRefIndex) return P._equationRefIndex;
 
@@ -7084,12 +7094,33 @@ function buildLocalLogicGraph(P, label, maxForwardCols, maxBackwardCols, scoped)
     const svtM = target.match(/^SV(\d+)T$/);
     if (svtM) {
       const inp = `SV${svtM[1]}`;
-      edges.push({ from: inp, to: target, mod: '', andGroup: null });
+      edges.push({ from: inp, to: target, mod: '', andGroup: null, priority: true });
       return (!placed.has(inp)) ? [inp] : [];
     }
     if (target === 'CLOSE') {
       edges.push({ from: 'CL', to: target, mod: '', andGroup: null });
       return (!placed.has('CL')) ? ['CL'] : [];
+    }
+    // A protection-element timed output (59G1T, 51P1T, and the like) has no SELOGIC equation of
+    // its own — it's a fixed firmware relationship between the element's own raw pickup/level bit
+    // (59G1, 51P1 — an actual protection element, not a settings-defined variable) and its
+    // coordinated timed output, exactly like SVxx -> SVxxT above just for hardware protection
+    // elements rather than user SV points. Only applies when `target` doesn't already have a real
+    // equation of its own (a genuinely SELOGIC-defined bit that happens to end in "T" should show
+    // its actual equation instead, not be treated as an implicit timer). The base doesn't have to
+    // be separately RECORDED in this file's digital word — many relays only wire the coordinated
+    // output to a report point and never the raw element itself, but the raw element is still the
+    // true upstream source and worth showing (its box will just read as "unknown state" rather
+    // than asserted/not, honestly reflecting that this file never recorded it). What guards
+    // against firing on some unrelated name that simply happens to end in "T": ANSI protection
+    // element numbers always start with a digit (50, 51, 59, 67, 81, 27, 32…), which ordinary
+    // named contacts/inputs/outputs essentially never do.
+    if (!eqByLabel[target] && target.length > 2 && target.endsWith('T')) {
+      const base = target.slice(0, -1);
+      if (/^\d/.test(base)) {
+        edges.push({ from: base, to: target, mod: '', andGroup: null, priority: true });
+        return (!placed.has(base)) ? [base] : [];
+      }
     }
     return processGroups(target, getInputGroups(eqByLabel[target]));
   }
@@ -7182,7 +7213,22 @@ function buildLocalLogicGraph(P, label, maxForwardCols, maxBackwardCols, scoped)
       const nextFrontier = new Set();
       frontier.forEach(l => {
         const svM = l.match(/^SV(\d+)$/);
-        if (svM) { const t = `SV${svM[1]}T`; edges.push({ from: l, to: t, mod: '', andGroup: null }); if (!placed.has(t)) nextFrontier.add(t); }
+        if (svM) {
+          const t = `SV${svM[1]}T`;
+          edges.push({ from: l, to: t, mod: '', andGroup: null, priority: true });
+          if (!placed.has(t)) nextFrontier.add(t);
+        } else {
+          // Generalized version of the SV rule above, for hardware protection-element timed
+          // outputs (59G1 -> 59G1T, 51P1 -> 51P1T, etc.) rather than user SV points — only when
+          // the timed form is actually a recorded bit in THIS file (unlike SVxxT, a protection
+          // element's timed output isn't guaranteed to exist just because the element itself
+          // does) and isn't itself a real SELOGIC-defined equation.
+          const timedVariant = `${l}T`;
+          if (!eqByLabel[timedVariant] && realBitLabelSet(P).has(timedVariant)) {
+            edges.push({ from: l, to: timedVariant, mod: '', andGroup: null, priority: true });
+            if (!placed.has(timedVariant)) nextFrontier.add(timedVariant);
+          }
+        }
         if (l === 'CL') { edges.push({ from: l, to: 'CLOSE', mod: '', andGroup: null }); if (!placed.has('CLOSE')) nextFrontier.add('CLOSE'); }
         (refIndex[l] || []).forEach(ref => {
           if (!placed.has(ref)) nextFrontier.add(ref);
@@ -8162,6 +8208,7 @@ function renderLLGLegend() {
     <span>${dashSample(LLG_TRIG_DASH)} Edge-triggered (R_TRIG/F_TRIG)</span>
     <span>${mergeSample} Bracket (&amp;) marks inputs AND-ed together (colored by whether ALL are met); inputs with no bracket are alternative OR inputs</span>
     <span>🖱️ Hover any line to see exactly what it connects</span>
+    <span>⏱️ A base bit → its timed output animates the color traveling along the line while the pickup/dropout timer is actually running</span>
   </div>`;
 }
 
@@ -8399,11 +8446,18 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
   // lines to cross more than they needed to. Processed strictly left-to-right so every column's
   // ordering can lean on the previous column's FINAL (not provisional) positions.
   const pos = {}; // label -> {x, y} (top-left of its box), filled in column order below
+  // A "priority" edge (see the SV/protection-element timed-output rules above) is a bit's own
+  // private, single-purpose pairing with its timed output — worth weighting several times over
+  // in the barycenter average below, so that relationship wins out even when the timed output
+  // sits in a busy column with a dozen OTHER, less specific neighbors that would otherwise dilute
+  // the average and pull the pair apart instead of keeping them close together.
+  const PRIORITY_WEIGHT = 5;
   const neighborYs = lbl => {
     const ys = [];
     graph.edges.forEach(e => {
-      if (e.from === lbl && pos[e.to]) ys.push(pos[e.to].y);
-      else if (e.to === lbl && pos[e.from]) ys.push(pos[e.from].y);
+      const w = e.priority ? PRIORITY_WEIGHT : 1;
+      if (e.from === lbl && pos[e.to]) { for (let i = 0; i < w; i++) ys.push(pos[e.to].y); }
+      else if (e.to === lbl && pos[e.from]) { for (let i = 0; i < w; i++) ys.push(pos[e.from].y); }
     });
     return ys;
   };
@@ -8466,6 +8520,96 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
     const contributes = /\bNOT\b/.test(mod || '') ? !st.state : st.state;
     return contributes ? 'var(--red)' : 'var(--text-muted)';
   };
+
+  // ── Timer-pair animation (pickup/dropout) ──
+  // A "priority" edge (see buildLocalLogicGraph) is a bit's own base -> timed-output pairing —
+  // SV15 -> SV15T, 51P1 -> 51P1T, and the like. Rather than snapping straight to red the instant
+  // the base bit asserts (which is what a plain edge does, and is misleading here — the timed
+  // output hasn't actually picked up yet), find the ACTUAL recorded transition times for both
+  // ends and, while the timer is genuinely in progress, animate the color traveling along the
+  // line at the same real pace: red growing from the base end during pickup, muted/gray growing
+  // from the base end during dropout — using the file's own observed timing, not a settings
+  // lookup, so it works for hardware protection elements (which may have no separately
+  // configured delay available anywhere in the parsed settings) exactly as well as it does SVs.
+  const timedViewIdx = LLG_VIEW_SAMPLE_IDX != null ? LLG_VIEW_SAMPLE_IDX
+    : (ANALYSIS?.tripCause?.tripTransition?.digitalSampleIdx ?? null);
+  // Last transition, at or before `atIdx`, where `label` changed to exactly `wantAsserted`.
+  function lastTransitionTo(label, atIdx, wantAsserted) {
+    const trans = P.digitalTransitions || [];
+    let found = null;
+    for (const t of trans) {
+      if (t.digitalSampleIdx > atIdx) break;
+      const c = t.changes.find(ch => ch.label === label);
+      if (c && c.asserted === wantAsserted) found = t.digitalSampleIdx;
+    }
+    return found;
+  }
+  // First transition, strictly after `afterIdx`, where `label` changed to exactly `wantAsserted`.
+  function nextTransitionTo(label, afterIdx, wantAsserted) {
+    const trans = P.digitalTransitions || [];
+    for (const t of trans) {
+      if (t.digitalSampleIdx <= afterIdx) continue;
+      const c = t.changes.find(ch => ch.label === label);
+      if (c && c.asserted === wantAsserted) return t.digitalSampleIdx;
+    }
+    return null;
+  }
+  // Returns {frac, kind, bgColor, overlayColor} while base/target are genuinely mid-timer right
+  // now, or null when they're not (stable, instantaneous, or the record doesn't give enough
+  // information to place a start/end point — in every one of those cases the edge just falls
+  // back to its normal solid, non-animated color).
+  function timedPhaseFor(e) {
+    if (!e.priority || timedViewIdx == null) return null;
+    const base = llgDisplayLabel(e.from), target = llgDisplayLabel(e.to);
+    const baseSt = currentBitState(base), targetSt = currentBitState(target);
+    if (!baseSt || !targetSt) return null;
+    if (baseSt.state && !targetSt.state) {
+      // Pickup in progress: base asserted, timed output hasn't caught up yet.
+      const tBaseOn = lastTransitionTo(base, timedViewIdx, true);
+      if (tBaseOn == null) return null; // was already asserted at record start — no start point to animate from
+      const tBaseOffAfter = nextTransitionTo(base, tBaseOn, false);
+      const tTargetOnAfter = nextTransitionTo(target, tBaseOn, true);
+      if (tTargetOnAfter == null) return null; // never actually completes in this record
+      if (tBaseOffAfter != null && tBaseOffAfter < tTargetOnAfter) return null; // reset before pickup completed — indeterminate, don't guess
+      const frac = Math.max(0, Math.min(1, (timedViewIdx - tBaseOn) / Math.max(1, tTargetOnAfter - tBaseOn)));
+      return { frac, kind: 'pickup', bgColor: 'var(--text-muted)', overlayColor: 'var(--red)' };
+    }
+    if (!baseSt.state && targetSt.state) {
+      // Dropout in progress: base has released, timed output hasn't dropped out yet.
+      const tBaseOff = lastTransitionTo(base, timedViewIdx, false);
+      if (tBaseOff == null) return null;
+      const tBaseOnAfter = nextTransitionTo(base, tBaseOff, true);
+      const tTargetOffAfter = nextTransitionTo(target, tBaseOff, false);
+      if (tTargetOffAfter == null) return null;
+      if (tBaseOnAfter != null && tBaseOnAfter < tTargetOffAfter) return null; // re-picked-up before dropout completed
+      const frac = Math.max(0, Math.min(1, (timedViewIdx - tBaseOff) / Math.max(1, tTargetOffAfter - tBaseOff)));
+      return { frac, kind: 'dropout', bgColor: 'var(--red)', overlayColor: 'var(--text-muted)' };
+    }
+    return null; // stable — both already agree, nothing to animate
+  }
+  // Straight-line length of an orthogonal "M x y L x y L x y…" path — dasharray follows the
+  // path's actual rendered length regardless of how many bends it has, which is what makes the
+  // dash-based fill-overlay below work without needing to reason about individual bend geometry.
+  function pathLength(d) {
+    const n = (d.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+    let total = 0;
+    for (let i = 2; i + 1 < n.length; i += 2) total += Math.hypot(n[i] - n[i - 2], n[i + 1] - n[i - 1]);
+    return total;
+  }
+  // Draws one edge — animated (a growing color overlay from the base end) while its timer is
+  // genuinely in progress, otherwise the normal solid edgeLine exactly as before.
+  function drawEdge(d, e) {
+    const phase = timedPhaseFor(e);
+    if (!phase) return edgeLine(d, edgeColor(e), e);
+    const total = pathLength(d);
+    const fillLen = phase.frac * total;
+    const baseTitle = edgeTitleText(e);
+    const title = `<title>${baseTitle} — ${phase.kind} timer ${Math.round(phase.frac * 100)}% complete</title>`;
+    let out = `<path d="${d}" fill="none" stroke="transparent" stroke-width="12">${title}</path>`;
+    out += `<path d="${d}" fill="none" stroke="${phase.bgColor}" stroke-width="1.5">${title}</path>`;
+    if (fillLen > 0.5) out += `<path d="${d}" fill="none" stroke="${phase.overlayColor}" stroke-width="1.5" stroke-dasharray="${fillLen} ${total * 2 + 20}">${title}</path>`;
+    return out;
+  }
 
   // ── Port distribution ──
   // A box with several incoming (or outgoing) connections previously had all of them meet at
@@ -8619,7 +8763,7 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
     const x2 = bar ? bar.x : b.x;
     const y2 = bar ? portY(m, b, false) : portY(m, b, false);
     const midX = m.sameCol ? (x1 + x2) / 2 : laneX(m.ciL, m.riser);
-    linesHTML += edgeLine(`M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`, edgeColor(m.e), m.e);
+    linesHTML += drawEdge(`M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`, m.e);
   });
   skipMeta.forEach(m => {
     const a = pos[m.leftLbl], b = pos[m.rightLbl];
@@ -8640,7 +8784,7 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
     let spanTop = Infinity;
     for (let c = m.ciL + 1; c <= m.ciR - 1; c++) spanTop = Math.min(spanTop, colStartY[c]);
     const laneY = spanTop - 5 - m.laneIdx * LANE_H;
-    linesHTML += edgeLine(`M ${x1} ${y1} L ${riserFromX} ${y1} L ${riserFromX} ${laneY} L ${riserToX} ${laneY} L ${riserToX} ${y2} L ${x2} ${y2}`, edgeColor(m.e), m.e);
+    linesHTML += drawEdge(`M ${x1} ${y1} L ${riserFromX} ${y1} L ${riserFromX} ${laneY} L ${riserToX} ${laneY} L ${riserToX} ${y2} L ${x2} ${y2}`, m.e);
   });
 
   // Draw each sub-group's fork: the vertical bar joining its members, plus the single line
