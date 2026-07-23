@@ -5909,6 +5909,19 @@ async function downloadMainGIF() {
     CHART_ZOOM.current = gifZoomRange; CHART_ZOOM.voltage = gifZoomRange;
     CHART_ZOOM.relevant = gifZoomRange; CHART_ZOOM.svflags = gifZoomRange;
     let frameIdxs = [start, ...trans.map(t => t.analogSampleIdx).filter(a => a >= start && a <= end), end];
+    if (!CHARTED_FILTER_RELEVANT) {
+      // Best-effort only — if anything here goes wrong, the export still works, it just won't
+      // have the extra in-between animation frames.
+      try {
+        const labelForGraph = currentChartedBitLabel();
+        const tripFocusForGraph = isTripFocusLabel(labelForGraph, PARSED);
+        const graphForWindows = buildLocalLogicGraph(PARSED, labelForGraph, tripFocusForGraph ? 25 : 20, tripFocusForGraph ? 25 : 14, !tripFocusForGraph);
+        const analogWindows = findTimerAnimationWindows(PARSED, graphForWindows)
+          .map(w => ({ startIdx: digitalIdxToAnalogIdx(w.startIdx), endIdx: digitalIdxToAnalogIdx(w.endIdx) }))
+          .filter(w => w.endIdx >= start && w.startIdx <= end);
+        frameIdxs.push(...timerWindowSampleIdxs(analogWindows, 6).filter(a => a >= start && a <= end));
+      } catch (e) { /* ignore */ }
+    }
     frameIdxs = [...new Set(frameIdxs)].sort((a, b) => a - b);
     const samplesPerCycleForGif = PARSED.eventInfo?.samPerCycA || 32;
     const msPerSampleForGif = 1000 / ((PARSED.eventInfo?.freq || 60) * samplesPerCycleForGif);
@@ -7417,6 +7430,56 @@ function buildLocalLogicGraph(P, label, maxForwardCols, maxBackwardCols, scoped)
 function llgDisplayLabel(nodeId) {
   const i = nodeId.indexOf('\u0001');
   return i === -1 ? nodeId : nodeId.slice(0, i);
+}
+
+// Finds every [startIdx, endIdx] window (digital-sample-index units) where a priority edge's
+// timer is genuinely running — a base bit's assertion paired with its timed output's NEXT
+// matching transition, same pairing rule as timedPhaseFor in renderLocalLogicGraph, just applied
+// across the WHOLE record up front rather than "as of right now". Without this, a GIF export
+// would only ever land a frame at the transitions that bookend a timer (nothing else changes
+// DURING the delay itself), so the animation would jump straight from 0% to 100% with nothing
+// visible in between — this is what lets the export insert real in-between frames.
+function findTimerAnimationWindows(P, graph) {
+  const trans = P.digitalTransitions || [];
+  const windows = [];
+  (graph?.edges || []).forEach(e => {
+    if (!e.priority) return;
+    const base = llgDisplayLabel(e.from), target = llgDisplayLabel(e.to);
+    for (let i = 0; i < trans.length; i++) {
+      const c = trans[i].changes.find(ch => ch.label === base);
+      if (!c) continue;
+      const startIdx = trans[i].digitalSampleIdx;
+      const want = c.asserted;
+      let endIdx = null, aborted = false;
+      for (let j = i + 1; j < trans.length; j++) {
+        const cb = trans[j].changes.find(ch => ch.label === base);
+        if (cb && cb.asserted !== want) { aborted = true; break; }
+        const ct = trans[j].changes.find(ch => ch.label === target);
+        if (ct && ct.asserted === want) { endIdx = trans[j].digitalSampleIdx; break; }
+      }
+      if (!aborted && endIdx != null && endIdx > startIdx) windows.push({ startIdx, endIdx });
+    }
+  });
+  return windows;
+}
+// Given a set of timer windows, returns extra sample indices (roughly `perWindow` of them,
+// evenly spaced) to insert into a GIF's frame list so each window's animation is actually
+// visible rather than jumping straight from start to finish. Capped at `maxTotal` extra frames
+// overall (spread proportionally across windows) so a chart with a LOT of timer windows can't
+// balloon a GIF's frame count/export time unreasonably — a smoother animation is a nice-to-have,
+// not worth the export becoming slow or huge.
+function timerWindowSampleIdxs(windows, perWindow, maxTotal) {
+  maxTotal = maxTotal || 150;
+  const perWin = windows.length ? Math.max(2, Math.min(perWindow, Math.floor(maxTotal / windows.length) + 1)) : perWindow;
+  const extra = [];
+  windows.forEach(w => {
+    const span = w.endIdx - w.startIdx;
+    for (let k = 1; k < perWin; k++) {
+      const idx = Math.round(w.startIdx + (span * k) / perWin);
+      if (idx > w.startIdx && idx < w.endIdx) extra.push(idx);
+    }
+  });
+  return extra.slice(0, maxTotal);
 }
 
 // True when `label` is the trip bit itself, another terminal command bit, or something the
@@ -9207,6 +9270,12 @@ async function downloadLogicChartGIF() {
     const loB = LLG_MARK_B != null ? LLG_MARK_B : maxDIdx;
     const gifStart = Math.min(loA, loB), gifEnd = Math.max(loA, loB);
     let frameIdxs = [gifStart, ...trans.map(t => t.digitalSampleIdx).filter(d => d >= gifStart && d <= gifEnd), gifEnd];
+    // Extra frames DURING any base -> timed-output window that falls (at least partly) inside
+    // the selected range, so the animated fill in renderLocalLogicGraph actually shows up as
+    // motion across several frames instead of a single instantaneous jump.
+    const timerWindows = findTimerAnimationWindows(PARSED, LLG_CURRENT.graph)
+      .filter(w => w.endIdx >= gifStart && w.startIdx <= gifEnd);
+    frameIdxs.push(...timerWindowSampleIdxs(timerWindows, 6).filter(d => d >= gifStart && d <= gifEnd));
     frameIdxs = [...new Set(frameIdxs)].sort((a, b) => a - b);
     const freqForGif = PARSED.eventInfo?.freq || 60;
     const digitalRateForGif = PARSED.eventInfo?.samPerCycD || 4;
