@@ -5900,7 +5900,14 @@ async function downloadMainGIF() {
     const totalLen = PARSED.analogData.length;
     const loA = PLAY_MARK_A != null ? PLAY_MARK_A : 0;
     const loB = PLAY_MARK_B != null ? PLAY_MARK_B : totalLen - 1;
-    const start = Math.min(loA, loB), end = Math.max(loA, loB);
+    const rawStart = Math.min(loA, loB), rawEnd = Math.max(loA, loB);
+    const samplesPerCycleForGif = PARSED.eventInfo?.samPerCycA || 32;
+    const msPerSampleForGif = 1000 / ((PARSED.eventInfo?.freq || 60) * samplesPerCycleForGif);
+    // Shorten a long, uneventful trailing hold (nothing changing for the last several real
+    // seconds before the window's own end) down to a fixed short pause instead — see
+    // cappedTailEnd. Skipped entirely when the user explicitly set B themselves.
+    const start = rawStart;
+    const end = cappedTailEnd(trans.map(t => t.analogSampleIdx), rawStart, rawEnd, msPerSampleForGif, MAIN_PLAYBACK_SPEED, BASE_TIME_DILATION, PLAY_MARK_B != null, 1500);
     // Crop every mini chart to exactly the A/B playback window (or the whole record if no
     // window is set) instead of always showing the full record with the window merely marked —
     // matches what's actually being played/exported, and gives the visible portion much more of
@@ -5919,12 +5926,15 @@ async function downloadMainGIF() {
         const analogWindows = findTimerAnimationWindows(PARSED, graphForWindows)
           .map(w => ({ startIdx: digitalIdxToAnalogIdx(w.startIdx), endIdx: digitalIdxToAnalogIdx(w.endIdx) }))
           .filter(w => w.endIdx >= start && w.startIdx <= end);
-        frameIdxs.push(...timerWindowSampleIdxs(analogWindows, 6).filter(a => a >= start && a <= end));
+        frameIdxs.push(...timerWindowSampleIdxs(analogWindows, 8).filter(a => a >= start && a <= end));
       } catch (e) { /* ignore */ }
     }
+    // General smoothness pass: don't let ANY two consecutive frames hold for more than ~700ms of
+    // simulated (speed-adjusted) playback time — otherwise a long quiet stretch between recorded
+    // transitions would jump in one cut instead of the cursor/markers sweeping smoothly across it,
+    // same as watching it live in the tool.
+    frameIdxs.push(...smoothFrameGaps([...new Set(frameIdxs)].sort((a, b) => a - b), msPerSampleForGif, MAIN_PLAYBACK_SPEED, BASE_TIME_DILATION, 700, 100));
     frameIdxs = [...new Set(frameIdxs)].sort((a, b) => a - b);
-    const samplesPerCycleForGif = PARSED.eventInfo?.samPerCycA || 32;
-    const msPerSampleForGif = 1000 / ((PARSED.eventInfo?.freq || 60) * samplesPerCycleForGif);
 
     // Build one off-screen container: a time-indicator header, the logic tree — enlarged — at
     // full width beneath it, then the four waveform/flag charts in a row at the bottom — reused
@@ -6052,7 +6062,7 @@ async function downloadMainGIF() {
         if (relevantHtml) scaledChartCard(relevantHtml);
         const svflagsHtml = buildSVFlagsChart(PARSED, ANALYSIS, true);
         if (svflagsHtml) scaledChartCard(svflagsHtml);
-        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        await new Promise(r => setTimeout(r, 0));
         const rect = probe.getBoundingClientRect();
         if (fi === 0) {
           W = Math.max(1, Math.ceil((rect.width + SIZE_SAFETY_PAD) * EXPORT_SCALE));
@@ -7442,23 +7452,49 @@ function llgDisplayLabel(nodeId) {
 function findTimerAnimationWindows(P, graph) {
   const trans = P.digitalTransitions || [];
   const windows = [];
+  const samplesPerCyc = P.eventInfo?.samPerCycD || 4;
   (graph?.edges || []).forEach(e => {
-    if (!e.priority) return;
-    const base = llgDisplayLabel(e.from), target = llgDisplayLabel(e.to);
-    for (let i = 0; i < trans.length; i++) {
-      const c = trans[i].changes.find(ch => ch.label === base);
-      if (!c) continue;
-      const startIdx = trans[i].digitalSampleIdx;
-      const want = c.asserted;
-      let endIdx = null, aborted = false;
-      for (let j = i + 1; j < trans.length; j++) {
-        const cb = trans[j].changes.find(ch => ch.label === base);
-        if (cb && cb.asserted !== want) { aborted = true; break; }
-        const ct = trans[j].changes.find(ch => ch.label === target);
-        if (ct && ct.asserted === want) { endIdx = trans[j].digitalSampleIdx; break; }
+    if (e.priority) {
+      const base = llgDisplayLabel(e.from), target = llgDisplayLabel(e.to);
+      for (let i = 0; i < trans.length; i++) {
+        const c = trans[i].changes.find(ch => ch.label === base);
+        if (!c) continue;
+        const startIdx = trans[i].digitalSampleIdx;
+        const want = c.asserted;
+        let endIdx = null, aborted = false;
+        for (let j = i + 1; j < trans.length; j++) {
+          const cb = trans[j].changes.find(ch => ch.label === base);
+          if (cb && cb.asserted !== want) { aborted = true; break; }
+          const ct = trans[j].changes.find(ch => ch.label === target);
+          if (ct && ct.asserted === want) { endIdx = trans[j].digitalSampleIdx; break; }
+        }
+        if (!aborted && endIdx != null && endIdx > startIdx) windows.push({ startIdx, endIdx });
       }
-      if (!aborted && endIdx != null && endIdx > startIdx) windows.push({ startIdx, endIdx });
+      return;
     }
+    // An SV's own pickup/dropout delay (see svOwnDelayPhaseFor in renderLocalLogicGraph) — the
+    // exact delay is already known from settings, so this doesn't need to search for a
+    // confirming future transition the way the priority-edge case above does; it just windows
+    // [transition, transition + delay] for every relevant change of this edge's own source bit.
+    // A little more generous than strictly necessary for an AND-group member that wasn't
+    // actually the one completing the condition — harmless, since those extra frames simply
+    // render as already-fully-settled (svOwnDelayPhaseFor's own fraction clamp handles that).
+    const target = llgDisplayLabel(e.to);
+    const svm = target.match(/^SV(\d+)$/);
+    if (!svm) return;
+    const sv = (P.svSettings || []).find(s => s.num === parseInt(svm[1]));
+    if (!sv) return;
+    const base = llgDisplayLabel(e.from);
+    const wantNot = /\bNOT\b/.test(e.mod || '');
+    trans.forEach(t => {
+      const c = t.changes.find(ch => ch.label === base);
+      if (!c) return;
+      const groupGoingTrue = wantNot ? !c.asserted : c.asserted;
+      const delayCyc = groupGoingTrue ? (sv.pickupDelay || 0) : (sv.dropoutDelay || 0);
+      if (!delayCyc) return;
+      const startIdx = t.digitalSampleIdx;
+      windows.push({ startIdx, endIdx: startIdx + Math.round(delayCyc * samplesPerCyc) });
+    });
   });
   return windows;
 }
@@ -7480,6 +7516,43 @@ function timerWindowSampleIdxs(windows, perWindow, maxTotal) {
     }
   });
   return extra.slice(0, maxTotal);
+}
+
+// Inserts extra evenly-spaced sample indices wherever the gap between two ALREADY-selected GIF
+// frames would otherwise be held for longer than maxGapMs of simulated playback time (accounting
+// for playback speed/time-dilation) — this is the main lever for overall exported-GIF smoothness,
+// not just the timer animation specifically: a cursor/marker sweeping across a long quiet stretch
+// with no recorded transitions would otherwise jump straight from one end of that stretch to the
+// other in a single cut. Capped at maxExtra total inserted frames so a long, mostly-quiet record
+// can't balloon the export.
+function smoothFrameGaps(frameIdxs, msPerSample, playbackSpeed, timeDilation, maxGapMs, maxExtra) {
+  const extra = [];
+  const speedDiv = Math.max(0.0001, playbackSpeed * timeDilation);
+  for (let i = 0; i < frameIdxs.length - 1 && extra.length < maxExtra; i++) {
+    const a = frameIdxs[i], b = frameIdxs[i + 1];
+    const gapMs = (b - a) * msPerSample / speedDiv;
+    if (gapMs <= maxGapMs) continue;
+    const parts = Math.min(20, Math.ceil(gapMs / maxGapMs));
+    for (let k = 1; k < parts && extra.length < maxExtra; k++) extra.push(Math.round(a + ((b - a) * k) / parts));
+  }
+  return extra;
+}
+
+// Shortens a long, uneventful trailing hold — e.g. several quiet real seconds after the last
+// actual bit change before the record/window's own end — down to a fixed, short pause (default
+// ~1.5s of simulated playback time) instead of letting the export run all the way out to the
+// literal end. That trailing dead time was BOTH extra real minutes of nothing happening in the
+// GIF AND (once the general smoothness pass exists) a single huge gap that pass would otherwise
+// subdivide into a pile of frames just to sweep a cursor across flat, uninteresting data. Only
+// applied when the window's end wasn't explicitly chosen by the user (an explicit A/B end is
+// respected as-is, even if it runs long — that was a deliberate choice, not a default).
+function cappedTailEnd(transitionIdxs, start, end, msPerSample, playbackSpeed, timeDilation, endWasExplicit, holdMs) {
+  if (endWasExplicit) return end;
+  const inRange = transitionIdxs.filter(i => i >= start && i <= end);
+  const lastActivity = inRange.length ? Math.max(...inRange) : start;
+  const speedDiv = Math.max(0.0001, playbackSpeed * timeDilation);
+  const tailCapSamples = ((holdMs || 1500) * speedDiv) / msPerSample;
+  return Math.min(end, Math.round(lastActivity + tailCapSamples));
 }
 
 // True when `label` is the trip bit itself, another terminal command bit, or something the
@@ -8271,7 +8344,7 @@ function renderLLGLegend() {
     <span>${dashSample(LLG_TRIG_DASH)} Edge-triggered (R_TRIG/F_TRIG)</span>
     <span>${mergeSample} Bracket (&amp;) marks inputs AND-ed together (colored by whether ALL are met); inputs with no bracket are alternative OR inputs</span>
     <span>🖱️ Hover any line to see exactly what it connects</span>
-    <span>⏱️ A base bit → its timed output animates the color traveling along the line while the pickup/dropout timer is actually running</span>
+    <span>⏱️ A timed connection (a base bit → its timed output, or an SV's own pickup/dropout into itself) animates the color traveling along the line while that timer is actually running</span>
   </div>`;
 }
 
@@ -8622,33 +8695,81 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
   // information to place a start/end point — in every one of those cases the edge just falls
   // back to its normal solid, non-animated color).
   function timedPhaseFor(e) {
-    if (!e.priority || timedViewIdx == null) return null;
-    const base = llgDisplayLabel(e.from), target = llgDisplayLabel(e.to);
-    const baseSt = currentBitState(base), targetSt = currentBitState(target);
-    if (!baseSt || !targetSt) return null;
-    if (baseSt.state && !targetSt.state) {
-      // Pickup in progress: base asserted, timed output hasn't caught up yet.
-      const tBaseOn = lastTransitionTo(base, timedViewIdx, true);
-      if (tBaseOn == null) return null; // was already asserted at record start — no start point to animate from
-      const tBaseOffAfter = nextTransitionTo(base, tBaseOn, false);
-      const tTargetOnAfter = nextTransitionTo(target, tBaseOn, true);
-      if (tTargetOnAfter == null) return null; // never actually completes in this record
-      if (tBaseOffAfter != null && tBaseOffAfter < tTargetOnAfter) return null; // reset before pickup completed — indeterminate, don't guess
-      const frac = Math.max(0, Math.min(1, (timedViewIdx - tBaseOn) / Math.max(1, tTargetOnAfter - tBaseOn)));
-      return { frac, kind: 'pickup', bgColor: 'var(--text-muted)', overlayColor: 'var(--red)' };
+    if (timedViewIdx == null) return null;
+    if (e.priority) {
+      const base = llgDisplayLabel(e.from), target = llgDisplayLabel(e.to);
+      const baseSt = currentBitState(base), targetSt = currentBitState(target);
+      if (!baseSt || !targetSt) return null;
+      if (baseSt.state && !targetSt.state) {
+        // Pickup in progress: base asserted, timed output hasn't caught up yet.
+        const tBaseOn = lastTransitionTo(base, timedViewIdx, true);
+        if (tBaseOn == null) return null; // was already asserted at record start — no start point to animate from
+        const tBaseOffAfter = nextTransitionTo(base, tBaseOn, false);
+        const tTargetOnAfter = nextTransitionTo(target, tBaseOn, true);
+        if (tTargetOnAfter == null) return null; // never actually completes in this record
+        if (tBaseOffAfter != null && tBaseOffAfter < tTargetOnAfter) return null; // reset before pickup completed — indeterminate, don't guess
+        const frac = Math.max(0, Math.min(1, (timedViewIdx - tBaseOn) / Math.max(1, tTargetOnAfter - tBaseOn)));
+        return { frac, kind: 'pickup', bgColor: 'var(--text-muted)', overlayColor: 'var(--red)' };
+      }
+      if (!baseSt.state && targetSt.state) {
+        // Dropout in progress: base has released, timed output hasn't dropped out yet.
+        const tBaseOff = lastTransitionTo(base, timedViewIdx, false);
+        if (tBaseOff == null) return null;
+        const tBaseOnAfter = nextTransitionTo(base, tBaseOff, true);
+        const tTargetOffAfter = nextTransitionTo(target, tBaseOff, false);
+        if (tTargetOffAfter == null) return null;
+        if (tBaseOnAfter != null && tBaseOnAfter < tTargetOffAfter) return null; // re-picked-up before dropout completed
+        const frac = Math.max(0, Math.min(1, (timedViewIdx - tBaseOff) / Math.max(1, tTargetOffAfter - tBaseOff)));
+        return { frac, kind: 'dropout', bgColor: 'var(--red)', overlayColor: 'var(--text-muted)' };
+      }
+      return null; // stable — both already agree, nothing to animate
     }
-    if (!baseSt.state && targetSt.state) {
-      // Dropout in progress: base has released, timed output hasn't dropped out yet.
-      const tBaseOff = lastTransitionTo(base, timedViewIdx, false);
-      if (tBaseOff == null) return null;
-      const tBaseOnAfter = nextTransitionTo(base, tBaseOff, true);
-      const tTargetOffAfter = nextTransitionTo(target, tBaseOff, false);
-      if (tTargetOffAfter == null) return null;
-      if (tBaseOnAfter != null && tBaseOnAfter < tTargetOffAfter) return null; // re-picked-up before dropout completed
-      const frac = Math.max(0, Math.min(1, (timedViewIdx - tBaseOff) / Math.max(1, tTargetOffAfter - tBaseOff)));
-      return { frac, kind: 'dropout', bgColor: 'var(--red)', overlayColor: 'var(--text-muted)' };
+    return svOwnDelayPhaseFor(e);
+  }
+  // An SV's OWN pickup/dropout delay — e.g. "SV20 := 27P1 OR 27P2" with a 0.16-cycle pickup —
+  // applies between its input CONDITION becoming satisfied and the SV bit itself asserting, not
+  // between two separately-named bits. Unlike the priority-edge case above, the exact delay is
+  // already known directly from settings (sv.pickupDelay/dropoutDelay, in cycles), so there's no
+  // need to search the record for a confirming transition — just animate for exactly that many
+  // cycles from whichever input transition left this edge's own group satisfied-but-not-yet-
+  // reflected by the SV. For a multi-member AND/OR group, every member gets checked
+  // independently: the one whose transition actually just changed the group's state shows real
+  // motion, while other, already-long-settled members simply compute a fraction ≥ 1 (i.e. render
+  // as fully solid, same as normal) — so this naturally does the right thing without needing to
+  // work out which specific member was "the" trigger.
+  function svOwnDelayPhaseFor(e) {
+    const target = llgDisplayLabel(e.to);
+    const svm = target.match(/^SV(\d+)$/); // bare SV only — SVxxT's own timer is the priority-edge case above
+    if (!svm) return null;
+    const sv = (P.svSettings || []).find(s => s.num === parseInt(svm[1]));
+    if (!sv) return null;
+    const targetSt = currentBitState(target);
+    if (!targetSt) return null;
+    // Whether THIS edge's own group — its AND-branch, its parenthesized sub-expression, or just
+    // itself if it's a plain ungrouped OR-alternative — is satisfied right now, compared against
+    // whether the SV itself has actually caught up to that yet.
+    let groupSatisfied;
+    if (e.subGroup) groupSatisfied = subGroupSatisfied(e.subGroup);
+    else if (e.andGroup) groupSatisfied = andGroupSatisfied(e.andGroup);
+    else {
+      const st = currentBitState(llgDisplayLabel(e.from));
+      if (!st) return null;
+      groupSatisfied = /\bNOT\b/.test(e.mod || '') ? !st.state : st.state;
     }
-    return null; // stable — both already agree, nothing to animate
+    if (groupSatisfied === targetSt.state) return null; // SV has already caught up — nothing running
+    const delayCyc = groupSatisfied ? (sv.pickupDelay || 0) : (sv.dropoutDelay || 0);
+    if (!delayCyc) return null; // no configured delay in this direction — instantaneous, nothing to animate
+    const wantBaseAsserted = /\bNOT\b/.test(e.mod || '') ? !groupSatisfied : groupSatisfied;
+    const tBaseChange = lastTransitionTo(llgDisplayLabel(e.from), timedViewIdx, wantBaseAsserted);
+    if (tBaseChange == null) return null;
+    const samplesPerCyc = P.eventInfo?.samPerCycD || 4;
+    const frac = Math.max(0, Math.min(1, (timedViewIdx - tBaseChange) / Math.max(1, delayCyc * samplesPerCyc)));
+    return {
+      frac,
+      kind: groupSatisfied ? 'pickup' : 'dropout',
+      bgColor: groupSatisfied ? 'var(--text-muted)' : 'var(--red)',
+      overlayColor: groupSatisfied ? 'var(--red)' : 'var(--text-muted)',
+    };
   }
   // Straight-line length of an orthogonal "M x y L x y L x y…" path — dasharray follows the
   // path's actual rendered length regardless of how many bends it has, which is what makes the
@@ -8663,15 +8784,47 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
   // genuinely in progress, otherwise the normal solid edgeLine exactly as before.
   function drawEdge(d, e) {
     const phase = timedPhaseFor(e);
-    if (!phase) return edgeLine(d, edgeColor(e), e);
+    if (!phase) {
+      const note = svResolutionNote(e);
+      if (!note) return edgeLine(d, edgeColor(e), e);
+      // Same as edgeLine, but with the resolution-limit note appended to the hover title —
+      // there's genuinely no recorded instant to animate across here (see svResolutionNote), so
+      // this edge always falls through to this branch for as long as that setting stands.
+      const color = edgeColor(e);
+      const dash = edgeDash(e && e.mod);
+      const title = `<title>${edgeTitleText(e)} — ${note}</title>`;
+      return `<path d="${d}" fill="none" stroke="transparent" stroke-width="12">${title}</path>` +
+        `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.5"${dash ? ` stroke-dasharray="${dash}"` : ''}>${title}</path>`;
+    }
     const total = pathLength(d);
     const fillLen = phase.frac * total;
     const baseTitle = edgeTitleText(e);
     const title = `<title>${baseTitle} — ${phase.kind} timer ${Math.round(phase.frac * 100)}% complete</title>`;
     let out = `<path d="${d}" fill="none" stroke="transparent" stroke-width="12">${title}</path>`;
     out += `<path d="${d}" fill="none" stroke="${phase.bgColor}" stroke-width="1.5">${title}</path>`;
-    if (fillLen > 0.5) out += `<path d="${d}" fill="none" stroke="${phase.overlayColor}" stroke-width="1.5" stroke-dasharray="${fillLen} ${total * 2 + 20}">${title}</path>`;
+    if (fillLen > 0.5) out += `<path d="${d}" fill="none" stroke="${phase.overlayColor}" stroke-width="1.5" stroke-dasharray="${fillLen},${total * 2 + 20}">${title}</path>`;
     return out;
+  }
+  // When an SV's own pickup/dropout is genuinely faster than this file's own digital recording
+  // resolution can distinguish (e.g. a 0.16-cycle pickup in a file sampled at 4 digital
+  // samples/cycle — 0.25-cycle resolution), there is literally no recorded instant where the SV
+  // and its input disagree: both changes land in the very same recorded sample. No animation
+  // logic can sweep across a moment that was never recorded — the honest thing to do is explain
+  // that on hover rather than silently showing nothing with no indication why.
+  function svResolutionNote(e) {
+    const target = llgDisplayLabel(e.to);
+    const svm = target.match(/^SV(\d+)$/);
+    if (!svm) return null;
+    const sv = (P.svSettings || []).find(s => s.num === parseInt(svm[1]));
+    if (!sv) return null;
+    const samplesPerCyc = P.eventInfo?.samPerCycD || 4;
+    const minRes = 1 / samplesPerCyc;
+    const pu = sv.pickupDelay || 0, dof = sv.dropoutDelay || 0;
+    const bits = [];
+    if (pu > 0 && pu < minRes) bits.push(`pickup ${pu} cyc`);
+    if (dof > 0 && dof < minRes) bits.push(`dropout ${dof} cyc`);
+    if (!bits.length) return null;
+    return `${bits.join(', ')} faster than this file's digital recording resolution (${minRes.toFixed(2)} cyc/sample) — appears instantaneous here`;
   }
 
   // ── Port distribution ──
@@ -9268,18 +9421,26 @@ async function downloadLogicChartGIF() {
     const maxDIdx = trans.length ? trans[trans.length - 1].digitalSampleIdx : 0;
     const loA = LLG_MARK_A != null ? LLG_MARK_A : 0;
     const loB = LLG_MARK_B != null ? LLG_MARK_B : maxDIdx;
-    const gifStart = Math.min(loA, loB), gifEnd = Math.max(loA, loB);
+    const rawGifStart = Math.min(loA, loB), rawGifEnd = Math.max(loA, loB);
+    const freqForGif = PARSED.eventInfo?.freq || 60;
+    const digitalRateForGif = PARSED.eventInfo?.samPerCycD || 4;
+    const intervalMsForGif = 1000 / (freqForGif * digitalRateForGif);
+    // Shorten a long, uneventful trailing hold down to a fixed short pause instead of letting the
+    // export run all the way out to the window's own end — see cappedTailEnd. Skipped entirely
+    // when the user explicitly set B themselves.
+    const gifStart = rawGifStart;
+    const gifEnd = cappedTailEnd(trans.map(t => t.digitalSampleIdx), rawGifStart, rawGifEnd, intervalMsForGif, LLG_PLAYBACK_SPEED, BASE_TIME_DILATION, LLG_MARK_B != null, 1500);
     let frameIdxs = [gifStart, ...trans.map(t => t.digitalSampleIdx).filter(d => d >= gifStart && d <= gifEnd), gifEnd];
     // Extra frames DURING any base -> timed-output window that falls (at least partly) inside
     // the selected range, so the animated fill in renderLocalLogicGraph actually shows up as
     // motion across several frames instead of a single instantaneous jump.
     const timerWindows = findTimerAnimationWindows(PARSED, LLG_CURRENT.graph)
       .filter(w => w.endIdx >= gifStart && w.startIdx <= gifEnd);
-    frameIdxs.push(...timerWindowSampleIdxs(timerWindows, 6).filter(d => d >= gifStart && d <= gifEnd));
+    frameIdxs.push(...timerWindowSampleIdxs(timerWindows, 8).filter(d => d >= gifStart && d <= gifEnd));
+    // General smoothness pass: don't let ANY two consecutive frames hold for more than ~700ms of
+    // simulated (speed-adjusted) playback time, same reasoning as the main GIF export.
+    frameIdxs.push(...smoothFrameGaps([...new Set(frameIdxs)].sort((a, b) => a - b), intervalMsForGif, LLG_PLAYBACK_SPEED, BASE_TIME_DILATION, 700, 100));
     frameIdxs = [...new Set(frameIdxs)].sort((a, b) => a - b);
-    const freqForGif = PARSED.eventInfo?.freq || 60;
-    const digitalRateForGif = PARSED.eventInfo?.samPerCycD || 4;
-    const intervalMsForGif = 1000 / (freqForGif * digitalRateForGif);
 
     // Render each frame from a freshly-built FULL diagram (via renderLocalLogicGraph at that view
     // time), measured by its own full content size — NOT the on-screen possibly-clipped/scrolled
@@ -9322,7 +9483,7 @@ async function downloadLogicChartGIF() {
         probe.innerHTML = '';
         probe.appendChild(inner);
         // Measure & rasterize.
-        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        await new Promise(r => setTimeout(r, 0));
         if (fi === 0) {
           W = Math.max(1, Math.ceil((fw + SIZE_SAFETY_PAD) * scale));
           H = Math.max(1, Math.ceil((fh + SIZE_SAFETY_PAD) * scale));
