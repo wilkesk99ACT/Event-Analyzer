@@ -2241,29 +2241,56 @@ function analyzeCEV(P, prevEvent) {
     }
   });
 
-  // Sequence (3V0/V2/V1) and phase-to-phase magnitudes for both terminals, computed from
-  // fundamental (one-cycle DFT) phasors — same method used for the 59YN1 investigation —
-  // rather than a raw instantaneous sum/difference, which triplen harmonics would contaminate.
-  // A representative value is taken as the median across the fault window (consistent with
-  // computeConsistencyCheck's convention), then converted to secondary V via the same PTR basis
-  // as the phase pickups above, so it's directly comparable to VE[...] settings (secondary).
-  const samplesPerCycleV = P.eventInfo.samPerCycA || 32;
-  const seqSecV = {};
+  // Per-sample series (current + voltage, including sequence/phase-to-phase) computed once here
+  // — NOT reduced to a single fault-window figure — so the Protection tab can show the value at
+  // any specific instant (trip instant by default, then live as the measurement cursor moves),
+  // in the exact same units the corresponding waveform/relevant-quantity chart plots (a raw
+  // series value IS what those charts draw directly, with no unit conversion applied).
+  const cyc = P.eventInfo.samPerCycA || 32;
+
+  const rmsIA = computeRmsMagnitude(analogData.map(r => r.IA), cyc);
+  const rmsIB = computeRmsMagnitude(analogData.map(r => r.IB), cyc);
+  const rmsIC = computeRmsMagnitude(analogData.map(r => r.IC), cyc);
+  const seriesMaxPhaseI = rmsIA.map((v, i) => Math.max(v, rmsIB[i], rmsIC[i]));
+  const seriesGroundI = computeRmsMagnitude(analogData.map(r => r.IG), cyc);
+  const seriesNeutralI = computeRmsMagnitude(analogData.map(r => r.IN), cyc);
+  const seriesNegSeqI = computeNegSeqMagnitude(analogData.map(r => r.IA), analogData.map(r => r.IB), analogData.map(r => r.IC), cyc);
+
+  const seriesV = {};
   ['yTerminal', 'zTerminal'].forEach(term => {
-    const ptr = term === 'yTerminal' ? PTRY : PTRZ;
     const isY = term === 'yTerminal';
     const chA = isY ? 'VAY' : 'VAZ', chB = isY ? 'VBY' : 'VBZ', chC = isY ? 'VCY' : 'VCZ';
     const sA = analogData.map(r => r[chA]), sB = analogData.map(r => r[chB]), sC = analogData.map(r => r[chC]);
-    const win = arr => median(arr.slice(fStart, fEnd));
-    seqSecV[term] = {
-      zero: toKvSec(win(computeZeroSeqMagnitude(sA, sB, sC, samplesPerCycleV)), ptr).secondaryV,
-      neg: toKvSec(win(computeNegSeqMagnitude(sA, sB, sC, samplesPerCycleV)), ptr).secondaryV,
-      pos: toKvSec(win(computePosSeqMagnitude(sA, sB, sC, samplesPerCycleV)), ptr).secondaryV,
-      ab: toKvSec(win(computePhaseDiffMagnitude(sA, sB, samplesPerCycleV)), ptr).secondaryV,
-      bc: toKvSec(win(computePhaseDiffMagnitude(sB, sC, samplesPerCycleV)), ptr).secondaryV,
-      ca: toKvSec(win(computePhaseDiffMagnitude(sC, sA, samplesPerCycleV)), ptr).secondaryV,
+    seriesV[term] = {
+      A: computeRmsMagnitude(sA, cyc), B: computeRmsMagnitude(sB, cyc), C: computeRmsMagnitude(sC, cyc),
+      zero: computeZeroSeqMagnitude(sA, sB, sC, cyc),
+      neg: computeNegSeqMagnitude(sA, sB, sC, cyc),
+      pos: computePosSeqMagnitude(sA, sB, sC, cyc),
+      ab: computePhaseDiffMagnitude(sA, sB, cyc),
+      bc: computePhaseDiffMagnitude(sB, sC, cyc),
+      ca: computePhaseDiffMagnitude(sC, sA, cyc),
     };
   });
+
+  // Everything evalOcRowAtIdx/evalVoltRowAtIdx (defined at top level, outside analyzeCEV) need
+  // to re-evaluate any row at an arbitrary sample index later — both the initial default-instant
+  // pass below and the live cursor-driven refresh use these exact same functions, so they can
+  // never drift out of sync with each other.
+  A.cursorData = {
+    CTR, PTRY, PTRZ, VNOM, freq,
+    isPrimaryDataV, voltChannelIsKV,
+    voltUnit: detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], 'V'),
+    current: { maxPhaseI: seriesMaxPhaseI, groundI: seriesGroundI, neutralI: seriesNeutralI, negSeqI: seriesNegSeqI },
+    voltage: seriesV,
+    length: analogData.length,
+  };
+  // Default instant shown before any cursor interaction or client-side bootstrap — using fEnd-1
+  // (end of the existing fault window, already comfortably past the trigger) rather than fStart
+  // directly, since the trigger sample itself can sit earlier than the one-cycle DFT functions
+  // (computeZeroSeqMagnitude etc.) need to have real history behind them, which would otherwise
+  // show 0 for the sequence/phase-to-phase rows until the client-side bootstrap in selectEvent()
+  // re-syncs to the actual trip-transition instant.
+  const defaultProtIdx = Math.max(0, fEnd - 1);
 
   // Current analysis
   A.currents = {};
@@ -2277,117 +2304,74 @@ function analyzeCEV(P, prevEvent) {
     };
   }
 
-  const maxPhaseI = Math.max(
-    computeRMS(faultData, 'IA'), computeRMS(faultData, 'IB'), computeRMS(faultData, 'IC')
-  );
-  const groundI = computeRMS(faultData, 'IG');
-  const neutralI = computeRMS(faultData, 'IN');
-  // Negative-sequence current (I2) needs the actual symmetrical-component transform, not a raw
-  // phase RMS — same fundamental-phasor method as the sequence voltages above, representative
-  // value taken as the median across the fault window.
-  const negSeqIMag = median(
-    computeNegSeqMagnitude(
-      analogData.map(r => r.IA), analogData.map(r => r.IB), analogData.map(r => r.IC),
-      P.eventInfo.samPerCycA || 32
-    ).slice(fStart, fEnd)
-  );
-
-  // Protection element evaluation
-  const addOC = (el, type, pickup, delay, delayUnit, measured) => {
-    const asserted = measured >= pickup;
-    const multiple = pickup > 0 ? measured / pickup : 0;
-    let opTime = null;
-    if (el.startsWith('51') && asserted) {
-      const curve = OC[`${el}JC`] || 'U1';
-      const td = OC[`${el}JTD`] || 1;
-      if (curve === 'U1') opTime = calcU1Time(multiple, td);
-    } else if (asserted && delayUnit === 'cycles') {
-      opTime = delay / freq;
-    }
-
-    A.protectionStatus.push({
-      element: el, type, asserted, multiple: multiple.toFixed(2),
-      pickup: `${pickup} A sec (${(pickup * CTR).toFixed(0)} A pri)`,
-      measured: `${measured.toFixed(3)} A sec (${(measured * CTR).toFixed(1)} A pri)`,
-      timeDelay: delayUnit === 'cycles' ? `${delay} cycles` : `TD=${delay}`,
-      operationTime: asserted && opTime !== null && opTime < 9999
-        ? (opTime < 1 ? `${(opTime * 1000).toFixed(1)} ms` : `${opTime.toFixed(2)} sec`)
-        : 'N/A',
-    });
+  // Protection element evaluation — row descriptors are stored (A.protectionRows) alongside the
+  // rendered default-instant values (A.protectionStatus) so a later cursor move can re-evaluate
+  // every row at a new sample index (see evalOcRowAtIdx) without re-running the whole analysis.
+  A.protectionRows = [];
+  const addOCRow = (el, type, pickup, delay, delayUnit, seriesKey, curve, td) => {
+    A.protectionRows.push({ el, type, pickup, delay, delayUnit, seriesKey, curve, td });
   };
 
   // Instantaneous / definite-time families — 50P/50G/50Q/50N, levels 1-4. Families/levels with
   // no pickup configured (OFF, or not present in this file's settings) are silently skipped.
-  const instMeasured = { '50P': maxPhaseI, '50G': groundI, '50Q': negSeqIMag, '50N': neutralI };
   const instLabel = { '50P': 'Phase', '50G': 'Ground', '50Q': 'Neg-Seq', '50N': 'Neutral' };
+  const instSeriesKey = { '50P': 'maxPhaseI', '50G': 'groundI', '50Q': 'negSeqI', '50N': 'neutralI' };
   ['50P', '50G', '50Q', '50N'].forEach(fam => {
     for (let lvl = 1; lvl <= 4; lvl++) {
       const p = OC[`${fam}${lvl}P`];
-      if (p) addOC(`${fam}${lvl}`, `${instLabel[fam]} Inst/Def-Time OC`, p, OC[`${fam}${lvl}D`] || 0, 'cycles', instMeasured[fam]);
+      if (p) addOCRow(`${fam}${lvl}`, `${instLabel[fam]} Inst/Def-Time OC`, p, OC[`${fam}${lvl}D`] || 0, 'cycles', instSeriesKey[fam]);
     }
   });
 
   // Inverse-time families — 51P, 51G1, 51G2, 51Q, 51N1, 51N2.
-  const timeMeasured = { '51P': maxPhaseI, '51G1': groundI, '51G2': groundI, '51Q': negSeqIMag, '51N1': neutralI, '51N2': neutralI };
   const timeLabel = { '51P': 'Phase', '51G1': 'Ground Lvl1', '51G2': 'Ground Lvl2', '51Q': 'Neg-Seq', '51N1': 'Neutral Lvl1', '51N2': 'Neutral Lvl2' };
+  const timeSeriesKey = { '51P': 'maxPhaseI', '51G1': 'groundI', '51G2': 'groundI', '51Q': 'negSeqI', '51N1': 'neutralI', '51N2': 'neutralI' };
   ['51P', '51G1', '51G2', '51Q', '51N1', '51N2'].forEach(fam => {
     const p = OC[`${fam}JP`];
-    if (p) addOC(fam, `${timeLabel[fam]} Time OC (${OC[`${fam}JC`] || 'U1'})`, p, OC[`${fam}JTD`] || 1, 'td', timeMeasured[fam]);
+    if (p) addOCRow(fam, `${timeLabel[fam]} Time OC (${OC[`${fam}JC`] || 'U1'})`, p, OC[`${fam}JTD`] || 1, 'td', timeSeriesKey[fam], OC[`${fam}JC`] || 'U1', OC[`${fam}JTD`] || 1);
   });
 
+  A.protectionStatus = A.protectionRows.map(row => evalOcRowAtIdx(A, row, defaultProtIdx));
+
   // Voltage element evaluation — Y and Z terminals, phase levels 1-4, phase-to-phase, and
-  // sequence (zero/neg/pos-seq overvoltage). Same primary<->secondary basis as the phase
-  // voltages above (both pickups and VNOM are secondary V; PTR bridges to the channel data).
-  const addVolt = (term, elBase, level, pickup, type, phaseVals) => {
+  // sequence (zero/neg/pos-seq overvoltage). Row descriptors carry a `kind` key into
+  // A.cursorData.voltage[term] (phase letter, ab/bc/ca, or zero/neg/pos) so evalVoltRowAtIdx can
+  // re-evaluate at any sample index using the same per-sample series built above.
+  A.voltageRows = [];
+  const addVoltRow = (term, elBase, level, pickup, type, kindByPh) => {
     if (!pickup) return;
-    const pct = (pickup / (VNOM || 1) * 100).toFixed(1);
-    for (const [ph, val] of Object.entries(phaseVals)) {
-      const asserted = type === 'UV' ? val < pickup : val > pickup;
-      A.voltageStatus.push({
-        element: `${elBase}${ph}${level}`,
-        type: type === 'UV' ? 'Undervoltage' : 'Overvoltage',
-        terminal: term === 'yTerminal' ? 'Y' : 'Z',
-        pickup: `${pickup.toFixed(2)} V sec (${pct}% VNOM)`,
-        measured: `${val.toFixed(2)} V sec`,
-        asserted,
+    for (const [ph, kind] of Object.entries(kindByPh)) {
+      A.voltageRows.push({
+        element: `${elBase}${ph}${level}`, type,
+        typeLabel: type === 'UV' ? 'Undervoltage' : 'Overvoltage',
+        term: term === 'yTerminal' ? 'Y' : 'Z', pickup, kind,
       });
     }
   };
 
   ['yTerminal', 'zTerminal'].forEach(term => {
     const T = term === 'yTerminal' ? 'Y' : 'Z';
-    const phaseRMS = {
-      A: A.voltages[term]?.VA?.fault?.secondaryV || 0,
-      B: A.voltages[term]?.VB?.fault?.secondaryV || 0,
-      C: A.voltages[term]?.VC?.fault?.secondaryV || 0,
-    };
     for (let lvl = 1; lvl <= 4; lvl++) {
-      addVolt(term, `27${T}`, lvl, VE[`27${T}P${lvl}P`], 'UV', phaseRMS);
-      addVolt(term, `59${T}`, lvl, VE[`59${T}P${lvl}P`], 'OV', phaseRMS);
+      addVoltRow(term, `27${T}`, lvl, VE[`27${T}P${lvl}P`], 'UV', { A: 'A', B: 'B', C: 'C' });
+      addVoltRow(term, `59${T}`, lvl, VE[`59${T}P${lvl}P`], 'OV', { A: 'A', B: 'B', C: 'C' });
     }
     // Phase-to-phase (element names match the real relay bits: 27YAB1, 59YAB1, etc.)
-    const ppVals = { AB: seqSecV[term].ab, BC: seqSecV[term].bc, CA: seqSecV[term].ca };
-    addVolt(term, `27${T}`, '1', VE[`27${T}PP1P`], 'UV', ppVals);
-    addVolt(term, `59${T}`, '1', VE[`59${T}PP1P`], 'OV', ppVals);
+    addVoltRow(term, `27${T}`, '1', VE[`27${T}PP1P`], 'UV', { AB: 'ab', BC: 'bc', CA: 'ca' });
+    addVoltRow(term, `59${T}`, '1', VE[`59${T}PP1P`], 'OV', { AB: 'ab', BC: 'bc', CA: 'ca' });
     // Sequence elements — always an overvoltage-style comparison (asserts above pickup)
     [
       [`59${T}N1P`, 'zero', `59${T}N1`, 'Zero-Seq OV (3V0)'],
       [`59${T}N2P`, 'zero', `59${T}N2`, 'Zero-Seq OV (3V0) Lvl2'],
       [`59${T}Q1P`, 'neg', `59${T}Q1`, 'Neg-Seq OV (V2)'],
       [`59${T}V1P`, 'pos', `59${T}V1`, 'Pos-Seq OV (V1)'],
-    ].forEach(([settingKey, seqKind, elName, typeLabel]) => {
+    ].forEach(([settingKey, kind, elName, typeLabel]) => {
       const pickup = VE[settingKey];
       if (!pickup) return;
-      const val = seqSecV[term][seqKind];
-      const pct = (pickup / (VNOM || 1) * 100).toFixed(1);
-      A.voltageStatus.push({
-        element: elName, type: typeLabel, terminal: T,
-        pickup: `${pickup.toFixed(2)} V sec (${pct}% VNOM)`,
-        measured: `${val.toFixed(2)} V sec`,
-        asserted: val > pickup,
-      });
+      A.voltageRows.push({ element: elName, type: 'OV', typeLabel, term: T, pickup, kind });
     });
   });
+
+  A.voltageStatus = A.voltageRows.map(row => evalVoltRowAtIdx(A, row, defaultProtIdx));
 
   // Frequency analysis
   const freqSamples = faultData.map(r => r.FREQ).filter(f => f > 0);
@@ -4179,6 +4163,72 @@ function badge(asserted, label) {
   return `<span class="badge ${cls}"><span class="badge-dot"></span>${text}</span>`;
 }
 
+// Shared row-markup builders for the Protection tab's two tables — used both by the initial
+// full render (renderContent) and by refreshProtectionTab's live cursor-driven updates, so the
+// two paths can never visually drift apart for the same underlying data.
+function renderOcTableRows(rows) {
+  return rows.map(p => {
+    const mColor = parseFloat(p.multiple) >= 1 ? 'var(--red)' : 'var(--green)';
+    return `<tr>
+      <td style="color:var(--accent);font-weight:700">${p.element}</td><td>${p.type}</td>
+      <td>${p.pickup}</td><td>${p.measured}</td>
+      <td style="color:${mColor};font-weight:700">${p.multiple}×</td>
+      <td>${p.timeDelay}</td><td>${p.operationTime}</td>
+      <td>${badge(p.asserted)}</td>
+    </tr>`;
+  }).join('');
+}
+function renderVoltTableRows(rows) {
+  return rows.map(v => `<tr>
+    <td style="color:var(--accent);font-weight:700">${v.element}</td>
+    <td>${v.terminal}</td><td>${v.type}</td>
+    <td>${v.pickup}</td><td>${v.measured}</td>
+    <td>${badge(v.asserted)}</td>
+  </tr>`).join('');
+}
+
+// Picks the sample index the Protection tab should show when no explicit index is given —
+// the resolved trip-transition instant if one was found, else the record's trigger sample,
+// else the CEV analysis's own fallback default (already computed as A.cursorData's basis).
+function defaultProtectionIdx(P, A) {
+  const tripIdx = A?.tripCause?.tripTransition?.analogSampleIdx;
+  if (tripIdx != null) return tripIdx;
+  if (P?.triggerSampleIndex != null && P.triggerSampleIndex > 0) return P.triggerSampleIndex;
+  return A?.cursorData ? A.cursorData.length - 1 : 0;
+}
+
+// Re-evaluates every Protection tab row at a specific full-record sample index and swaps the
+// two table bodies in place (no full tab re-render) — called once right after the initial
+// render to sync from the generic analysis-time default up to the real trip instant, and again
+// on every cursor move/drag/playback frame via setCursorAll. Passing null falls back to
+// defaultProtectionIdx (trip instant, or trigger, or end of record).
+function refreshProtectionTab(idxFull) {
+  if (!PARSED || !ANALYSIS || !ANALYSIS.cursorData) return;
+  const idx = idxFull != null ? idxFull : defaultProtectionIdx(PARSED, ANALYSIS);
+  ANALYSIS.protectionStatus = ANALYSIS.protectionRows.map(row => evalOcRowAtIdx(ANALYSIS, row, idx));
+  ANALYSIS.voltageStatus = ANALYSIS.voltageRows.map(row => evalVoltRowAtIdx(ANALYSIS, row, idx));
+
+  const ocBody = document.getElementById('ocProtectionTbody');
+  if (ocBody) ocBody.innerHTML = renderOcTableRows(ANALYSIS.protectionStatus);
+  const voltBody = document.getElementById('voltProtectionTbody');
+  if (voltBody) voltBody.innerHTML = renderVoltTableRows(ANALYSIS.voltageStatus);
+
+  const label = document.getElementById('protectionInstantLabel');
+  if (label) {
+    const cyc = PARSED.eventInfo.samPerCycA || 32;
+    const msPerSample = 1000 / ((PARSED.eventInfo.freq || 60) * cyc);
+    const trigIdx = PARSED.triggerSampleIndex || 0;
+    const relMs = (idx - trigIdx) * msPerSample;
+    const isCursor = idxFull != null && idxFull === CURSOR_IDX && CURSOR_IDX != null;
+    const isDefaultTrip = idxFull == null;
+    label.textContent = isCursor
+      ? `Showing values at cursor — t = ${relMs.toFixed(1)} ms from trigger`
+      : isDefaultTrip
+        ? `Showing values at trip instant — t = ${relMs.toFixed(1)} ms from trigger`
+        : `Showing values at t = ${relMs.toFixed(1)} ms from trigger`;
+  }
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // BRANCHING LOGIC TREE — renders A.tripCause.logicTree (built in analyzeCEV)
 // ══════════════════════════════════════════════════════════════════════
@@ -5080,6 +5130,77 @@ function computePhaseDiffMagnitude(sX, sY, N) {
   return mag;
 }
 
+function clampIdx(len, i) {
+  return Math.max(0, Math.min(len - 1, i));
+}
+
+// Evaluate one overcurrent/time-overcurrent row at a specific full-record sample index.
+// Called once per row at analysis time (idx = trigger/trip instant) AND again from the
+// client-side cursor-refresh path (idx = wherever the measurement cursor sits) — using the
+// exact same function both times keeps the two paths from ever producing different numbers
+// for the same instant.
+function evalOcRowAtIdx(A, row, idx) {
+  const cd = A.cursorData;
+  const seriesArr = cd.current[row.seriesKey];
+  const measured = seriesArr[clampIdx(seriesArr.length, idx)] || 0;
+  const { pickup, delay, delayUnit, el, type } = row;
+  const asserted = measured >= pickup;
+  const multiple = pickup > 0 ? measured / pickup : 0;
+  let opTime = null;
+  if (el.startsWith('51') && asserted) {
+    const curve = row.curve || 'U1';
+    const td = row.td || 1;
+    if (curve === 'U1') opTime = calcU1Time(multiple, td);
+  } else if (asserted && delayUnit === 'cycles') {
+    opTime = delay / (cd.freq || 60);
+  }
+  return {
+    element: el, type, asserted, multiple: multiple.toFixed(2),
+    pickup: `${pickup} A sec (${(pickup * cd.CTR).toFixed(0)} A pri)`,
+    measured: `${measured.toFixed(3)} A sec (${(measured * cd.CTR).toFixed(1)} A pri)`,
+    timeDelay: delayUnit === 'cycles' ? `${delay} cycles` : `TD=${delay}`,
+    operationTime: asserted && opTime !== null && opTime < 9999
+      ? (opTime < 1 ? `${(opTime * 1000).toFixed(1)} ms` : `${opTime.toFixed(2)} sec`)
+      : 'N/A',
+  };
+}
+
+// Primary<->secondary conversions for a single raw channel reading, matching the basis
+// established for the 59YN1 investigation: SEL pickups/VNOM are always secondary V, while the
+// exported analog channel can be secondary-referenced OR primary-referenced (kV or plain V).
+function rawToSecondaryV(cd, raw, ptr) {
+  const primaryKV = cd.isPrimaryDataV ? (cd.voltChannelIsKV ? raw : raw / 1000) : (raw * ptr) / 1000;
+  return primaryKV * 1000 / ptr;
+}
+function secondaryVToRaw(cd, secondaryV, ptr) {
+  if (!cd.isPrimaryDataV) return secondaryV; // channel already secondary-referenced — no conversion
+  const primaryV = secondaryV * ptr;
+  return cd.voltChannelIsKV ? primaryV / 1000 : primaryV;
+}
+
+// Evaluate one voltage protection row at a specific full-record sample index. `raw` is read
+// directly off A.cursorData.voltage[term][kind] — the same per-sample series the "relevant
+// quantity" waveform chart itself is built from — so it is, by construction, always in the
+// exact units and value that chart shows at that same instant. The pickup (a secondary-V
+// setting) is converted the other direction into that same chart-native basis for direct
+// side-by-side comparison, in addition to the secondary-V figure used for the assert decision.
+function evalVoltRowAtIdx(A, row, idx) {
+  const cd = A.cursorData;
+  const ptr = row.term === 'Y' ? cd.PTRY : cd.PTRZ;
+  const arr = cd.voltage[row.term === 'Y' ? 'yTerminal' : 'zTerminal'][row.kind];
+  const raw = arr[clampIdx(arr.length, idx)] || 0;
+  const secV = rawToSecondaryV(cd, raw, ptr);
+  const pickupChart = secondaryVToRaw(cd, row.pickup, ptr);
+  const asserted = row.type === 'UV' ? secV < row.pickup : secV > row.pickup;
+  const pct = (row.pickup / (cd.VNOM || 1) * 100).toFixed(1);
+  return {
+    element: row.element, type: row.typeLabel, terminal: row.term,
+    pickup: `${row.pickup.toFixed(2)} V sec (${pct}% VNOM) &nbsp;=&nbsp; ${pickupChart.toFixed(2)} ${cd.voltUnit} (chart)`,
+    measured: `${secV.toFixed(2)} V sec &nbsp;=&nbsp; ${raw.toFixed(2)} ${cd.voltUnit} (chart)`,
+    asserted,
+  };
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // PHYSICAL CONSISTENCY CHECKS — does this reading make physical sense?
 // ══════════════════════════════════════════════════════════════════════
@@ -5672,6 +5793,7 @@ function resetChartZoom() {
   PLAY_MARK_A = null; PLAY_MARK_B = null;
   if (typeof setLogicChartViewIdx === 'function') setLogicChartViewIdx(null);
   if (typeof redrawMainLogicTree === 'function') redrawMainLogicTree();
+  if (typeof refreshProtectionTab === 'function') refreshProtectionTab(null);
 }
 
 // Small title-bar hint/badge — shows a static hint on the full view, and a "reset" affordance
@@ -5694,6 +5816,7 @@ function setCursorAll(idxFull) {
   ZOOM_KINDS.forEach(k => rerenderZoomChart(k));
   syncMainScrubber(idxFull);
   updateMainTimeReadout(idxFull);
+  if (typeof refreshProtectionTab === 'function') refreshProtectionTab(idxFull);
   // Keep the shared "current view instant" — used by currentBitState() everywhere, including
   // both the popup logic chart's own timeline and the main-page logic tree below — in sync with
   // the cursor, converting this analog sample index to the corresponding digital-sample index.
@@ -7962,37 +8085,24 @@ function renderContent() {
 
   // ── Protection ──
   html += `<div class="tab-panel" id="panel-protection">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+      <span id="protectionInstantLabel" style="font-size:12px;color:var(--text-dim);font-family:var(--mono);"></span>
+      <span style="font-size:11px;color:var(--text-muted);cursor:pointer;" onclick="refreshProtectionTab(null)" title="Reset to trip instant">Drag the measurement cursor on any chart (Timeline/Voltages/Currents tabs) to see values at that instant — click here to reset to the trip instant.</span>
+    </div>
     <div class="card red-accent"><div class="card-header">🛡️ Overcurrent Protection Elements</div>
       <table class="data-table"><thead><tr>
         <th>Element</th><th>Type</th><th>Pickup</th><th>Measured</th>
         <th>Multiple</th><th>Time Setting</th><th>Op Time</th><th>Status</th>
-      </tr></thead><tbody>`;
-  A.protectionStatus.forEach(p => {
-    const mColor = parseFloat(p.multiple) >= 1 ? 'var(--red)' : 'var(--green)';
-    html += `<tr>
-      <td style="color:var(--accent);font-weight:700">${p.element}</td><td>${p.type}</td>
-      <td>${p.pickup}</td><td>${p.measured}</td>
-      <td style="color:${mColor};font-weight:700">${p.multiple}×</td>
-      <td>${p.timeDelay}</td><td>${p.operationTime}</td>
-      <td>${badge(p.asserted)}</td>
-    </tr>`;
-  });
-  html += `</tbody></table></div>`;
+      </tr></thead><tbody id="ocProtectionTbody">${renderOcTableRows(A.protectionStatus)}</tbody></table></div>`;
 
   if (A.voltageStatus.length) {
     html += `<div class="card yellow-accent"><div class="card-header">📐 Voltage Protection Elements</div>
+      <p style="font-size:11px;color:var(--text-muted);margin-bottom:10px;">
+        "Measured" shows both the secondary-V figure compared against the relay's own setting, and the same value in chart-native units (kV/A primary, whichever this file's channels use) — matching what's plotted on the Voltages/Currents/Timeline charts, so the two can be read side-by-side.
+      </p>
       <table class="data-table"><thead><tr>
         <th>Element</th><th>Terminal</th><th>Type</th><th>Pickup</th><th>Measured</th><th>Status</th>
-      </tr></thead><tbody>`;
-    A.voltageStatus.forEach(v => {
-      html += `<tr>
-        <td style="color:var(--accent);font-weight:700">${v.element}</td>
-        <td>${v.terminal}</td><td>${v.type}</td>
-        <td>${v.pickup}</td><td>${v.measured}</td>
-        <td>${badge(v.asserted)}</td>
-      </tr>`;
-    });
-    html += `</tbody></table></div>`;
+      </tr></thead><tbody id="voltProtectionTbody">${renderVoltTableRows(A.voltageStatus)}</tbody></table></div>`;
   }
   html += `</div>`;
 
@@ -8369,6 +8479,11 @@ function selectEvent(idx) {
   renderBanner();
   renderTabs();
   renderContent();
+  // The Protection tab's initial values (baked into the HTML above) use a generic fault-window
+  // instant since the precise trip-transition sample isn't resolved until analyzeCEV finishes —
+  // re-sync now to the real trip instant (falls back to trigger/end-of-record if this event
+  // has no resolved trip transition, e.g. an ER/non-trip record).
+  if (typeof refreshProtectionTab === 'function') refreshProtectionTab(null);
 }
 
 // Filters the Event Timeline (panel-timeline) to only the bits relevant to the resolved trip.
