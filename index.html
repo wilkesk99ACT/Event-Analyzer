@@ -2092,26 +2092,37 @@ function parseCEV(text, fileName) {
   R.erEquation = erHit ? erHit.value : '';
   R.erEquationName = erHit ? erHit.name : '';
 
-  // OC elements
+  // OC elements — built generically across every instantaneous/def-time family (50P/50G/50Q/50N,
+  // levels 1-4) and every inverse-time family (51P, 51G1, 51G2, 51Q, 51N1, 51N2) rather than
+  // hardcoding just the ones enabled on one particular site. A site with ground/neg-seq/neutral
+  // overcurrent enabled (E50Q, E50N, E51G2, E51Q, E51N1, E51N2 = 1) now gets pickup coverage too;
+  // families left OFF/disabled on a given file simply yield null pickups and are skipped later.
   R.overcurrentElements = {
-    E50P: m(/E50P\s*:=\s*(\S+)/) || 'N',
-    E50G: m(/E50G\s*:=\s*(\S+)/) || 'N',
-    E51P: m(/E51P\s*:=\s*(\S+)/) || 'N',
-    E51G1: m(/E51G1\s*:=\s*(\S+)/) || 'N',
-    '50P1P': mf(/50P1P\s*:=\s*([\d.]+)/), '50P1D': mf(/50P1D\s*:=\s*([\d.]+)/),
-    '50G1P': mf(/50G1P\s*:=\s*([\d.]+)/), '50G1D': mf(/50G1D\s*:=\s*([\d.]+)/),
-    '51PJP': mf(/51PJP\s*:=\s*([\d.]+)/), '51PJC': m(/51PJC\s*:=\s*(\S+)/),
-    '51PJTD': mf(/51PJTD\s*:=\s*([\d.]+)/),
-    '51G1JP': mf(/51G1JP\s*:=\s*([\d.]+)/), '51G1JC': m(/51G1JC\s*:=\s*(\S+)/),
-    '51G1JTD': mf(/51G1JTD\s*:=\s*([\d.]+)/),
+    E50P: m(/E50P\s*:=\s*(\S+)/) || 'N', E50G: m(/E50G\s*:=\s*(\S+)/) || 'N',
+    E50Q: m(/E50Q\s*:=\s*(\S+)/) || 'N', E50N: m(/E50N\s*:=\s*(\S+)/) || 'N',
+    E51P: m(/E51P\s*:=\s*(\S+)/) || 'N', E51G1: m(/E51G1\s*:=\s*(\S+)/) || 'N',
+    E51G2: m(/E51G2\s*:=\s*(\S+)/) || 'N', E51Q: m(/E51Q\s*:=\s*(\S+)/) || 'N',
+    E51N1: m(/E51N1\s*:=\s*(\S+)/) || 'N', E51N2: m(/E51N2\s*:=\s*(\S+)/) || 'N',
   };
+  ['50P', '50G', '50Q', '50N'].forEach(fam => {
+    for (let lvl = 1; lvl <= 4; lvl++) {
+      R.overcurrentElements[`${fam}${lvl}P`] = mf(new RegExp(`${fam}${lvl}P\\s*:=\\s*([\\d.]+)`));
+      R.overcurrentElements[`${fam}${lvl}D`] = mf(new RegExp(`${fam}${lvl}D\\s*:=\\s*([\\d.]+)`));
+    }
+  });
+  ['51P', '51G1', '51G2', '51Q', '51N1', '51N2'].forEach(fam => {
+    R.overcurrentElements[`${fam}JP`] = mf(new RegExp(`${fam}JP\\s*:=\\s*([\\d.]+)`));
+    R.overcurrentElements[`${fam}JC`] = m(new RegExp(`${fam}JC\\s*:=\\s*(\\S+)`));
+    R.overcurrentElements[`${fam}JTD`] = mf(new RegExp(`${fam}JTD\\s*:=\\s*([\\d.]+)`));
+  });
 
-  // Voltage element pickups
-  const vPairs = [
-    '27YP1P','27YP2P','27YP3P','27YP4P','59YP1P','59YP2P','59YP3P','59YP4P',
-    '27ZP1P','27ZP2P','27ZP3P','27ZP4P','59ZP1P','59ZP2P','59ZP3P','59ZP4P',
-    '59YN1P','59YN2P','59YQ1P','59YV1P',
-  ];
+  // Voltage element pickups — Y and Z terminal, phase levels 1-4, phase-to-phase, and the
+  // sequence family (zero/neg/pos-seq overvoltage: 59#N1/N2, 59#Q1, 59#V1).
+  const vPairs = [];
+  ['Y', 'Z'].forEach(t => {
+    for (let lvl = 1; lvl <= 4; lvl++) vPairs.push(`27${t}P${lvl}P`, `59${t}P${lvl}P`);
+    vPairs.push(`27${t}PP1P`, `59${t}PP1P`, `59${t}N1P`, `59${t}N2P`, `59${t}Q1P`, `59${t}V1P`);
+  });
   vPairs.forEach(k => {
     const re = new RegExp(k.replace(/([()])/g,'\\$1') + '\\s*:=\\s*([\\d.]+|OFF)');
     const vm = S.match(re);
@@ -2203,9 +2214,16 @@ function analyzeCEV(P, prevEvent) {
     ? P.settings.primaryValues
     : detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], '').toUpperCase() === 'KV';
   const voltChannelIsKV = detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], '').toUpperCase() === 'KV';
+  // Shared primary<->secondary converter (previously redefined per-terminal inline) — also
+  // used below for sequence (3V0/V2/V1) and phase-to-phase magnitudes, which are derived from
+  // the same raw channel arrays and need the identical basis conversion.
+  const toKvSec = (raw, ptr) => {
+    const primaryKV = isPrimaryDataV ? (voltChannelIsKV ? raw : raw / 1000) : (raw * ptr) / 1000;
+    const secondaryV = primaryKV * 1000 / ptr;
+    return { primaryKV, secondaryV };
+  };
   ['yTerminal', 'zTerminal'].forEach(term => {
     const ptr = term === 'yTerminal' ? PTRY : PTRZ;
-    const pre = term === 'yTerminal' ? 'VAY' : 'VAZ';
     const phases = term === 'yTerminal'
       ? { VA: 'VAY', VB: 'VBY', VC: 'VCY' }
       : { VA: 'VAZ', VB: 'VBZ', VC: 'VCZ' };
@@ -2214,12 +2232,7 @@ function analyzeCEV(P, prevEvent) {
     for (const [ph, key] of Object.entries(phases)) {
       const pfRaw = computeRMS(preFault, key);
       const fRaw = computeRMS(faultData, key);
-      const toKvSec = raw => {
-        const primaryKV = isPrimaryDataV ? (voltChannelIsKV ? raw : raw / 1000) : (raw * ptr) / 1000;
-        const secondaryV = primaryKV * 1000 / ptr;
-        return { primaryKV, secondaryV };
-      };
-      const pf = toKvSec(pfRaw), f = toKvSec(fRaw);
+      const pf = toKvSec(pfRaw, ptr), f = toKvSec(fRaw, ptr);
       A.voltages[term][ph] = {
         preFault: pf,
         fault: f,
@@ -2228,9 +2241,33 @@ function analyzeCEV(P, prevEvent) {
     }
   });
 
+  // Sequence (3V0/V2/V1) and phase-to-phase magnitudes for both terminals, computed from
+  // fundamental (one-cycle DFT) phasors — same method used for the 59YN1 investigation —
+  // rather than a raw instantaneous sum/difference, which triplen harmonics would contaminate.
+  // A representative value is taken as the median across the fault window (consistent with
+  // computeConsistencyCheck's convention), then converted to secondary V via the same PTR basis
+  // as the phase pickups above, so it's directly comparable to VE[...] settings (secondary).
+  const samplesPerCycleV = P.eventInfo.samPerCycA || 32;
+  const seqSecV = {};
+  ['yTerminal', 'zTerminal'].forEach(term => {
+    const ptr = term === 'yTerminal' ? PTRY : PTRZ;
+    const isY = term === 'yTerminal';
+    const chA = isY ? 'VAY' : 'VAZ', chB = isY ? 'VBY' : 'VBZ', chC = isY ? 'VCY' : 'VCZ';
+    const sA = analogData.map(r => r[chA]), sB = analogData.map(r => r[chB]), sC = analogData.map(r => r[chC]);
+    const win = arr => median(arr.slice(fStart, fEnd));
+    seqSecV[term] = {
+      zero: toKvSec(win(computeZeroSeqMagnitude(sA, sB, sC, samplesPerCycleV)), ptr).secondaryV,
+      neg: toKvSec(win(computeNegSeqMagnitude(sA, sB, sC, samplesPerCycleV)), ptr).secondaryV,
+      pos: toKvSec(win(computePosSeqMagnitude(sA, sB, sC, samplesPerCycleV)), ptr).secondaryV,
+      ab: toKvSec(win(computePhaseDiffMagnitude(sA, sB, samplesPerCycleV)), ptr).secondaryV,
+      bc: toKvSec(win(computePhaseDiffMagnitude(sB, sC, samplesPerCycleV)), ptr).secondaryV,
+      ca: toKvSec(win(computePhaseDiffMagnitude(sC, sA, samplesPerCycleV)), ptr).secondaryV,
+    };
+  });
+
   // Current analysis
   A.currents = {};
-  for (const ch of ['IA', 'IB', 'IC', 'IG']) {
+  for (const ch of ['IA', 'IB', 'IC', 'IG', 'IN']) {
     const pfRMS = computeRMS(preFault, ch);
     const fRMS = computeRMS(faultData, ch);
     A.currents[ch] = {
@@ -2244,6 +2281,16 @@ function analyzeCEV(P, prevEvent) {
     computeRMS(faultData, 'IA'), computeRMS(faultData, 'IB'), computeRMS(faultData, 'IC')
   );
   const groundI = computeRMS(faultData, 'IG');
+  const neutralI = computeRMS(faultData, 'IN');
+  // Negative-sequence current (I2) needs the actual symmetrical-component transform, not a raw
+  // phase RMS — same fundamental-phasor method as the sequence voltages above, representative
+  // value taken as the median across the fault window.
+  const negSeqIMag = median(
+    computeNegSeqMagnitude(
+      analogData.map(r => r.IA), analogData.map(r => r.IB), analogData.map(r => r.IC),
+      P.eventInfo.samPerCycA || 32
+    ).slice(fStart, fEnd)
+  );
 
   // Protection element evaluation
   const addOC = (el, type, pickup, delay, delayUnit, measured) => {
@@ -2251,8 +2298,8 @@ function analyzeCEV(P, prevEvent) {
     const multiple = pickup > 0 ? measured / pickup : 0;
     let opTime = null;
     if (el.startsWith('51') && asserted) {
-      const curve = el === '51P' ? (OC['51PJC'] || 'U1') : (OC['51G1JC'] || 'U1');
-      const td = el === '51P' ? (OC['51PJTD'] || 1) : (OC['51G1JTD'] || 1);
+      const curve = OC[`${el}JC`] || 'U1';
+      const td = OC[`${el}JTD`] || 1;
       if (curve === 'U1') opTime = calcU1Time(multiple, td);
     } else if (asserted && delayUnit === 'cycles') {
       opTime = delay / freq;
@@ -2269,36 +2316,78 @@ function analyzeCEV(P, prevEvent) {
     });
   };
 
-  if (OC['50P1P']) addOC('50P1', 'Phase Inst/Def-Time OC', OC['50P1P'], OC['50P1D'] || 0, 'cycles', maxPhaseI);
-  if (OC['50G1P']) addOC('50G1', 'Ground Inst/Def-Time OC', OC['50G1P'], OC['50G1D'] || 0, 'cycles', groundI);
-  if (OC['51PJP']) addOC('51P', `Phase Time OC (${OC['51PJC'] || 'U1'})`, OC['51PJP'], OC['51PJTD'] || 1, 'td', maxPhaseI);
-  if (OC['51G1JP']) addOC('51G1', `Ground Time OC (${OC['51G1JC'] || 'U1'})`, OC['51G1JP'], OC['51G1JTD'] || 1, 'td', groundI);
+  // Instantaneous / definite-time families — 50P/50G/50Q/50N, levels 1-4. Families/levels with
+  // no pickup configured (OFF, or not present in this file's settings) are silently skipped.
+  const instMeasured = { '50P': maxPhaseI, '50G': groundI, '50Q': negSeqIMag, '50N': neutralI };
+  const instLabel = { '50P': 'Phase', '50G': 'Ground', '50Q': 'Neg-Seq', '50N': 'Neutral' };
+  ['50P', '50G', '50Q', '50N'].forEach(fam => {
+    for (let lvl = 1; lvl <= 4; lvl++) {
+      const p = OC[`${fam}${lvl}P`];
+      if (p) addOC(`${fam}${lvl}`, `${instLabel[fam]} Inst/Def-Time OC`, p, OC[`${fam}${lvl}D`] || 0, 'cycles', instMeasured[fam]);
+    }
+  });
 
-  // Voltage element evaluation
-  const yRMS = {
-    A: A.voltages.yTerminal?.VA?.fault?.secondaryV || 0,
-    B: A.voltages.yTerminal?.VB?.fault?.secondaryV || 0,
-    C: A.voltages.yTerminal?.VC?.fault?.secondaryV || 0,
-  };
+  // Inverse-time families — 51P, 51G1, 51G2, 51Q, 51N1, 51N2.
+  const timeMeasured = { '51P': maxPhaseI, '51G1': groundI, '51G2': groundI, '51Q': negSeqIMag, '51N1': neutralI, '51N2': neutralI };
+  const timeLabel = { '51P': 'Phase', '51G1': 'Ground Lvl1', '51G2': 'Ground Lvl2', '51Q': 'Neg-Seq', '51N1': 'Neutral Lvl1', '51N2': 'Neutral Lvl2' };
+  ['51P', '51G1', '51G2', '51Q', '51N1', '51N2'].forEach(fam => {
+    const p = OC[`${fam}JP`];
+    if (p) addOC(fam, `${timeLabel[fam]} Time OC (${OC[`${fam}JC`] || 'U1'})`, p, OC[`${fam}JTD`] || 1, 'td', timeMeasured[fam]);
+  });
 
-  const addVolt = (elBase, level, pickup, type) => {
+  // Voltage element evaluation — Y and Z terminals, phase levels 1-4, phase-to-phase, and
+  // sequence (zero/neg/pos-seq overvoltage). Same primary<->secondary basis as the phase
+  // voltages above (both pickups and VNOM are secondary V; PTR bridges to the channel data).
+  const addVolt = (term, elBase, level, pickup, type, phaseVals) => {
     if (!pickup) return;
-    const pct = (pickup / VNOM * 100).toFixed(1);
-    for (const [ph, val] of Object.entries(yRMS)) {
+    const pct = (pickup / (VNOM || 1) * 100).toFixed(1);
+    for (const [ph, val] of Object.entries(phaseVals)) {
       const asserted = type === 'UV' ? val < pickup : val > pickup;
       A.voltageStatus.push({
         element: `${elBase}${ph}${level}`,
-        pickup: `${pickup.toFixed(2)} V (${pct}%)`,
-        measured: `${val.toFixed(2)} V`,
+        type: type === 'UV' ? 'Undervoltage' : 'Overvoltage',
+        terminal: term === 'yTerminal' ? 'Y' : 'Z',
+        pickup: `${pickup.toFixed(2)} V sec (${pct}% VNOM)`,
+        measured: `${val.toFixed(2)} V sec`,
         asserted,
       });
     }
   };
 
-  addVolt('27Y', '1', VE['27YP1P'], 'UV');
-  addVolt('27Y', '2', VE['27YP2P'], 'UV');
-  addVolt('59Y', '1', VE['59YP1P'], 'OV');
-  addVolt('59Y', '2', VE['59YP2P'], 'OV');
+  ['yTerminal', 'zTerminal'].forEach(term => {
+    const T = term === 'yTerminal' ? 'Y' : 'Z';
+    const phaseRMS = {
+      A: A.voltages[term]?.VA?.fault?.secondaryV || 0,
+      B: A.voltages[term]?.VB?.fault?.secondaryV || 0,
+      C: A.voltages[term]?.VC?.fault?.secondaryV || 0,
+    };
+    for (let lvl = 1; lvl <= 4; lvl++) {
+      addVolt(term, `27${T}`, lvl, VE[`27${T}P${lvl}P`], 'UV', phaseRMS);
+      addVolt(term, `59${T}`, lvl, VE[`59${T}P${lvl}P`], 'OV', phaseRMS);
+    }
+    // Phase-to-phase (element names match the real relay bits: 27YAB1, 59YAB1, etc.)
+    const ppVals = { AB: seqSecV[term].ab, BC: seqSecV[term].bc, CA: seqSecV[term].ca };
+    addVolt(term, `27${T}`, '1', VE[`27${T}PP1P`], 'UV', ppVals);
+    addVolt(term, `59${T}`, '1', VE[`59${T}PP1P`], 'OV', ppVals);
+    // Sequence elements — always an overvoltage-style comparison (asserts above pickup)
+    [
+      [`59${T}N1P`, 'zero', `59${T}N1`, 'Zero-Seq OV (3V0)'],
+      [`59${T}N2P`, 'zero', `59${T}N2`, 'Zero-Seq OV (3V0) Lvl2'],
+      [`59${T}Q1P`, 'neg', `59${T}Q1`, 'Neg-Seq OV (V2)'],
+      [`59${T}V1P`, 'pos', `59${T}V1`, 'Pos-Seq OV (V1)'],
+    ].forEach(([settingKey, seqKind, elName, typeLabel]) => {
+      const pickup = VE[settingKey];
+      if (!pickup) return;
+      const val = seqSecV[term][seqKind];
+      const pct = (pickup / (VNOM || 1) * 100).toFixed(1);
+      A.voltageStatus.push({
+        element: elName, type: typeLabel, terminal: T,
+        pickup: `${pickup.toFixed(2)} V sec (${pct}% VNOM)`,
+        measured: `${val.toFixed(2)} V sec`,
+        asserted: val > pickup,
+      });
+    });
+  });
 
   // Frequency analysis
   const freqSamples = faultData.map(r => r.FREQ).filter(f => f > 0);
@@ -4948,6 +5037,45 @@ function computeNegSeqMagnitude(sA, sB, sC, N) {
     const vre = (pA.re[i] + a2bRe + acRe) / 3;
     const vim = (pA.im[i] + a2bIm + acIm) / 3;
     mag[i] = Math.sqrt(vre * vre + vim * vim);
+  }
+  return mag;
+}
+
+// Positive-sequence magnitude series, via V1 = (Va + a·Vb + a²·Vc)/3 where a = 1∠120°.
+// Same one-cycle DFT phasors as computeNegSeqMagnitude, with a/a² swapped between Vb/Vc.
+// Used for 59YV1/59ZV1 (positive-sequence overvoltage).
+function computePosSeqMagnitude(sA, sB, sC, N) {
+  const pA = computeFundamentalPhasors(sA, N);
+  const pB = computeFundamentalPhasors(sB, N);
+  const pC = computeFundamentalPhasors(sC, N);
+  const aRe = -0.5, aIm = Math.sqrt(3) / 2;        // a  = 1∠120°
+  const a2Re = -0.5, a2Im = -Math.sqrt(3) / 2;      // a² = 1∠240°
+  const n = sA.length;
+  const mag = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    const abRe = aRe * pB.re[i] - aIm * pB.im[i];
+    const abIm = aRe * pB.im[i] + aIm * pB.re[i];
+    const a2cRe = a2Re * pC.re[i] - a2Im * pC.im[i];
+    const a2cIm = a2Re * pC.im[i] + a2Im * pC.re[i];
+    const vre = (pA.re[i] + abRe + a2cRe) / 3;
+    const vim = (pA.im[i] + abIm + a2cIm) / 3;
+    mag[i] = Math.sqrt(vre * vre + vim * vim);
+  }
+  return mag;
+}
+
+// Phase-to-phase fundamental magnitude (e.g. Va - Vb), via the same one-cycle DFT phasors —
+// a true fundamental-frequency difference rather than a raw instantaneous subtraction, so
+// harmonic content doesn't inflate the value compared against a 27#PP1/59#PP1 pickup.
+function computePhaseDiffMagnitude(sX, sY, N) {
+  const pX = computeFundamentalPhasors(sX, N);
+  const pY = computeFundamentalPhasors(sY, N);
+  const n = sX.length;
+  const mag = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    const re = pX.re[i] - pY.re[i];
+    const im = pX.im[i] - pY.im[i];
+    mag[i] = Math.sqrt(re * re + im * im);
   }
   return mag;
 }
@@ -7810,14 +7938,6 @@ function renderContent() {
     </div>`;
   });
 
-  if (A.voltageStatus.length) {
-    html += `<div class="card yellow-accent"><div class="card-header">📐 Voltage Element Status</div>
-      <table class="data-table"><thead><tr><th>Element</th><th>Pickup</th><th>Measured</th><th>Status</th></tr></thead><tbody>`;
-    A.voltageStatus.forEach(v => {
-      html += `<tr><td>${v.element}</td><td>${v.pickup}</td><td>${v.measured}</td><td>${badge(v.asserted)}</td></tr>`;
-    });
-    html += `</tbody></table></div>`;
-  }
   html += `</div>`;
 
   // ── Currents ──
@@ -7827,7 +7947,7 @@ function renderContent() {
         <th>Channel</th><th>Pre-Fault (Sec A)</th><th>Pre-Fault (Pri A)</th>
         <th>Fault (Sec A)</th><th>Fault (Pri A)</th><th>Change</th>
       </tr></thead><tbody>`;
-  for (const ch of ['IA', 'IB', 'IC', 'IG']) {
+  for (const ch of ['IA', 'IB', 'IC', 'IG', 'IN']) {
     const d = A.currents[ch];
     const chg = d.change;
     const color = Math.abs(chg) > 100 ? 'var(--red)' : Math.abs(chg) > 50 ? 'var(--yellow)' : 'var(--green)';
@@ -7857,7 +7977,24 @@ function renderContent() {
       <td>${badge(p.asserted)}</td>
     </tr>`;
   });
-  html += `</tbody></table></div></div>`;
+  html += `</tbody></table></div>`;
+
+  if (A.voltageStatus.length) {
+    html += `<div class="card yellow-accent"><div class="card-header">📐 Voltage Protection Elements</div>
+      <table class="data-table"><thead><tr>
+        <th>Element</th><th>Terminal</th><th>Type</th><th>Pickup</th><th>Measured</th><th>Status</th>
+      </tr></thead><tbody>`;
+    A.voltageStatus.forEach(v => {
+      html += `<tr>
+        <td style="color:var(--accent);font-weight:700">${v.element}</td>
+        <td>${v.terminal}</td><td>${v.type}</td>
+        <td>${v.pickup}</td><td>${v.measured}</td>
+        <td>${badge(v.asserted)}</td>
+      </tr>`;
+    });
+    html += `</tbody></table></div>`;
+  }
+  html += `</div>`;
 
   // ── Diagnostics ──
   html += `<div class="tab-panel" id="panel-diagnostics">
