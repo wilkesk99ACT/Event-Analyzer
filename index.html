@@ -787,7 +787,20 @@ body.dragging-file #drop-overlay { display: flex; }
 .card.blue-accent { border-top: 3px solid var(--accent); }
 
 /* ── Tables ── */
+/* Protection-style tables carry enough columns (pickup/measured/multiple/time/op-time/status)
+   that on a narrow viewport they no longer fit — table-layout:auto lets long unbreakable
+   figures (e.g. "1300 A pri") force every column wider until the table blows past the card and
+   the whole page grows a horizontal scrollbar. Wrapping the table in .table-scroll contains
+   that overflow to just the table itself, so the rest of the page (tabs, cards, charts) never
+   shifts. */
+.table-scroll { overflow-x: auto; }
 .data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.data-table .group-row td {
+  padding: 7px 10px 5px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-dim); background: var(--bg2);
+  border-bottom: 1px solid var(--card-border);
+}
+.data-table .group-row:first-child td { padding-top: 5px; }
 .data-table th {
   text-align: left;
   padding: 8px 10px;
@@ -1823,6 +1836,15 @@ function parseCEV(text, fileName) {
       location: get('LOCATION') || '',
       shot: get('SHOT') || '',
       targets: get('TARGETS') || '',
+      // The relay's OWN reported fault-current magnitudes for this record (primary amps, RMS).
+      // Captured because they are the single most authoritative in-file reference for
+      // calibrating what basis and scaling the analog columns actually use — see
+      // calibrateAnalogBasis(), which compares these against what we compute from the samples.
+      faultCurrents: ['IA', 'IB', 'IC', 'IG', '3I2'].reduce((o, k) => {
+        const v = parseFloat(get(k));
+        if (Number.isFinite(v)) o[k] = Math.abs(v);
+        return o;
+      }, {}),
     };
 
     // SEL-751 has CT/PT ratios in the event summary
@@ -2105,12 +2127,20 @@ function parseCEV(text, fileName) {
     for (let lvl = 1; lvl <= 4; lvl++) {
       R.overcurrentElements[`${fam}${lvl}P`] = mf(new RegExp(`${fam}${lvl}P\\s*:=\\s*([\\d.]+)`));
       R.overcurrentElements[`${fam}${lvl}D`] = mf(new RegExp(`${fam}${lvl}D\\s*:=\\s*([\\d.]+)`));
+      // TORQUE CONTROL. An overcurrent element with its torque-control equation de-asserted
+      // does not operate no matter how far over pickup the current goes — so a table that
+      // compares magnitude against pickup alone can report "asserted" for an element the relay
+      // has deliberately disabled. Real example in the wild: 50G1TC/51G1TC := LT01 with LT01
+      // never asserting for the whole record, so the relay's own 51G1 bit stayed low the entire
+      // fault while raw magnitude sat at 3x pickup.
+      R.overcurrentElements[`${fam}${lvl}TC`] = m(new RegExp(`${fam}${lvl}TC\\s*:=\\s*(.+)`));
     }
   });
   ['51P', '51G1', '51G2', '51Q', '51N1', '51N2'].forEach(fam => {
     R.overcurrentElements[`${fam}JP`] = mf(new RegExp(`${fam}JP\\s*:=\\s*([\\d.]+)`));
     R.overcurrentElements[`${fam}JC`] = m(new RegExp(`${fam}JC\\s*:=\\s*(\\S+)`));
     R.overcurrentElements[`${fam}JTD`] = mf(new RegExp(`${fam}JTD\\s*:=\\s*([\\d.]+)`));
+    R.overcurrentElements[`${fam}TC`] = m(new RegExp(`${fam}TC\\s*:=\\s*(.+)`));
   });
 
   // Voltage element pickups — Y and Z terminal, phase levels 1-4, phase-to-phase, and the
@@ -2160,7 +2190,151 @@ function parseCEV(text, fileName) {
     settingsStart: settingsStart,
   };
 
+  calibrateAnalogBasis(R);
+
   return R;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ANALOG BASIS CALIBRATION
+// ════════════════════════════════════════════════════════════════════════════
+// TWO independent conventions govern how a CEV's analog columns relate to the relay's
+// pickup settings. Getting either one wrong silently corrupts every pickup comparison in
+// the Protection tab — and neither is reliably stated anywhere in the file's own headers:
+//
+//  1. PRIMARY vs SECONDARY.  SEL pickup settings (50P1P, 50G1P, 51PJP, VNOM, …) are ALWAYS
+//     expressed in CT/PT SECONDARY terms. The exported analog channels may be secondary OR
+//     primary. A SEL-651R recloser exports PRIMARY amps with a bare "IA" header that says
+//     nothing about it. Comparing a primary-amp channel straight against a secondary-amp
+//     pickup overstates every element by the CT ratio — for CTR=100 that is a factor of 100,
+//     which is exactly how a 13 A-secondary (1300 A primary) 50P1 comes to read "asserted,
+//     7.96x pickup" on a fault that never exceeded ~350 A primary and that the relay's own
+//     50P1 bit correctly never asserted for.
+//
+//  2. RMS-SCALED vs TRUE-INSTANTANEOUS SAMPLES.  A *filtered* CEV ("Report Type: CEV,
+//     Filtered") carries the relay's digital-filter output scaled so the sinusoid's
+//     AMPLITUDE equals the RMS phasor magnitude — that is why SynchroWAVe's ".Mag" traces
+//     for such a file peak at the same numbers the event summary quotes as fault currents.
+//     Taking a conventional RMS of those samples divides by an extra sqrt(2) and understates
+//     every magnitude by ~29%. An unfiltered/raw report needs no such correction, so this
+//     can NOT be hardcoded — it has to be measured per file.
+//
+// Both are therefore calibrated against references the relay itself produced and put in
+// this very file:
+//   * the event-summary fault currents (IA/IB/IC/IG) — the relay's own magnitudes, primary
+//     amps RMS, for this exact record;
+//   * VNOM x PTR — nominal primary phase voltage — against the measured pre-fault voltage.
+// The measured ratio is SNAPPED to the nearest physically meaningful candidate rather than
+// used raw, because a one-cycle sliding window smears a short or decaying fault peak by a
+// few percent (observed ratios of 1.42-1.55 all mean sqrt(2), not "1.48"). If a file offers
+// no usable reference, the scale stays 1.0 — identical to the previous behaviour — and the
+// uncertainty is surfaced in the UI rather than hidden.
+
+// Whether this file's analog channels are primary-referred. Single shared definition so the
+// protection table, the consistency checks and the calibration can never disagree: an
+// explicit PRIM_VAL flag wins where present (SEL-751 style), otherwise the "(kV)" voltage
+// unit label is the fallback tell for formats that expose no flag at all (SEL-651R).
+function analogDataIsPrimary(P) {
+  if (P?.settings?.primaryValues !== undefined && P?.settings?.primaryValues !== null) return P.settings.primaryValues;
+  return detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], '').toUpperCase() === 'KV';
+}
+
+// Snap an observed ratio to the nearest candidate in log space, but refuse to snap at all if
+// nothing is within ~25% — a wild ratio means the reference isn't what we assumed it was, and
+// falling back to "uncalibrated" is safer than confidently applying a fabricated scale.
+function snapToCandidate(ratio, candidates) {
+  let best = null, bestErr = Infinity;
+  for (const c of candidates) {
+    const err = Math.abs(Math.log(ratio / c.v));
+    if (err < bestErr) { bestErr = err; best = c; }
+  }
+  return (best && bestErr <= Math.log(1.25)) ? best : null;
+}
+
+function medianOf(a) {
+  if (!a.length) return null;
+  const s = [...a].sort((x, y) => x - y);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+function calibrateAnalogBasis(R) {
+  // magScale multiplies every computed RMS/phasor magnitude to turn it into the true RMS
+  // phasor magnitude in the channel's own units. 1.0 = no correction (raw instantaneous data).
+  R.magScale = 1;
+  R.basisCalibration = { magScale: 1, source: 'none', confidence: 'uncalibrated', detail:
+    'No in-file reference (event-summary fault currents or VNOM x PTR) was available to calibrate magnitude scaling; magnitudes are shown as a conventional RMS of the samples.' };
+
+  const data = R.analogData || [];
+  if (!data.length) return;
+  const N = R.eventInfo?.samPerCycA || 32;
+  const CTR = R.settings?.CTR || 1;
+  const PTR = R.settings?.PTRY || 1;
+  const isPrimary = analogDataIsPrimary(R);
+  const voltIsKV = detectChannelUnit(R, ['VA', 'VAY', 'VB', 'VBY'], '').toUpperCase() === 'KV';
+
+  const peakMag = (key) => {
+    const s = data.map(r => r[key] || 0);
+    if (!s.some(v => Math.abs(v) > 1e-9)) return null;
+    const m = computeRmsMagnitude(s, N);
+    const p = Math.max(...m);
+    return p > 0 ? p : null;
+  };
+
+  // ── Reference 1: the relay's own fault currents ──────────────────────────────
+  // hdr[ch] is primary amps RMS; obs is what we compute from the samples, so
+  // obs * (isPrimary ? 1 : CTR) is our primary-amp estimate and the leftover ratio is
+  // purely the magnitude-scaling question.
+  const hdr = R.eventInfo?.faultCurrents || {};
+  const basisFactor = isPrimary ? 1 : CTR;
+  const iRatios = [];
+  for (const ch of ['IA', 'IB', 'IC', 'IG']) {
+    const ref = hdr[ch], obs = peakMag(ch);
+    if (ref > 0 && obs > 0) iRatios.push(ref / (obs * basisFactor));
+  }
+
+  // ── Reference 2: nominal voltage ─────────────────────────────────────────────
+  // VNOM is secondary volts; VNOM * PTR is nominal primary volts. Compared against the
+  // MEDIAN phase-voltage magnitude (robust: voltage sits at nominal for most of a record
+  // even when it sags briefly during the fault).
+  let vRatio = null;
+  if (R.settings?.VNOM > 0) {
+    const vRefChannelUnits = isPrimary ? (R.settings.VNOM * PTR) / (voltIsKV ? 1000 : 1) : R.settings.VNOM;
+    const meds = [];
+    for (const ch of ['VAY', 'VBY', 'VCY', 'VA', 'VB', 'VC']) {
+      const s = data.map(r => r[ch] || 0);
+      if (!s.some(v => Math.abs(v) > 1e-9)) continue;
+      const m = medianOf(computeRmsMagnitude(s, N));
+      if (m > 0) meds.push(m);
+    }
+    const obsV = medianOf(meds);
+    if (obsV > 0 && vRefChannelUnits > 0) vRatio = vRefChannelUnits / obsV;
+  }
+
+  const CANDIDATES = [
+    { v: 1, scale: 1, name: 'instantaneous samples (no correction)' },
+    { v: Math.SQRT2, scale: Math.SQRT2, name: 'RMS-scaled filtered data (x sqrt(2))' },
+  ];
+
+  const iHit = iRatios.length ? snapToCandidate(medianOf(iRatios), CANDIDATES) : null;
+  const vHit = vRatio ? snapToCandidate(vRatio, CANDIDATES) : null;
+
+  const chosen = iHit || vHit;
+  if (!chosen) return;
+
+  const agree = iHit && vHit && iHit.scale === vHit.scale;
+  R.magScale = chosen.scale;
+  R.basisCalibration = {
+    magScale: chosen.scale,
+    isPrimary,
+    source: iHit && vHit ? 'event-summary fault currents + VNOM x PTR' : iHit ? 'event-summary fault currents' : 'VNOM x PTR',
+    confidence: agree ? 'high (two independent references agree)'
+              : (iHit && vHit) ? 'low (references disagree — current reference used)'
+              : 'medium (single reference)',
+    observedCurrentRatio: iRatios.length ? +medianOf(iRatios).toFixed(3) : null,
+    observedVoltageRatio: vRatio ? +vRatio.toFixed(3) : null,
+    detail: `Analog channels read as ${isPrimary ? 'PRIMARY' : 'SECONDARY'}-referred; magnitudes ${chosen.scale === 1 ? 'need no scaling correction' : 'scaled by sqrt(2)'} (${chosen.name}).`,
+  };
 }
 
 
@@ -2173,9 +2347,12 @@ function calcU1Time(multiple, td) {
   return td * (0.0226 + 0.0104 / (Math.pow(multiple, 0.02) - 1));
 }
 
-function computeRMS(arr, key) {
+// `scale` is the per-file magnitude calibration from calibrateAnalogBasis() (P.magScale):
+// 1.0 for true instantaneous samples, sqrt(2) for RMS-scaled filtered data. Defaulting it to
+// 1 keeps every uncalibrated/other-format caller behaving exactly as before.
+function computeRMS(arr, key, scale = 1) {
   if (!arr.length) return 0;
-  return Math.sqrt(arr.reduce((s, r) => s + r[key] * r[key], 0) / arr.length);
+  return scale * Math.sqrt(arr.reduce((s, r) => s + r[key] * r[key], 0) / arr.length);
 }
 
 function analyzeCEV(P, prevEvent) {
@@ -2191,6 +2368,14 @@ function analyzeCEV(P, prevEvent) {
   const PTRZ = settings.PTRZ || 1;
   const VNOM = settings.VNOM || 1;
   const freq = P.eventInfo.freq || 60;
+  // Per-file magnitude calibration (see calibrateAnalogBasis): turns a conventional RMS of the
+  // samples into the true RMS phasor magnitude in the channel's own units.
+  const MAGS = P.magScale || 1;
+  // Whether the CURRENT channels are primary-referred. Previously only the VOLTAGE path applied
+  // this distinction; the current path assumed secondary unconditionally, which is precisely
+  // what made primary-amp files (e.g. SEL-651R) read every overcurrent element as CTR times
+  // over pickup.
+  const iDataIsPrimary = analogDataIsPrimary(P);
 
   // Pre-fault / fault windows
   const pfEnd = Math.max(0, trigIdx > 0 ? trigIdx : Math.floor(analogData.length * 0.5));
@@ -2227,8 +2412,8 @@ function analyzeCEV(P, prevEvent) {
 
     A.voltages[term] = {};
     for (const [ph, key] of Object.entries(phases)) {
-      const pfRaw = computeRMS(preFault, key);
-      const fRaw = computeRMS(faultData, key);
+      const pfRaw = computeRMS(preFault, key, MAGS);
+      const fRaw = computeRMS(faultData, key, MAGS);
       const pf = toKvSec(pfRaw, ptr), f = toKvSec(fRaw, ptr);
       A.voltages[term][ph] = {
         preFault: pf,
@@ -2245,13 +2430,13 @@ function analyzeCEV(P, prevEvent) {
   // series value IS what those charts draw directly, with no unit conversion applied).
   const cyc = P.eventInfo.samPerCycA || 32;
 
-  const rmsIA = computeRmsMagnitude(analogData.map(r => r.IA), cyc);
-  const rmsIB = computeRmsMagnitude(analogData.map(r => r.IB), cyc);
-  const rmsIC = computeRmsMagnitude(analogData.map(r => r.IC), cyc);
+  const rmsIA = computeRmsMagnitude(analogData.map(r => r.IA), cyc, MAGS);
+  const rmsIB = computeRmsMagnitude(analogData.map(r => r.IB), cyc, MAGS);
+  const rmsIC = computeRmsMagnitude(analogData.map(r => r.IC), cyc, MAGS);
   const seriesMaxPhaseI = rmsIA.map((v, i) => Math.max(v, rmsIB[i], rmsIC[i]));
-  const seriesGroundI = computeRmsMagnitude(analogData.map(r => r.IG), cyc);
-  const seriesNeutralI = computeRmsMagnitude(analogData.map(r => r.IN), cyc);
-  const seriesNegSeqI = computeNegSeqMagnitude(analogData.map(r => r.IA), analogData.map(r => r.IB), analogData.map(r => r.IC), cyc);
+  const seriesGroundI = computeRmsMagnitude(analogData.map(r => r.IG), cyc, MAGS);
+  const seriesNeutralI = computeRmsMagnitude(analogData.map(r => r.IN), cyc, MAGS);
+  const seriesNegSeqI = computeNegSeqMagnitude(analogData.map(r => r.IA), analogData.map(r => r.IB), analogData.map(r => r.IC), cyc, MAGS);
 
   const seriesV = {};
   ['yTerminal', 'zTerminal'].forEach(term => {
@@ -2259,13 +2444,13 @@ function analyzeCEV(P, prevEvent) {
     const chA = isY ? 'VAY' : 'VAZ', chB = isY ? 'VBY' : 'VBZ', chC = isY ? 'VCY' : 'VCZ';
     const sA = analogData.map(r => r[chA]), sB = analogData.map(r => r[chB]), sC = analogData.map(r => r[chC]);
     seriesV[term] = {
-      A: computeRmsMagnitude(sA, cyc), B: computeRmsMagnitude(sB, cyc), C: computeRmsMagnitude(sC, cyc),
-      zero: computeZeroSeqMagnitude(sA, sB, sC, cyc),
-      neg: computeNegSeqMagnitude(sA, sB, sC, cyc),
-      pos: computePosSeqMagnitude(sA, sB, sC, cyc),
-      ab: computePhaseDiffMagnitude(sA, sB, cyc),
-      bc: computePhaseDiffMagnitude(sB, sC, cyc),
-      ca: computePhaseDiffMagnitude(sC, sA, cyc),
+      A: computeRmsMagnitude(sA, cyc, MAGS), B: computeRmsMagnitude(sB, cyc, MAGS), C: computeRmsMagnitude(sC, cyc, MAGS),
+      zero: computeZeroSeqMagnitude(sA, sB, sC, cyc, MAGS),
+      neg: computeNegSeqMagnitude(sA, sB, sC, cyc, MAGS),
+      pos: computePosSeqMagnitude(sA, sB, sC, cyc, MAGS),
+      ab: computePhaseDiffMagnitude(sA, sB, cyc, MAGS),
+      bc: computePhaseDiffMagnitude(sB, sC, cyc, MAGS),
+      ca: computePhaseDiffMagnitude(sC, sA, cyc, MAGS),
     };
   });
 
@@ -2275,7 +2460,10 @@ function analyzeCEV(P, prevEvent) {
   // never drift out of sync with each other.
   A.cursorData = {
     CTR, PTRY, PTRZ, VNOM, freq,
-    isPrimaryDataV, voltChannelIsKV,
+    isPrimaryDataV, voltChannelIsKV, iDataIsPrimary, magScale: MAGS,
+    // Kept so evalOcRowAtIdx can resolve torque-control equations against the record's own
+    // relay-word bits at whatever instant the cursor sits on.
+    P,
     voltUnit: detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], 'V'),
     current: { maxPhaseI: seriesMaxPhaseI, groundI: seriesGroundI, neutralI: seriesNeutralI, negSeqI: seriesNegSeqI },
     voltage: seriesV,
@@ -2292,11 +2480,15 @@ function analyzeCEV(P, prevEvent) {
   // Current analysis
   A.currents = {};
   for (const ch of ['IA', 'IB', 'IC', 'IG', 'IN']) {
-    const pfRMS = computeRMS(preFault, ch);
-    const fRMS = computeRMS(faultData, ch);
+    const pfRMS = computeRMS(preFault, ch, MAGS);
+    const fRMS = computeRMS(faultData, ch, MAGS);
+    // Same primary/secondary correction as the protection table: when the channel is already
+    // primary-referred, the raw figure IS the primary amps and the secondary figure is the one
+    // that has to be derived (previously both were computed as if the channel were secondary,
+    // reporting a primary value CTR times too large).
     A.currents[ch] = {
-      preFault: { secA: pfRMS, priA: pfRMS * CTR },
-      fault: { secA: fRMS, priA: fRMS * CTR },
+      preFault: { secA: iDataIsPrimary ? pfRMS / CTR : pfRMS, priA: iDataIsPrimary ? pfRMS : pfRMS * CTR },
+      fault: { secA: iDataIsPrimary ? fRMS / CTR : fRMS, priA: iDataIsPrimary ? fRMS : fRMS * CTR },
       change: pfRMS > 0.001 ? ((fRMS - pfRMS) / pfRMS * 100) : (fRMS > 0.001 ? 999 : 0),
     };
   }
@@ -2305,8 +2497,8 @@ function analyzeCEV(P, prevEvent) {
   // rendered default-instant values (A.protectionStatus) so a later cursor move can re-evaluate
   // every row at a new sample index (see evalOcRowAtIdx) without re-running the whole analysis.
   A.protectionRows = [];
-  const addOCRow = (el, type, pickup, delay, delayUnit, seriesKey, curve, td) => {
-    A.protectionRows.push({ el, type, pickup, delay, delayUnit, seriesKey, curve, td });
+  const addOCRow = (el, type, pickup, delay, delayUnit, seriesKey, curve, td, tcExpr, family) => {
+    A.protectionRows.push({ el, type, pickup, delay, delayUnit, seriesKey, curve, td, tcExpr, family });
   };
 
   // Instantaneous / definite-time families — 50P/50G/50Q/50N, levels 1-4. Families/levels with
@@ -2316,7 +2508,7 @@ function analyzeCEV(P, prevEvent) {
   ['50P', '50G', '50Q', '50N'].forEach(fam => {
     for (let lvl = 1; lvl <= 4; lvl++) {
       const p = OC[`${fam}${lvl}P`];
-      if (p) addOCRow(`${fam}${lvl}`, `${instLabel[fam]} Inst/Def-Time OC`, p, OC[`${fam}${lvl}D`] || 0, 'cycles', instSeriesKey[fam]);
+      if (p) addOCRow(`${fam}${lvl}`, `${instLabel[fam]} Inst/Def-Time OC`, p, OC[`${fam}${lvl}D`] || 0, 'cycles', instSeriesKey[fam], null, null, OC[`${fam}${lvl}TC`], '50');
     }
   });
 
@@ -2325,7 +2517,7 @@ function analyzeCEV(P, prevEvent) {
   const timeSeriesKey = { '51P': 'maxPhaseI', '51G1': 'groundI', '51G2': 'groundI', '51Q': 'negSeqI', '51N1': 'neutralI', '51N2': 'neutralI' };
   ['51P', '51G1', '51G2', '51Q', '51N1', '51N2'].forEach(fam => {
     const p = OC[`${fam}JP`];
-    if (p) addOCRow(fam, `${timeLabel[fam]} Time OC (${OC[`${fam}JC`] || 'U1'})`, p, OC[`${fam}JTD`] || 1, 'td', timeSeriesKey[fam], OC[`${fam}JC`] || 'U1', OC[`${fam}JTD`] || 1);
+    if (p) addOCRow(fam, `${timeLabel[fam]} Time OC (${OC[`${fam}JC`] || 'U1'})`, p, OC[`${fam}JTD`] || 1, 'td', timeSeriesKey[fam], OC[`${fam}JC`] || 'U1', OC[`${fam}JTD`] || 1, OC[`${fam}TC`], '51');
   });
 
   A.protectionStatus = A.protectionRows.map(row => evalOcRowAtIdx(A, row, defaultProtIdx));
@@ -4163,25 +4355,91 @@ function badge(asserted, label) {
 // Shared row-markup builders for the Protection tab's two tables — used both by the initial
 // full render (renderContent) and by refreshProtectionTab's live cursor-driven updates, so the
 // two paths can never visually drift apart for the same underlying data.
+// Shows, in the Protection tab itself, exactly what unit basis and magnitude scaling every
+// number in the table rests on — and what evidence in the file established it. These two
+// conventions are the single largest source of silently-wrong pickup comparisons, so they are
+// stated up front and made checkable rather than buried as an assumption.
+function renderBasisNote(P) {
+  const c = P?.basisCalibration;
+  if (!c) return '';
+  const CTR = P?.settings?.CTR;
+  const bits = [];
+  bits.push(`Pickups are relay <b>secondary</b> amps; this file's current channels read as <b>${c.isPrimary ? 'primary' : 'secondary'}</b>${c.isPrimary && CTR ? ` (converted using CTR = ${CTR})` : ''}.`);
+  bits.push(`Magnitude scaling: <b>x${c.magScale === 1 ? '1 (none)' : c.magScale.toFixed(4)}</b> — ${c.detail}`);
+  bits.push(`Calibrated from ${c.source}; confidence: ${c.confidence}.`);
+  if (c.observedCurrentRatio != null) bits.push(`Observed ratio vs the relay's own reported fault currents: ${c.observedCurrentRatio}${c.observedVoltageRatio != null ? `; vs VNOM x PTR: ${c.observedVoltageRatio}` : ''}.`);
+  return `<div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;line-height:1.5;border-left:2px solid var(--accent);padding-left:8px;">
+    <b style="color:var(--text-dim);">Unit basis for this file</b><br>${bits.join('<br>')}
+  </div>`;
+}
+
 function renderOcTableRows(rows) {
   return rows.map(p => {
     const mColor = parseFloat(p.multiple) >= 1 ? 'var(--red)' : 'var(--green)';
+    // Three distinct outcomes, not two: over pickup and free to operate; over pickup but
+    // supervised off by torque control (the relay's own element bit stays low, or its timed
+    // output is blocked); and simply below pickup. Collapsing the middle case into "ASSERTED"
+    // is what makes a table disagree with the relay's own relay-word bits. The full explanation
+    // lives in a native tooltip (title attr) rather than as always-visible text under the row,
+    // so a torque-controlled element doesn't blow out the row height or column width — hover
+    // (or focus, for keyboard/touch) the badge to read it.
+    let statusCell;
+    if (p.torqueBlocked && p.overPickup) {
+      const short = p.blocked ? 'BLOCKED' : 'OUTPUT BLOCKED';
+      statusCell = badge(false, short).replace('badge-green', 'badge-yellow')
+        .replace('<span class="badge', `<span title="${escapeAttr(p.torqueNote || '')}" class="badge`);
+    } else {
+      statusCell = badge(p.asserted);
+    }
     return `<tr>
       <td style="color:var(--accent);font-weight:700">${p.element}</td><td>${p.type}</td>
       <td>${p.pickup}</td><td>${p.measured}</td>
       <td style="color:${mColor};font-weight:700">${p.multiple}×</td>
       <td>${p.timeDelay}</td><td>${p.operationTime}</td>
-      <td>${badge(p.asserted)}</td>
+      <td>${statusCell}</td>
     </tr>`;
   }).join('');
 }
+function escapeAttr(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+// Classifies a voltage protection row into the group it should be displayed under, so the flat
+// list (which for a 651R with both Y/Z terminals fully populated can run past 40 rows) reads as
+// a handful of labeled sections instead of one undifferentiated table. `kind` (set on the row in
+// analyzeCEV) is the same key used to index into A.cursorData.voltage[term], so it already
+// distinguishes phase (A/B/C), phase-to-phase (ab/bc/ca), and sequence (zero/neg/pos) — grouping
+// just reads that same distinction rather than re-deriving it from the element name.
+function voltGroupOf(v) {
+  if (v.kind === 'zero' || v.kind === 'neg' || v.kind === 'pos') return 'Sequence (3V0 / V2 / V1)';
+  if (v.kind === 'ab' || v.kind === 'bc' || v.kind === 'ca') return 'Phase-to-Phase';
+  const lvl = v.element.match(/(\d)$/)?.[1] || '';
+  return `Phase (Level ${lvl || '?'})`;
+}
+const VOLT_GROUP_ORDER = ['Phase (Level 1)', 'Phase (Level 2)', 'Phase (Level 3)', 'Phase (Level 4)', 'Phase-to-Phase', 'Sequence (3V0 / V2 / V1)'];
+
 function renderVoltTableRows(rows) {
-  return rows.map(v => `<tr>
-    <td style="color:var(--accent);font-weight:700">${v.element}</td>
-    <td>${v.terminal}</td><td>${v.type}</td>
-    <td>${v.pickup}</td><td>${v.measured}</td>
-    <td>${badge(v.asserted)}</td>
-  </tr>`).join('');
+  // Group by terminal first (Y then Z), then by the category above, each preceded by a
+  // shaded header row spanning the table — cheap to build (no colgroup/rowspan gymnastics) and
+  // keeps every row's cells identical in shape, so the existing column widths still line up.
+  const terminals = [...new Set(rows.map(r => r.terminal))].sort(); // 'Y' before 'Z'
+  let out = '';
+  for (const term of terminals) {
+    const inTerm = rows.filter(r => r.terminal === term);
+    const groups = new Map();
+    inTerm.forEach(v => { const g = voltGroupOf(v); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(v); });
+    const orderedGroups = [...groups.keys()].sort((a, b) => VOLT_GROUP_ORDER.indexOf(a) - VOLT_GROUP_ORDER.indexOf(b));
+    for (const g of orderedGroups) {
+      out += `<tr class="group-row"><td colspan="6">${term}-Terminal — ${g}</td></tr>`;
+      out += groups.get(g).map(v => `<tr>
+        <td style="color:var(--accent);font-weight:700">${v.element}</td>
+        <td>${v.terminal}</td><td>${v.type}</td>
+        <td>${v.pickup}</td><td>${v.measured}</td>
+        <td>${badge(v.asserted)}</td>
+      </tr>`).join('');
+    }
+  }
+  return out;
 }
 
 // Picks the sample index the Protection tab should show when no explicit index is given —
@@ -4919,7 +5177,7 @@ function renderBanner() {
 // this is a standard RMS-envelope approximation of what SynchroWAVe shows, not a
 // byte-for-bit reproduction of SEL's internal DSP filter, but it produces the same
 // "flat pre-fault, rises during the fault" magnitude envelope shape.
-function computeRmsMagnitude(samples, windowSize) {
+function computeRmsMagnitude(samples, windowSize, scale = 1) {
   const n = samples.length;
   const out = new Array(n).fill(0);
   const sq = [];
@@ -4934,7 +5192,7 @@ function computeRmsMagnitude(samples, windowSize) {
     // samples (especially during quiet, near-zero periods), which would otherwise feed
     // Math.sqrt() a tiny negative number and produce NaN. Clamp at 0 — the true sum of
     // squares can never be negative.
-    out[i] = Math.sqrt(Math.max(0, sumSq) / sq.length);
+    out[i] = scale * Math.sqrt(Math.max(0, sumSq) / sq.length);
   }
   return out;
 }
@@ -4954,7 +5212,7 @@ function computeRmsMagnitude(samples, windowSize) {
 // computeFundamentalPhasors extracts a sliding one-cycle DFT phasor per sample,
 // normalized so its magnitude is directly RMS-equivalent (validated against a known
 // pure sinusoid: a 100-amplitude cosine yields the expected 70.7107 RMS exactly).
-function computeFundamentalPhasors(samples, N) {
+function computeFundamentalPhasors(samples, N, scale = 1) {
   const n = samples.length;
   const re = new Array(n).fill(0), im = new Array(n).fill(0);
   const cosT = new Array(N), sinT = new Array(N);
@@ -4962,7 +5220,9 @@ function computeFundamentalPhasors(samples, N) {
     cosT[k] = Math.cos(2 * Math.PI * k / N);
     sinT[k] = Math.sin(2 * Math.PI * k / N);
   }
-  const norm = Math.sqrt(2) / N;
+  // Same per-file magnitude calibration as computeRmsMagnitude — folded into the DFT
+  // normalisation so every derived sequence/phase-difference magnitude inherits it.
+  const norm = scale * Math.sqrt(2) / N;
   for (let i = 0; i < n; i++) {
     if (i < N - 1) { re[i] = re[Math.max(0, i - 1)] || 0; im[i] = im[Math.max(0, i - 1)] || 0; continue; }
     let sr = 0, si = 0;
@@ -5049,10 +5309,10 @@ function detectInrushSignature(P, startIdx, endIdx) {
 // phase sample arrays. Uses the same one-cycle DFT phasors as the negative-sequence transform,
 // which inherently rejects DC offset and all harmonics — including the triplen harmonics that
 // are themselves zero-sequence and would otherwise contaminate a raw instantaneous sum.
-function computeZeroSeqMagnitude(sA, sB, sC, N) {
-  const pA = computeFundamentalPhasors(sA, N);
-  const pB = computeFundamentalPhasors(sB, N);
-  const pC = computeFundamentalPhasors(sC, N);
+function computeZeroSeqMagnitude(sA, sB, sC, N, scale = 1) {
+  const pA = computeFundamentalPhasors(sA, N, scale);
+  const pB = computeFundamentalPhasors(sB, N, scale);
+  const pC = computeFundamentalPhasors(sC, N, scale);
   const n = sA.length;
   const mag = new Array(n).fill(0);
   for (let i = 0; i < n; i++) {
@@ -5067,10 +5327,10 @@ function computeZeroSeqMagnitude(sA, sB, sC, N) {
 // transform V2 = (Va + a²·Vb + a·Vc)/3 where a = 1∠120°. Formula convention verified
 // against a synthetic three-phase signal with a known injected 20∠30° negative-sequence
 // component — recovered exactly.
-function computeNegSeqMagnitude(sA, sB, sC, N) {
-  const pA = computeFundamentalPhasors(sA, N);
-  const pB = computeFundamentalPhasors(sB, N);
-  const pC = computeFundamentalPhasors(sC, N);
+function computeNegSeqMagnitude(sA, sB, sC, N, scale = 1) {
+  const pA = computeFundamentalPhasors(sA, N, scale);
+  const pB = computeFundamentalPhasors(sB, N, scale);
+  const pC = computeFundamentalPhasors(sC, N, scale);
   const aRe = -0.5, aIm = Math.sqrt(3) / 2;       // a  = 1∠120°
   const a2Re = -0.5, a2Im = -Math.sqrt(3) / 2;     // a² = 1∠240°
   const n = sA.length;
@@ -5092,10 +5352,10 @@ function computeNegSeqMagnitude(sA, sB, sC, N) {
 // Positive-sequence magnitude series, via V1 = (Va + a·Vb + a²·Vc)/3 where a = 1∠120°.
 // Same one-cycle DFT phasors as computeNegSeqMagnitude, with a/a² swapped between Vb/Vc.
 // Used for 59YV1/59ZV1 (positive-sequence overvoltage).
-function computePosSeqMagnitude(sA, sB, sC, N) {
-  const pA = computeFundamentalPhasors(sA, N);
-  const pB = computeFundamentalPhasors(sB, N);
-  const pC = computeFundamentalPhasors(sC, N);
+function computePosSeqMagnitude(sA, sB, sC, N, scale = 1) {
+  const pA = computeFundamentalPhasors(sA, N, scale);
+  const pB = computeFundamentalPhasors(sB, N, scale);
+  const pC = computeFundamentalPhasors(sC, N, scale);
   const aRe = -0.5, aIm = Math.sqrt(3) / 2;        // a  = 1∠120°
   const a2Re = -0.5, a2Im = -Math.sqrt(3) / 2;      // a² = 1∠240°
   const n = sA.length;
@@ -5115,9 +5375,9 @@ function computePosSeqMagnitude(sA, sB, sC, N) {
 // Phase-to-phase fundamental magnitude (e.g. Va - Vb), via the same one-cycle DFT phasors —
 // a true fundamental-frequency difference rather than a raw instantaneous subtraction, so
 // harmonic content doesn't inflate the value compared against a 27#PP1/59#PP1 pickup.
-function computePhaseDiffMagnitude(sX, sY, N) {
-  const pX = computeFundamentalPhasors(sX, N);
-  const pY = computeFundamentalPhasors(sY, N);
+function computePhaseDiffMagnitude(sX, sY, N, scale = 1) {
+  const pX = computeFundamentalPhasors(sX, N, scale);
+  const pY = computeFundamentalPhasors(sY, N, scale);
   const n = sX.length;
   const mag = new Array(n).fill(0);
   for (let i = 0; i < n; i++) {
@@ -5126,6 +5386,72 @@ function computePhaseDiffMagnitude(sX, sY, N) {
     mag[i] = Math.sqrt(re * re + im * im);
   }
   return mag;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// TORQUE CONTROL (element supervision)
+// ══════════════════════════════════════════════════════════════════════
+// Every SEL overcurrent element has a torque-control SELogic equation (50P1TC, 50G1TC,
+// 51G1TC, …). While that equation is false the element is supervised OFF: the current can sit
+// far above pickup and the element still will not operate. A protection table that compares
+// magnitude against pickup alone therefore reports elements as "asserted" that the relay
+// itself has deliberately disabled — the same false-positive class as a unit-conversion error,
+// just from a different direction.
+//
+// How the supervision applies differs by family, and this distinction is not cosmetic — it was
+// confirmed bit-for-bit against a real record where 50G1TC = 51G1TC = LT01 and LT01 never
+// asserted:
+//   * 51 (inverse-time): torque control gates the ELEMENT. The relay's own 51G1 pickup bit
+//     stayed low for the entire fault despite ~3x pickup of ground current.
+//   * 50 (instantaneous/definite-time): torque control gates the TIMED output. The relay's raw
+//     50G1 comparator bit did assert, while 50G1T (the output that can actually trip) never
+//     did. So the pickup is real, but it cannot cause a trip.
+
+// Relay-word bit state as of a given ANALOG sample index, from the record's own digital data.
+function bitStateAtAnalogIdx(P, label, analogIdx) {
+  let state = (P.initialDigitalState || []).includes(label);
+  let seen = state;
+  for (const tr of (P.digitalTransitions || [])) {
+    if (tr.analogSampleIdx > analogIdx) break;
+    const c = (tr.changes || []).find(c => c.label === label);
+    if (c) { state = c.asserted; seen = true; }
+  }
+  // A bit SEL never records a transition for simply never changed from its default off state.
+  return { state, known: seen || (P.digitalLabels || []).includes(label) };
+}
+
+// Minimal standalone SELogic evaluator for torque-control equations, which are overwhelmingly
+// either a literal 1/0 or a short combination of relay-word bits. Returns `null` (meaning "can't
+// tell — don't claim anything") rather than guessing when an operand isn't a bit this record
+// carries, so an unparseable equation degrades to today's unsupervised behaviour plus a note,
+// never to a wrong "blocked" verdict.
+function evalTorqueControlAt(P, expr, analogIdx) {
+  if (expr == null) return { value: true, known: true, trivial: true };
+  const clean = String(expr).split('#')[0].trim();
+  if (!clean) return { value: true, known: true, trivial: true };
+  if (/^1$/.test(clean)) return { value: true, known: true, trivial: true };
+  if (/^0$/.test(clean) || /^NA$/i.test(clean)) return { value: false, known: true, trivial: true };
+
+  const toks = clean.match(/\(|\)|\bAND\b|\bOR\b|\bNOT\b|\bR_TRIG\b|\bF_TRIG\b|[A-Za-z0-9_]+/g) || [];
+  let i = 0, unknown = false;
+  const peek = () => toks[i], next = () => toks[i++];
+  const factor = () => {
+    const tk = peek();
+    if (tk === undefined) { unknown = true; return false; }
+    if (tk === 'NOT') { next(); return !factor(); }
+    if (tk === 'R_TRIG' || tk === 'F_TRIG') { next(); factor(); unknown = true; return false; }
+    if (tk === '(') { next(); const v = expr2(); if (peek() === ')') next(); return v; }
+    next();
+    if (/^[01]$/.test(tk)) return tk === '1';
+    const b = bitStateAtAnalogIdx(P, tk, analogIdx);
+    if (!b.known) unknown = true;
+    return b.state;
+  };
+  const term = () => { let v = factor(); while (peek() === 'AND') { next(); const r = factor(); v = v && r; } return v; };
+  const expr2 = () => { let v = term(); while (peek() === 'OR') { next(); const r = term(); v = v || r; } return v; };
+  const value = expr2();
+  if (unknown) return { value: null, known: false, trivial: false };
+  return { value, known: true, trivial: false };
 }
 
 function clampIdx(len, i) {
@@ -5142,8 +5468,39 @@ function evalOcRowAtIdx(A, row, idx) {
   const seriesArr = cd.current[row.seriesKey];
   const measured = seriesArr[clampIdx(seriesArr.length, idx)] || 0;
   const { pickup, delay, delayUnit, el, type } = row;
-  const asserted = measured >= pickup;
-  const multiple = pickup > 0 ? measured / pickup : 0;
+  // UNITS — the bug this guards against: SEL overcurrent pickups (50P1P, 50G1P, 51PJP, …) are
+  // ALWAYS secondary amps, while the analog channel may be primary-referred (SEL-651R exports
+  // primary amps with a bare "IA" header). Comparing the two directly overstates every element
+  // by the CT ratio: a 13 A-sec (1300 A pri) 50P1 read as "7.96x pickup, asserted" on a fault
+  // whose max phase current was ~350 A primary — while the relay's own 50P1 bit, correctly,
+  // never asserted. Both quantities are now brought to the SAME basis before comparing, and
+  // both unit labels below are now truthful rather than assumed.
+  const CTRl = cd.CTR || 1;
+  const measuredSec = cd.iDataIsPrimary ? measured / CTRl : measured;
+  const measuredPri = cd.iDataIsPrimary ? measured : measured * CTRl;
+  const pickupSec = pickup;
+  const pickupPri = pickup * CTRl;
+  const overPickup = measuredSec >= pickupSec;
+  const multiple = pickupSec > 0 ? measuredSec / pickupSec : 0;
+
+  // Torque-control supervision — see evalTorqueControlAt(). For a 51 element a false TC holds
+  // the element itself off; for a 50 element the comparator still picks up but its timed
+  // output (the one that can trip) is blocked.
+  const tc = evalTorqueControlAt(cd.P, row.tcExpr, idx);
+  const tcExprText = row.tcExpr ? String(row.tcExpr).split('#')[0].trim() : null;
+  const tcBlocks = tc.known && tc.value === false;
+  const tcUnknown = row.tcExpr != null && !tc.known;
+  const gatesElement = row.family === '51';
+  const asserted = overPickup && !(tcBlocks && gatesElement);
+  let tcNote = null;
+  if (tcBlocks && tcExprText) {
+    tcNote = gatesElement
+      ? `Supervised OFF — torque control ${el}TC := ${tcExprText} is de-asserted at this instant, so the element cannot pick up regardless of current.`
+      : `Picked up, but torque control ${el}TC := ${tcExprText} is de-asserted at this instant, so the timed output ${el}T is blocked and this element cannot trip.`;
+  } else if (tcUnknown && tcExprText) {
+    tcNote = `Torque control ${el}TC := ${tcExprText} could not be resolved from this record's digital data — pickup shown unsupervised.`;
+  }
+
   let opTime = null;
   if (el.startsWith('51') && asserted) {
     const curve = row.curve || 'U1';
@@ -5154,12 +5511,14 @@ function evalOcRowAtIdx(A, row, idx) {
   }
   return {
     element: el, type, asserted, multiple: multiple.toFixed(2),
-    pickup: `${pickup} A sec (${(pickup * cd.CTR).toFixed(0)} A pri)`,
-    measured: `${measured.toFixed(3)} A sec (${(measured * cd.CTR).toFixed(1)} A pri)`,
+    overPickup, torqueBlocked: tcBlocks, torqueControl: tcExprText, torqueNote: tcNote,
+    blocked: tcBlocks && gatesElement,
+    pickup: `${pickupSec} A sec (${pickupPri.toFixed(0)} A pri)`,
+    measured: `${measuredSec.toFixed(3)} A sec (${measuredPri.toFixed(1)} A pri)`,
     timeDelay: delayUnit === 'cycles' ? `${delay} cycles` : `TD=${delay}`,
-    operationTime: asserted && opTime !== null && opTime < 9999
+    operationTime: (asserted && !tcBlocks && opTime !== null && opTime < 9999)
       ? (opTime < 1 ? `${(opTime * 1000).toFixed(1)} ms` : `${opTime.toFixed(2)} sec`)
-      : 'N/A',
+      : (tcBlocks ? 'blocked' : 'N/A'),
   };
 }
 
@@ -5192,7 +5551,7 @@ function evalVoltRowAtIdx(A, row, idx) {
   const asserted = row.type === 'UV' ? secV < row.pickup : secV > row.pickup;
   const pct = (row.pickup / (cd.VNOM || 1) * 100).toFixed(1);
   return {
-    element: row.element, type: row.typeLabel, terminal: row.term,
+    element: row.element, type: row.typeLabel, terminal: row.term, kind: row.kind,
     pickup: `${row.pickup.toFixed(2)} V sec (${pct}% VNOM) &nbsp;=&nbsp; ${pickupChart.toFixed(2)} ${cd.voltUnit} (chart)`,
     measured: `${secV.toFixed(2)} V sec &nbsp;=&nbsp; ${raw.toFixed(2)} ${cd.voltUnit} (chart)`,
     asserted,
@@ -5305,6 +5664,7 @@ function computeConsistencyCheck(P, A, kind) {
   const samplesPerCycle = P.eventInfo.samPerCycA || 32;
   const CTR = P.settings.CTR || null;
   const PTR = P.settings.PTRY || null;
+  const MAGS = P.magScale || 1;
 
   let vMag, vLabel, vPickupPatterns, iMag, iLabel, iPickupPatterns, hasCurrentChannel;
 
@@ -5314,21 +5674,21 @@ function computeConsistencyCheck(P, A, kind) {
     // sum — and inverter-based sites carry exactly that harmonic content. The relay's 59N/59G
     // element responds to fundamental 3V0 only, so a raw-sum RMS inflated by harmonics would
     // be compared against a pickup that never sees that content — a false-flag mechanism.
-    vMag = computeZeroSeqMagnitude(data.map(r => r.VAY), data.map(r => r.VBY), data.map(r => r.VCY), samplesPerCycle);
+    vMag = computeZeroSeqMagnitude(data.map(r => r.VAY), data.map(r => r.VBY), data.map(r => r.VCY), samplesPerCycle, MAGS);
     vLabel = '3V0';
     vPickupPatterns = ['59YN#P', '59N#P', '59G#P', '59GN#P', '59G#AP'];
     hasCurrentChannel = data.some(r => Math.abs(r.IG || 0) > 0.001) ? 'IG'
                        : data.some(r => Math.abs(r.IN || 0) > 0.001) ? 'IN' : null;
     iLabel = hasCurrentChannel || 'IG';
-    iMag = hasCurrentChannel ? computeRmsMagnitude(data.map(r => r[hasCurrentChannel]), samplesPerCycle) : null;
+    iMag = hasCurrentChannel ? computeRmsMagnitude(data.map(r => r[hasCurrentChannel]), samplesPerCycle, MAGS) : null;
     iPickupPatterns = ['51G#JP', '51G#P', '50G#P', '50GFP', '50GF#P', '50G#AP'];
   } else {
-    vMag = computeNegSeqMagnitude(data.map(r => r.VAY), data.map(r => r.VBY), data.map(r => r.VCY), samplesPerCycle);
+    vMag = computeNegSeqMagnitude(data.map(r => r.VAY), data.map(r => r.VBY), data.map(r => r.VCY), samplesPerCycle, MAGS);
     vLabel = 'V2';
     vPickupPatterns = ['59Q#P', '59QP', '59Q#AP'];
     hasCurrentChannel = 'computed'; // I2 is always computable from phase currents
     iLabel = 'I2';
-    iMag = computeNegSeqMagnitude(data.map(r => r.IA), data.map(r => r.IB), data.map(r => r.IC), samplesPerCycle);
+    iMag = computeNegSeqMagnitude(data.map(r => r.IA), data.map(r => r.IB), data.map(r => r.IC), samplesPerCycle, MAGS);
     iPickupPatterns = ['51Q#JP', '51Q#P', '50Q#P', '50QFP', '50Q#AP'];
   }
 
@@ -6515,12 +6875,13 @@ function buildCurrentMagChart(P, A, compact, heightOverride) {
   const data = P.analogData || [];
   if (!data.length) return '';
   const samplesPerCycle = P.eventInfo.samPerCycA || 32;
+  const MAGS = P.magScale || 1;
   const msPerSample = 1000 / ((P.eventInfo.freq || 60) * samplesPerCycle);
   const unit = detectChannelUnit(P, ['IA'], 'A');
 
-  const iaMag = computeRmsMagnitude(data.map(r => r.IA), samplesPerCycle);
-  const ibMag = computeRmsMagnitude(data.map(r => r.IB), samplesPerCycle);
-  const icMag = computeRmsMagnitude(data.map(r => r.IC), samplesPerCycle);
+  const iaMag = computeRmsMagnitude(data.map(r => r.IA), samplesPerCycle, MAGS);
+  const ibMag = computeRmsMagnitude(data.map(r => r.IB), samplesPerCycle, MAGS);
+  const icMag = computeRmsMagnitude(data.map(r => r.IC), samplesPerCycle, MAGS);
 
   const tripIdxFull = A?.tripCause?.tripTransition?.analogSampleIdx ?? null;
   const triggerIdxFull = P.triggerSampleIndex ?? null;
@@ -6555,15 +6916,16 @@ function buildVoltageMagChart(P, A, compact, heightOverride) {
   const data = P.analogData || [];
   if (!data.length) return '';
   const samplesPerCycle = P.eventInfo.samPerCycA || 32;
+  const MAGS = P.magScale || 1;
   const msPerSample = 1000 / ((P.eventInfo.freq || 60) * samplesPerCycle);
   const labels = detectVoltageLabelSet(P);
   const unit = detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], 'V');
 
   // Data is normalized into VAY/VBY/VCY slots during parsing regardless of the file's
   // own naming convention (VA vs VAY) — see getCol() fallback chain in parseCEV.
-  const vaMag = computeRmsMagnitude(data.map(r => r.VAY), samplesPerCycle);
-  const vbMag = computeRmsMagnitude(data.map(r => r.VBY), samplesPerCycle);
-  const vcMag = computeRmsMagnitude(data.map(r => r.VCY), samplesPerCycle);
+  const vaMag = computeRmsMagnitude(data.map(r => r.VAY), samplesPerCycle, MAGS);
+  const vbMag = computeRmsMagnitude(data.map(r => r.VBY), samplesPerCycle, MAGS);
+  const vcMag = computeRmsMagnitude(data.map(r => r.VCY), samplesPerCycle, MAGS);
 
   const tripIdxFull = A?.tripCause?.tripTransition?.analogSampleIdx ?? null;
   const triggerIdxFull = P.triggerSampleIndex ?? null;
@@ -6742,6 +7104,7 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
   if (!data.length || !family) return '';
 
   const samplesPerCycle = P.eventInfo.samPerCycA || 32;
+  const MAGS = P.magScale || 1;
   const msPerSample = 1000 / ((P.eventInfo.freq || 60) * samplesPerCycle);
   const tripIdxFull = A?.tripCause?.tripTransition?.analogSampleIdx ?? null;
   const triggerIdxFull = P.triggerSampleIndex ?? null;
@@ -6752,14 +7115,14 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
     // 3V0 = Va + Vb + Vc, instantaneously — no phasor transform needed, since summing
     // three time-domain waveforms IS the zero-sequence (residual) voltage directly.
     const sum = data.map(r => (r.VAY || 0) + (r.VBY || 0) + (r.VCY || 0));
-    const mag = computeRmsMagnitude(sum, samplesPerCycle);
+    const mag = computeRmsMagnitude(sum, samplesPerCycle, MAGS);
     traces.push({ label: '3V0.Mag', color: '#f59e0b', values: mag });
     title = 'Zero-Sequence Voltage (3V0)';
     yUnit = detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], 'V');
     note = '3V0 is the instantaneous sum of the three phase voltages — near zero when balanced, and the quantity 59G/59N/59YN elements actually monitor.';
   }
   if (family === 'negSeqV' || family === 'zeroSeqV+negSeqV') {
-    const v2 = computeNegSeqMagnitude(data.map(r => r.VAY), data.map(r => r.VBY), data.map(r => r.VCY), samplesPerCycle);
+    const v2 = computeNegSeqMagnitude(data.map(r => r.VAY), data.map(r => r.VBY), data.map(r => r.VCY), samplesPerCycle, MAGS);
     traces.push({ label: 'V2.Mag', color: '#a78bfa', values: v2 });
     title = traces.length > 1 ? 'Zero + Negative-Sequence Voltage' : 'Negative-Sequence Voltage (V2)';
     yUnit = detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], 'V');
@@ -6769,8 +7132,8 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
     const unit = detectChannelUnit(P, ['IA'], 'A');
     const hasIN = data.some(r => Math.abs(r.IN || 0) > 0.01);
     const hasIG = data.some(r => Math.abs(r.IG || 0) > 0.01);
-    if (hasIN) traces.push({ label: 'IN.Mag', color: '#f59e0b', values: computeRmsMagnitude(data.map(r => r.IN), samplesPerCycle) });
-    if (hasIG) traces.push({ label: 'IG.Mag', color: '#a78bfa', values: computeRmsMagnitude(data.map(r => r.IG), samplesPerCycle) });
+    if (hasIN) traces.push({ label: 'IN.Mag', color: '#f59e0b', values: computeRmsMagnitude(data.map(r => r.IN), samplesPerCycle, MAGS) });
+    if (hasIG) traces.push({ label: 'IG.Mag', color: '#a78bfa', values: computeRmsMagnitude(data.map(r => r.IG), samplesPerCycle, MAGS) });
     if (!traces.length) return ''; // neither channel actually populated in this file
     title = 'Ground / Neutral Current';
     yUnit = unit;
@@ -6778,7 +7141,7 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
   }
   if (family === 'negSeqI') {
     const unit = detectChannelUnit(P, ['IA'], 'A');
-    const i2 = computeNegSeqMagnitude(data.map(r => r.IA), data.map(r => r.IB), data.map(r => r.IC), samplesPerCycle);
+    const i2 = computeNegSeqMagnitude(data.map(r => r.IA), data.map(r => r.IB), data.map(r => r.IC), samplesPerCycle, MAGS);
     traces.push({ label: 'I2.Mag', color: '#a78bfa', values: i2 });
     title = 'Negative-Sequence Current (I2)';
     yUnit = unit;
@@ -8090,19 +8453,20 @@ function renderContent() {
       <span style="font-size:11px;color:var(--text-muted);cursor:pointer;" onclick="refreshProtectionTab(null)" title="Reset to trip instant">Drag the measurement cursor on any chart (Timeline/Voltages/Currents tabs) to see values at that instant — click here to reset to the trip instant.</span>
     </div>
     <div class="card red-accent"><div class="card-header">🛡️ Overcurrent Protection Elements</div>
-      <table class="data-table"><thead><tr>
+      ${renderBasisNote(P)}
+      <div class="table-scroll"><table class="data-table"><thead><tr>
         <th>Element</th><th>Type</th><th>Pickup</th><th>Measured</th>
         <th>Multiple</th><th>Time Setting</th><th>Op Time</th><th>Status</th>
-      </tr></thead><tbody id="ocProtectionTbody">${renderOcTableRows(A.protectionStatus)}</tbody></table></div>`;
+      </tr></thead><tbody id="ocProtectionTbody">${renderOcTableRows(A.protectionStatus)}</tbody></table></div></div>`;
 
   if (A.voltageStatus.length) {
     html += `<div class="card yellow-accent"><div class="card-header">📐 Voltage Protection Elements</div>
       <p style="font-size:11px;color:var(--text-muted);margin-bottom:10px;">
         "Measured" shows both the secondary-V figure compared against the relay's own setting, and the same value in chart-native units (kV/A primary, whichever this file's channels use) — matching what's plotted on the Voltages/Currents/Timeline charts, so the two can be read side-by-side.
       </p>
-      <table class="data-table"><thead><tr>
+      <div class="table-scroll"><table class="data-table"><thead><tr>
         <th>Element</th><th>Terminal</th><th>Type</th><th>Pickup</th><th>Measured</th><th>Status</th>
-      </tr></thead><tbody id="voltProtectionTbody">${renderVoltTableRows(A.voltageStatus)}</tbody></table></div>`;
+      </tr></thead><tbody id="voltProtectionTbody">${renderVoltTableRows(A.voltageStatus)}</tbody></table></div></div>`;
   }
   html += `</div>`;
 
