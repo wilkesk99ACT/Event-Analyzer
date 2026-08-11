@@ -2102,6 +2102,11 @@ function parseCEV(text, fileName) {
   const dtHit = matchEquation(['79DTL3P', '79DTL']);
   R.dtlEquation = dtHit ? dtHit.value : '';
 
+  // Full ANSI 79 scheme — the two equations above are what the trip-cause tracer needs; the
+  // Reclosing tab needs the whole picture (shot count, open intervals, reset timers, and
+  // every supervision equation), so it's parsed once here and hung off the parsed record.
+  R.reclose = parseRecloseScheme(S, text);
+
   // ER (Event Report trigger) — a SELOGIC equation distinct from TR/TR3P. Engineers program
   // this to capture diagnostic snapshots (e.g. a protection element pickup) WITHOUT tripping
   // the breaker — e.g. "ER := R_TRIG 51G1 OR R_TRIG 50P1". When a record's EVENT field reads
@@ -4335,9 +4340,1020 @@ function analyzeCEV(P, prevEvent) {
   }
   A._buildTreeForBit = buildTreeForBit;
 
+  // ── Automatic reclosing outlook ──
+  // Runs last: it reads A.tripCause (to anchor on the trip instant) and the parsed 79 scheme,
+  // and never feeds anything back into the trip analysis above.
+  try { A.reclose = analyzeReclose(P, A); } catch (e) { A.reclose = null; console.warn('reclose analysis failed', e); }
+
   return A;
 }
 
+
+// ════════════════════════════════════════════════════════════════════════════
+// AUTOMATIC RECLOSING (ANSI 79) — SCHEME PARSING
+// ════════════════════════════════════════════════════════════════════════════
+// A trip record only answers half the operator's question. The other half is
+// "and now what — does this thing come back by itself, how many times, how long
+// from now, and what has to be true on the line before it will?" Everything the
+// relay needs to answer that lives in its own settings block, which is already
+// embedded in the CEV. This section reads that block, then (below) evaluates it
+// against the digital states this record actually captured.
+//
+// Naming varies by relay family. The SEL-751 emits the bare names (79RI, 79DTL,
+// SH0..SH4, 79LO); the SEL-651R emits three-pole-suffixed names (79RI3P,
+// 79DTL3P, SH03P..SH43P, 79LO3P). Every lookup below tries the specific form
+// first and falls back to the bare one, so both parse without branching on the
+// device string.
+
+// Each entry: key, the setting names to try (most specific first), the SEL name of the
+// function, and a plain-English statement of what it does to the reclose sequence.
+const RECLOSE_EQ_SPECS = [
+  { key: 'RI',   names: ['79RI3P', '79RI'],     title: 'Reclose Initiate',
+    what: 'Starts a reclose sequence. When this asserts (and Reclose Initiate Supervision is satisfied), the recloser leaves Reset, increments the shot counter, and begins timing the open interval.' },
+  { key: 'RIS',  names: ['79RIS3P', '79RIS'],   title: 'Reclose Initiate Supervision',
+    what: 'Gates Reclose Initiate. The initiate is only accepted while this is asserted — factory default is "52A OR 79CY", i.e. the breaker was actually closed (or a sequence is already running).' },
+  { key: 'DTL',  names: ['79DTL3P', '79DTL'],   title: 'Drive to Lockout',
+    what: 'Forces the recloser straight to Lockout from Reset or Cycle. Nothing after this matters — no automatic close will be issued for this event.' },
+  { key: 'DLS',  names: ['79DLS3P', '79DLS'],   title: 'Drive to Last Shot',
+    what: 'Jumps the shot counter to the final shot, so any remaining intermediate attempts are skipped and the next trip goes to Lockout.' },
+  { key: 'SKP',  names: ['79SKP3P', '79SKP'],   title: 'Skip Shot',
+    what: 'Advances the shot counter without issuing a close — the current open interval is skipped and the sequence moves on to the next one.' },
+  { key: 'STL',  names: ['79STL3P', '79STL'],   title: 'Stall Open Interval Timing',
+    what: 'Holds the open-interval timer while asserted. The countdown to the close is frozen — and therefore so is the close — until this drops out.' },
+  { key: 'BRS',  names: ['79BRS3P', '79BRS'],   title: 'Block Reset Timing',
+    what: 'Holds the reset timer while asserted, keeping the recloser from returning to Reset (shot counter stays where it is) even though the breaker is closed.' },
+  { key: 'CLS',  names: ['79CLS3P', '79CLS'],   title: 'Close Supervision',
+    what: 'The final permissive on the automatic close. When the open interval expires the recloser waits here — the close command is not issued until this asserts.' },
+  { key: 'SEQ',  names: ['79SEQ3P', '79SEQ'],   title: 'Sequence Coordination',
+    what: 'Advances this device’s shot counter in step with a downstream device that cleared the fault, so the two stay coordinated without this one tripping.' },
+  { key: 'CL',   names: ['CL3P', 'CL'],         title: 'Close Logic',
+    what: 'The relay’s general close equation — the non-79 paths that can also issue a CLOSE (front-panel pushbutton, SCADA close, external contact). Separate from automatic reclosing.' },
+  { key: 'ULCL', names: ['ULCL3P', 'ULCL'],     title: 'Unlatch Close',
+    what: 'Cancels a close in progress. While asserted the CLOSE output is unlatched, so a close the 79 element wanted to issue is withdrawn.' },
+];
+
+function parseRecloseScheme(S, fullText) {
+  const R = {
+    present: false, settingsFound: false,
+    E79raw: null, enabled: null, shots: null,
+    openIntervals: [], resetDelay: null, resetFromLockoutDelay: null,
+    closeSupLimit: null, closeSupLimitOff: false,
+    trueOpenIntervalCount: 0,
+    eq: {}, eqName: {},
+  };
+  if (!S) return R;
+
+  // Single-token value: SEL packs several settings onto one physical line
+  // ("79RSD := 60.00   79RSLD := 5.00   79CLSD := OFF"), so a numeric read must stop at
+  // the first token or it swallows the neighbours.
+  const grabToken = (names) => {
+    for (const name of names) {
+      const safe = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const x = S.match(new RegExp('(?:^|[^A-Z0-9_])' + safe + '\\s*:=\\s*([A-Za-z0-9._-]+)', 'm'));
+      if (x) return { name, value: x[1].trim() };
+    }
+    return null;
+  };
+  // Rest-of-line value, for SELogic equations. Safe because SEL always places an equation
+  // last on its line — the numeric settings that share a line come before it.
+  const grabLine = (names) => {
+    for (const name of names) {
+      const safe = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const x = S.match(new RegExp('(?:^|[^A-Z0-9_])' + safe + '\\s*:=([^\\r\\n]+)', 'm'));
+      if (x) return { name, value: x[1].trim() };
+    }
+    return null;
+  };
+  const numOf = (names) => {
+    const h = grabToken(names);
+    if (!h) return null;
+    if (/^(OFF|N|NA|NONE)$/i.test(h.value)) return { off: true, raw: h.value };
+    const v = parseFloat(h.value);
+    return isNaN(v) ? { off: false, raw: h.value, value: null } : { off: false, raw: h.value, value: v };
+  };
+
+  const e79 = grabToken(['E79']);
+  if (e79) {
+    R.settingsFound = true;
+    R.E79raw = e79.value;
+    if (/^(N|OFF|NA|0|NONE)$/i.test(e79.value)) { R.enabled = false; R.shots = 0; }
+    else if (/^\d+$/.test(e79.value)) { R.shots = parseInt(e79.value, 10); R.enabled = R.shots > 0; }
+    else if (/^Y$/i.test(e79.value)) { R.enabled = true; R.shots = null; } // enabled, count implied by however many 79OI settings exist
+    else { R.enabled = null; R.shots = null; }
+  }
+
+  for (let i = 1; i <= 4; i++) {
+    const oi = numOf([`79OI${i}`]);
+    R.openIntervals.push(oi && !oi.off && oi.value != null ? oi.value : (oi && oi.off ? 'OFF' : null));
+    if (oi) R.settingsFound = true;
+  }
+  R.trueOpenIntervalCount = R.openIntervals.filter(v => typeof v === 'number').length;
+  // A relay that says "enabled" without a shot count (E79 := Y) implies as many shots as it
+  // has real open-interval settings.
+  if (R.enabled && R.shots == null) R.shots = R.trueOpenIntervalCount || null;
+
+  const rsd = numOf(['79RSD']);   R.resetDelay = rsd && !rsd.off ? rsd.value : null;
+  const rsld = numOf(['79RSLD']); R.resetFromLockoutDelay = rsld && !rsld.off ? rsld.value : null;
+  const clsd = numOf(['79CLSD']);
+  if (clsd) { R.settingsFound = true; R.closeSupLimitOff = !!clsd.off; R.closeSupLimit = clsd.off ? null : clsd.value; }
+
+  RECLOSE_EQ_SPECS.forEach(spec => {
+    const hit = grabLine(spec.names);
+    if (hit) {
+      R.eq[spec.key] = hit.value;
+      R.eqName[spec.key] = hit.name;
+      if (spec.key !== 'CL' && spec.key !== 'ULCL') R.settingsFound = true;
+    } else {
+      R.eq[spec.key] = null;
+      R.eqName[spec.key] = null;
+    }
+  });
+
+  R.present = R.settingsFound;
+  return R;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// RECLOSE LOGIC EVALUATION HELPERS
+// ════════════════════════════════════════════════════════════════════════════
+
+// Renders an AST back to readable SELogic with the minimum parentheses needed to preserve
+// meaning — used to label each OR-branch of a reclose equation on its own row.
+function rcAstText(n, parentOp) {
+  if (!n) return '';
+  if (n.op === 'VAR') return n.name;
+  if (n.op === 'NOT') return 'NOT ' + rcAstText(n.c, 'NOT');
+  if (n.op === 'REDGE') return 'R_TRIG ' + rcAstText(n.c, 'NOT');
+  if (n.op === 'FEDGE') return 'F_TRIG ' + rcAstText(n.c, 'NOT');
+  if (n.op === 'AND' || n.op === 'OR') {
+    const s = rcAstText(n.l, n.op) + ' ' + n.op + ' ' + rcAstText(n.r, n.op);
+    const needParen = (n.op === 'OR' && parentOp && parentOp !== 'OR') || (n.op === 'AND' && parentOp === 'NOT');
+    return needParen ? '(' + s + ')' : s;
+  }
+  return '';
+}
+
+// Evaluates one reclose SELogic equation against the record's digital states at a given
+// analog sample index, and returns not just the answer but the per-branch, per-term
+// breakdown the UI needs to say WHICH term decided it.
+//
+// `known` is false whenever any operand isn't a bit this record carries — in that case the
+// boolean is reported but flagged as not trustworthy, rather than being presented as fact.
+// R_TRIG/F_TRIG fall back to raw level, matching the simplification the rest of this file
+// uses outside the full trip-chain evaluator.
+function rcEvalEquation(P, eqText, idx) {
+  const clean = (eqText || '').split('#')[0].trim();
+  const comment = (eqText || '').includes('#') ? (eqText || '').split('#').slice(1).join('#').trim() : '';
+  if (!clean) return null;
+  if (/^0$/.test(clean) || /^NA$/i.test(clean)) return { value: false, known: true, literal: true, text: clean, comment, branches: [] };
+  if (/^1$/.test(clean)) return { value: true, known: true, literal: true, text: clean, comment, branches: [] };
+
+  let ast;
+  try { ast = llgParse(llgTokenize(clean)); } catch (e) { return { value: null, known: false, text: clean, comment, branches: [], parseFailed: true }; }
+
+  let anyUnknown = false;
+  const leafState = (name) => {
+    if (/^[01]$/.test(name)) return { state: name === '1', known: true };
+    const b = bitStateAtAnalogIdx(P, name, idx);
+    if (!b.known) anyUnknown = true;
+    return { state: b.state, known: b.known };
+  };
+  const getState = (name) => leafState(name);
+
+  const value = llgEvalNode(ast, getState);
+  const branches = llgFlatten(ast, 'OR').map(node => ({
+    text: rcAstText(node, null),
+    value: llgEvalNode(node, getState),
+    leaves: llgCollectLeaves(node).map(l => {
+      const b = leafState(l.name);
+      const negated = /\bNOT\b/.test(l.mod || '');
+      return { name: l.name, mod: l.mod || '', state: b.state, known: b.known, effective: negated ? !b.state : b.state, negated };
+    }),
+  }));
+
+  // `known` (no unrecognised operand anywhere) is a useful signal but far too strict as a
+  // gate on whether the ANSWER can be trusted. Real relay equations routinely OR together a
+  // term this record carries with one it doesn't — "52A OR 79CY" on a file that logs 52A but
+  // not 79CY. The OR is definitively TRUE the moment 52A is true, regardless of the operand
+  // the file is silent about. `definite` captures that properly:
+  //   true  → at least one OR-branch is true with every one of its own operands recognised
+  //   false → every OR-branch contains a recognised operand that is false, so no unrecognised
+  //           bit could rescue it
+  // Anything else is genuinely indeterminate and is reported as such rather than guessed.
+  const branchAllKnown = (b) => b.leaves.every(l => l.known);
+  const branchDefinitelyFalse = (b) => b.leaves.some(l => l.known && !l.effective);
+  const definite = value
+    ? branches.some(b => b.value && branchAllKnown(b))
+    : branches.every(b => branchDefinitelyFalse(b));
+
+  return { value, known: !anyUnknown, definite, text: clean, comment, branches, ast };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// AUTOMATIC RECLOSING — BEHAVIOURAL ANALYSIS
+// ════════════════════════════════════════════════════════════════════════════
+// Produces the full picture of what the recloser is going to do next: whether a sequence
+// was initiated at all, how many attempts remain, when each one lands, what has to be true
+// on the line before each close is actually issued, and every path that ends in lockout.
+//
+// A guiding constraint runs through all of it: an event record is a second or two long, and
+// open intervals are measured in tens or hundreds of seconds. So most of the sequence
+// happens AFTER the last sample in the file. This function is careful to separate what the
+// record actually settles ("this trip drove the recloser to lockout — here's the term") from
+// what it merely indicates ("close supervision wants five seconds of good line voltage; it
+// was not satisfied when the record ended, and the record ends long before the close is
+// due"). Overstating the second kind as the first would be the easiest way for this tab to
+// mislead someone, so the status vocabulary keeps them apart:
+//
+//   settled  — the record answers this outright
+//   blocked  — the record shows this condition failing, and that failure decides the outcome
+//   pending  — evaluated after the record ends; current state shown as an indication only
+//   unknown  — the equation references bits this file doesn't carry
+function analyzeReclose(P, A) {
+  const sch = P.reclose || { present: false, eq: {} };
+  const dLabels = P.digitalLabels || [];
+  const freq = (P.eventInfo && P.eventInfo.freq) || 60;
+  const spc = (P.eventInfo && P.eventInfo.samPerCycA) || 32;
+  const msPerSample = 1000 / (freq * spc);
+  const nSamples = (P.analogData || []).length;
+
+  const pick = (...names) => names.find(n => dLabels.includes(n)) || null;
+  const bits = {
+    LO: pick('79LO3P', '79LO'),
+    CY: pick('79CY3P', '79CY'),
+    RS: pick('79RS3P', '79RS'),
+    CLOSE: pick('CLOSE3P', 'CLOSE'),
+    CF: pick('CF3P', 'CF'),
+    RCSF: pick('RCSF3P', 'RCSF'),
+    ULCL: pick('ULCL3P', 'ULCL'),
+    BKR: pick('52A3P', '52A'),
+    SHOT: [0, 1, 2, 3, 4].map(i => pick(`SH${i}3P`, `SH${i}`)),
+  };
+  const anyRecloseBits = !!(bits.LO || bits.CY || bits.RS || bits.SHOT.some(Boolean));
+
+  const out = {
+    scheme: sch, bits, anyRecloseBits,
+    available: !!(sch.present || anyRecloseBits),
+    gates: [], plan: [], observed: [], lockoutPaths: [], notes: [],
+    verdict: null,
+  };
+  if (!out.available) {
+    out.verdict = {
+      kind: 'no-data', tone: 'unknown', headline: 'No reclosing information in this file',
+      detail: 'This record carries neither ANSI 79 settings nor any 79 relay-word bits, so nothing can be said about automatic reclosing from it. Either the device has no reclosing element, or the settings block in this CEV was truncated before the reclose section.',
+    };
+    return out;
+  }
+
+  // ── Reference instants ─────────────────────────────────────────────────────
+  // The trip is the anchor: reclose initiate, drive-to-lockout and initiate supervision are
+  // all decided around it. States only change at recorded transitions, so equations are
+  // evaluated at exactly those indices rather than at every sample.
+  const trips = P.digitalTransitions || [];
+  const tripIdx = (A && A.tripCause && A.tripCause.tripTransition && A.tripCause.tripTransition.analogSampleIdx != null)
+    ? A.tripCause.tripTransition.analogSampleIdx
+    : (P.triggerSampleIndex != null && P.triggerSampleIndex >= 0 ? P.triggerSampleIndex : 0);
+  const endIdx = Math.max(0, nSamples - 1);
+  const evalPoints = [0, ...trips.map(t => t.analogSampleIdx)].filter((v, i, a) => a.indexOf(v) === i).sort((x, y) => x - y);
+  const pointsFromTrip = evalPoints.filter(i => i >= tripIdx);
+  out.tripIdx = tripIdx;
+  out.endIdx = endIdx;
+  out.msPerSample = msPerSample;
+  out.recordEndMsAfterTrip = (endIdx - tripIdx) * msPerSample;
+
+  const evalAt = (eq, idx) => rcEvalEquation(P, eq, idx);
+  // "Did this equation hold true at any recorded instant from the trip onward?" — the right
+  // question for momentary conditions like Reclose Initiate, which rides a pulsed TRIP bit
+  // and may well be false again by the last sample.
+  const firstTrueFromTrip = (eq) => {
+    if (!eq) return null;
+    for (const i of pointsFromTrip) {
+      const r = evalAt(eq, i);
+      if (r && r.value === true) return { idx: i, result: r, ms: (i - tripIdx) * msPerSample };
+    }
+    return null;
+  };
+  const stateAt = (label, idx) => (label ? bitStateAtAnalogIdx(P, label, idx) : { state: false, known: false });
+  const assertsAfterTrip = (label) => label
+    ? trips.some(t => t.analogSampleIdx >= tripIdx && t.changes.some(c => c.label === label && c.asserted))
+    : false;
+
+  // ── Where in the sequence was this device when it tripped? ─────────────────
+  // SH0..SH4 are mutually exclusive: SH0 means "in reset, no attempts used", SH2 means
+  // "two reclose attempts already made". That index picks which open interval the NEXT
+  // close uses and how many attempts are left.
+  const shotAt = (idx) => {
+    for (let i = bits.SHOT.length - 1; i >= 0; i--) {
+      const lbl = bits.SHOT[i];
+      if (lbl && stateAt(lbl, idx).state) return i;
+    }
+    return null;
+  };
+  out.shotAtTrip = shotAt(tripIdx);
+  out.shotAtEnd = shotAt(endIdx);
+  out.inLockoutAtTrip = bits.LO ? stateAt(bits.LO, tripIdx).state : null;
+  out.inLockoutAtEnd = bits.LO ? stateAt(bits.LO, endIdx).state : null;
+  out.cyclingAtEnd = bits.CY ? stateAt(bits.CY, endIdx).state : null;
+  out.resetAtTrip = bits.RS ? stateAt(bits.RS, tripIdx).state : null;
+  out.lockoutAssertedAfterTrip = assertsAfterTrip(bits.LO);
+  out.cycleStartedAfterTrip = assertsAfterTrip(bits.CY);
+  out.closedInRecord = assertsAfterTrip(bits.CLOSE);
+  out.closeFailInRecord = assertsAfterTrip(bits.CF);
+
+  const shots = (typeof sch.shots === 'number' && sch.shots > 0) ? sch.shots
+    : (sch.trueOpenIntervalCount || null);
+  const enabled = sch.enabled === false ? false
+    : (sch.enabled === true ? true : (shots ? true : null));
+  out.shots = shots;
+  out.enabled = enabled;
+
+  // ── Gate-by-gate evaluation ────────────────────────────────────────────────
+  const addGate = (g) => { out.gates.push(g); return g; };
+  const specOf = (key) => RECLOSE_EQ_SPECS.find(s => s.key === key);
+
+  // Gate 1 — is the element switched on at all? Everything downstream is moot if not.
+  addGate({
+    key: 'E79', title: 'Reclosing element enabled', sel: 'E79',
+    what: 'Master enable for automatic reclosing, and the number of reclose attempts (shots) the sequence is allowed.',
+    equation: null,
+    status: enabled === false ? 'blocked' : (enabled === true ? 'settled' : 'unknown'),
+    pass: enabled === true,
+    summary: enabled === false
+      ? `E79 := ${sch.E79raw} — automatic reclosing is switched OFF on this device.`
+      : (enabled === true
+        ? `E79 := ${sch.E79raw != null ? sch.E79raw : 'enabled'} — ${shots ? shots : 'an unstated number of'} reclose attempt${shots === 1 ? '' : 's'} allowed.`
+        : 'No E79 setting found in this file’s settings block.'),
+  });
+
+  const gateSpecs = [
+    { key: 'RI',  when: 'trip',  role: 'required' },
+    { key: 'RIS', when: 'trip',  role: 'required' },
+    { key: 'DTL', when: 'trip',  role: 'blocking' },
+    { key: 'DLS', when: 'trip',  role: 'blocking-soft' },
+    { key: 'SKP', when: 'trip',  role: 'modifier' },
+    { key: 'STL', when: 'later', role: 'blocking-soft' },
+    { key: 'CLS', when: 'later', role: 'required' },
+    { key: 'ULCL', when: 'later', role: 'blocking' },
+    { key: 'BRS', when: 'later', role: 'modifier' },
+  ];
+
+  const gateResults = {};
+  gateSpecs.forEach(gs => {
+    const spec = specOf(gs.key);
+    const eq = sch.eq ? sch.eq[gs.key] : null;
+    if (!eq) {
+      gateResults[gs.key] = null;
+      return;
+    }
+    const atTrip = evalAt(eq, tripIdx);
+    const anywhere = firstTrueFromTrip(eq);
+    const atEnd = evalAt(eq, endIdx);
+    const res = { spec, sel: sch.eqName[gs.key] || spec.names[0], eq, atTrip, anywhere, atEnd, role: gs.role, when: gs.when };
+    gateResults[gs.key] = res;
+  });
+
+  // Human-readable "which term did it" for a given evaluation result.
+  const decidingBranch = (r) => {
+    if (!r || !r.branches || !r.branches.length) return null;
+    const t = r.branches.find(b => b.value);
+    return t || null;
+  };
+  const failingLeaves = (r) => {
+    if (!r || !r.branches) return [];
+    const bad = [];
+    r.branches.forEach(b => b.leaves.forEach(l => { if (!l.effective) bad.push(l); }));
+    return bad;
+  };
+
+  // Gate 2 — Reclose Initiate. Evaluated across the whole post-trip window because the
+  // trip bit it usually keys off is a pulse, not a level.
+  if (gateResults.RI) {
+    const r = gateResults.RI;
+    const hit = r.anywhere;
+    const chosen = hit ? hit.result : r.atTrip;
+    const branch = hit ? decidingBranch(hit.result) : null;
+    addGate({
+      key: 'RI', title: 'Reclose initiated by this trip', sel: r.sel, what: r.spec.what,
+      equation: r.eq, evaluation: chosen,
+      status: hit ? 'settled' : (chosen && chosen.definite ? 'blocked' : 'unknown'),
+      pass: !!hit,
+      summary: hit
+        ? `Satisfied ${hit.ms <= 0 ? 'at the trip' : `${hit.ms.toFixed(0)} ms after the trip`}${branch ? ` via ${rcGlossText(P, branch.text)}` : ''} — a reclose sequence is initiated by this event.`
+        : (chosen && chosen.definite
+          ? `Never satisfied anywhere between the trip and the end of the record — this trip does not start a reclose sequence. ${describeWhyFalse(chosen)}`
+          : 'Could not be evaluated — the equation references bits this record does not carry.'),
+    });
+  } else if (enabled) {
+    addGate({
+      key: 'RI', title: 'Reclose initiated by this trip', sel: '79RI', what: specOf('RI').what,
+      equation: null, status: 'unknown', pass: null,
+      summary: 'No Reclose Initiate equation found in this file. On SEL relays the factory default initiates on the relay’s own trip, so a trip would normally start a sequence — but that cannot be confirmed from this record.',
+    });
+  }
+
+  // Gate 3 — Reclose Initiate Supervision, evaluated at the instant the initiate actually
+  // landed (not at some arbitrary later point where 52A has already dropped out).
+  if (gateResults.RIS) {
+    const r = gateResults.RIS;
+    const riHit = gateResults.RI && gateResults.RI.anywhere;
+    const evalIdx = riHit ? riHit.idx : tripIdx;
+    const res = evalAt(r.eq, evalIdx);
+    const branch = decidingBranch(res);
+    addGate({
+      key: 'RIS', title: 'Initiate supervision satisfied', sel: r.sel, what: r.spec.what,
+      equation: r.eq, evaluation: res,
+      status: res && res.definite ? (res.value ? 'settled' : 'blocked') : 'unknown',
+      pass: res && res.definite ? res.value : null,
+      summary: res && res.value
+        ? `Satisfied at the moment of initiate${branch ? ` via ${rcGlossText(P, branch.text)}` : ''} — the initiate is accepted.`
+        : (res && res.definite
+          ? `Not satisfied at the moment of initiate — the reclose initiate is rejected and no sequence starts. ${describeWhyFalse(res)}`
+          : 'Could not be evaluated from this record.'),
+    });
+  }
+
+  // Gate 4 — Drive to Lockout. The single most decisive gate: if this asserts anywhere
+  // between the trip and the end of the record, there is no automatic close, full stop.
+  if (gateResults.DTL) {
+    const r = gateResults.DTL;
+    const hit = r.anywhere;
+    const branch = hit ? decidingBranch(hit.result) : null;
+    addGate({
+      key: 'DTL', title: 'Driven to lockout', sel: r.sel, what: r.spec.what,
+      equation: r.eq, evaluation: hit ? hit.result : r.atTrip,
+      status: hit ? 'blocked' : ((r.atTrip && r.atTrip.definite) ? 'settled' : 'unknown'),
+      pass: !hit,
+      inverted: true,
+      summary: hit
+        ? `ASSERTED ${hit.ms <= 0 ? 'at the trip' : `${hit.ms.toFixed(0)} ms after the trip`}${branch ? ` via ${rcGlossText(P, branch.text)}` : ''} — the recloser is driven straight to lockout. No automatic close will be issued.`
+        : ((r.atTrip && r.atTrip.definite)
+          ? 'Not asserted at any point from the trip to the end of the record — nothing in this event forces lockout.'
+          : 'Could not be evaluated from this record.'),
+    });
+  }
+
+  // Gate 5 — Drive to Last Shot. Doesn't stop this close, but collapses the attempts after it.
+  // A very common template writes "79DLS := 79LO", which just mirrors the lockout bit back at
+  // itself. Reporting that as an independent blocking condition would be circular noise — once
+  // the device is in lockout, "and also it's at the last shot" tells the reader nothing — so
+  // that shape is called out for what it is instead of flagged.
+  if (gateResults.DLS) {
+    const r = gateResults.DLS;
+    const hit = r.anywhere;
+    const loLabels = ['79LO', '79LO3P'];
+    const echoesLockout = (r.eq || '').split('#')[0].trim().split(/\s+/).every(t => loLabels.includes(t) || /^(OR|AND)$/.test(t));
+    if (echoesLockout) {
+      addGate({
+        key: 'DLS', title: 'Driven to last shot', sel: r.sel, what: r.spec.what,
+        equation: r.eq, evaluation: null, status: 'settled', pass: true, soft: true,
+        summary: `Set to mirror ${loLabels.slice().sort((a, b) => b.length - a.length).find(l => (r.eq || '').includes(l)) || '79LO'}, so it simply follows the lockout state rather than acting as a separate condition — it does not independently shorten the sequence.`,
+      });
+      gateResults.DLS = null;
+    } else addGate({
+      key: 'DLS', title: 'Driven to last shot', sel: r.sel, what: r.spec.what,
+      equation: r.eq, evaluation: hit ? hit.result : r.atTrip,
+      status: hit ? 'blocked' : 'settled', pass: !hit, inverted: true, soft: true,
+      summary: hit
+        ? `Asserted ${hit.ms <= 0 ? 'at the trip' : `${hit.ms.toFixed(0)} ms after the trip`} — the shot counter jumps to the final shot, so intermediate attempts are skipped and the next trip locks out.`
+        : 'Not asserted — the sequence runs its full shot count.',
+    });
+  }
+
+  // Gate 6 — Skip Shot.
+  if (gateResults.SKP && !/^0$/.test((gateResults.SKP.eq || '').split('#')[0].trim())) {
+    const r = gateResults.SKP;
+    const hit = r.anywhere;
+    addGate({
+      key: 'SKP', title: 'Shot skipped', sel: r.sel, what: r.spec.what,
+      equation: r.eq, evaluation: hit ? hit.result : r.atTrip,
+      status: hit ? 'blocked' : 'settled', pass: !hit, inverted: true, soft: true,
+      summary: hit ? 'Asserted — this open interval is skipped and the sequence advances without closing.' : 'Not asserted — no shots are skipped.',
+    });
+  }
+
+  // Gate 7 — Stall Open Interval Timing. Evaluated at record end and flagged as pending,
+  // because what matters is whether it's still asserted tens of seconds from now.
+  if (gateResults.STL && !/^0$/.test((gateResults.STL.eq || '').split('#')[0].trim())) {
+    const r = gateResults.STL;
+    const now = r.atEnd;
+    addGate({
+      key: 'STL', title: 'Open-interval timer stalled', sel: r.sel, what: r.spec.what,
+      equation: r.eq, evaluation: now,
+      status: 'pending', pass: now ? !now.value : null, inverted: true, soft: true,
+      summary: now && now.value
+        ? 'Asserted at the end of the record. While it stays asserted the open-interval countdown is frozen, so the close is postponed for as long as this holds.'
+        : 'Not asserted at the end of the record — the open-interval timer runs normally unless this picks up later.',
+    });
+  }
+
+  // Gate 8 — Close Supervision. The permissive the close actually waits on, and the one
+  // most likely to be the real answer to "why hasn't it come back yet".
+  if (gateResults.CLS && !/^1$/.test((gateResults.CLS.eq || '').split('#')[0].trim())) {
+    const r = gateResults.CLS;
+    const now = r.atEnd;
+    const bad = now ? failingLeaves(now) : [];
+    addGate({
+      key: 'CLS', title: 'Close supervision satisfied', sel: r.sel, what: r.spec.what,
+      equation: r.eq, evaluation: now,
+      status: 'pending', pass: (now && now.definite) ? now.value : null,
+      summary: now && now.value
+        ? 'Satisfied as of the last sample in this record. It is re-checked when the open interval expires, well after this record ends — if it still holds then, the close is issued.'
+        : (now && now.definite
+          ? `NOT satisfied as of the last sample in this record. Until it is, the close is held even after the open interval expires. ${describeWhyFalse(now)}`
+          : 'Could not be evaluated from this record.'),
+      supervisionTerms: bad,
+      heldBy: (now && !now.value && now.definite) ? bad.filter(l => l.known).map(l => ({ name: l.name, negated: l.negated })) : [],
+    });
+  } else if (enabled && !gateResults.CLS) {
+    addGate({
+      key: 'CLS', title: 'Close supervision satisfied', sel: '79CLS', what: specOf('CLS').what,
+      equation: null, status: 'settled', pass: true,
+      summary: 'No close-supervision equation is configured, so the close is issued as soon as the open interval expires — there is no line-condition permissive to wait on.',
+    });
+  }
+
+  // Gate 9 — Unlatch Close.
+  if (gateResults.ULCL && !/^0$/.test((gateResults.ULCL.eq || '').split('#')[0].trim())) {
+    const r = gateResults.ULCL;
+    const now = r.atEnd;
+    addGate({
+      key: 'ULCL', title: 'Close unlatched', sel: r.sel, what: r.spec.what,
+      equation: r.eq, evaluation: now,
+      status: 'pending', pass: now ? !now.value : null, inverted: true,
+      summary: now && now.value
+        ? `Asserted at the end of the record — while this holds, a close command is withdrawn as soon as it is issued. ${describeWhyTrue(now)}`
+        : 'Not asserted at the end of the record — nothing is currently withdrawing the close.',
+    });
+  }
+
+  // ── Shot-by-shot plan ──────────────────────────────────────────────────────
+  // Everything the operator wants for "how will it behave coming back in": which attempt is
+  // next, how long each open interval is, when each close lands on the clock, and what
+  // happens at the end of the line.
+  const startShot = (out.shotAtTrip != null) ? out.shotAtTrip : 0;
+  const shotKnown = out.shotAtTrip != null;
+  const totalShots = shots || 0;
+  const tripClockMs = eventClockMsAtTrip(P, tripIdx, msPerSample);
+  let cum = 0;
+  if (enabled && totalShots > 0) {
+    for (let k = startShot + 1; k <= totalShots; k++) {
+      const oi = sch.openIntervals[k - 1];
+      const oiSec = (typeof oi === 'number') ? oi : null;
+      cum += (oiSec != null ? oiSec : 0);
+      out.plan.push({
+        shot: k,
+        setting: `79OI${k}`,
+        openIntervalSec: oiSec,
+        openIntervalRaw: oi,
+        cumulativeSec: oiSec != null ? cum : null,
+        clock: (oiSec != null && tripClockMs != null) ? formatClockOffset(tripClockMs, cum * 1000) : null,
+        supervised: !!(gateResults.CLS && gateResults.CLS.eq && !/^1$/.test(gateResults.CLS.eq.split('#')[0].trim())),
+        isLast: k === totalShots,
+      });
+    }
+  }
+  out.startShot = startShot;
+  out.shotKnown = shotKnown;
+  out.attemptsRemaining = enabled && totalShots > 0 ? Math.max(0, totalShots - startShot) : 0;
+  out.tripClockMs = tripClockMs;
+
+  // ── Lockout paths — every documented way this sequence ends open ──────────
+  if (enabled && totalShots > 0) {
+    if (gateResults.DTL && gateResults.DTL.eq) {
+      out.lockoutPaths.push({
+        title: `Drive to Lockout (${gateResults.DTL.sel}) asserts`,
+        detail: `Any term of "${gateResults.DTL.eq.split('#')[0].trim()}" going true sends the recloser straight to lockout from Reset or Cycle — immediately, without waiting out an open interval.`,
+      });
+    }
+    out.lockoutPaths.push({
+      title: `Final shot used and the fault persists`,
+      detail: `After reclose attempt ${totalShots} of ${totalShots}, another trip with the shot counter already at SH${totalShots} takes the recloser to lockout. There is no attempt ${totalShots + 1}.`,
+    });
+    if (sch.closeSupLimit != null) {
+      out.lockoutPaths.push({
+        title: `Close supervision times out (79CLSD = ${sch.closeSupLimit} s)`,
+        detail: `Once an open interval expires, the recloser waits for close supervision. If it is not satisfied within ${sch.closeSupLimit} s, the recloser gives up and goes to lockout instead of closing.`,
+      });
+    } else if (sch.closeSupLimitOff && gateResults.CLS && gateResults.CLS.eq) {
+      out.notes.push(`79CLSD := OFF — there is no time limit on waiting for close supervision. If the supervising condition never comes back, the recloser waits indefinitely with the breaker open rather than locking out. It will simply sit there, neither closed nor locked out.`);
+    }
+    if (bits.CF) {
+      out.lockoutPaths.push({
+        title: 'Close failure (CF)',
+        detail: 'A close command issued with no breaker-closed confirmation within the close-failure time asserts CF, which normally drives the recloser to lockout rather than retrying.',
+      });
+    }
+  }
+
+  // ── Reset behaviour ────────────────────────────────────────────────────────
+  out.reset = {
+    fromCycleSec: sch.resetDelay,
+    fromLockoutSec: sch.resetFromLockoutDelay,
+    blockedBy: gateResults.BRS && gateResults.BRS.eq && !/^0$/.test(gateResults.BRS.eq.split('#')[0].trim()) ? gateResults.BRS : null,
+  };
+
+  // ── What the record itself observed ────────────────────────────────────────
+  const obs = out.observed;
+  if (out.shotAtTrip != null) obs.push({ k: 'Shot counter at the trip', v: `SH${out.shotAtTrip}${out.shotAtTrip === 0 ? ' — in reset, no reclose attempts used yet' : ` — ${out.shotAtTrip} reclose attempt${out.shotAtTrip === 1 ? '' : 's'} already used`}` });
+  if (out.shotAtEnd != null && out.shotAtEnd !== out.shotAtTrip) obs.push({ k: 'Shot counter at end of record', v: `SH${out.shotAtEnd} — the counter advanced during this record` });
+  if (out.inLockoutAtTrip != null) obs.push({ k: `${bits.LO} at the trip`, v: out.inLockoutAtTrip ? 'ASSERTED — already locked out before this trip' : 'not asserted' });
+  if (out.lockoutAssertedAfterTrip) obs.push({ k: `${bits.LO} after the trip`, v: 'ASSERTED — the recloser went to lockout within this record' });
+  if (out.cycleStartedAfterTrip) obs.push({ k: `${bits.CY} after the trip`, v: out.lockoutAssertedAfterTrip
+    ? 'ASSERTED — a reclose cycle did start, then collapsed to lockout inside this same record before any open interval could run'
+    : 'ASSERTED — a reclose cycle started within this record; the open-interval timer is running' });
+  else if (bits.CY && out.cyclingAtEnd) obs.push({ k: `${bits.CY} at end of record`, v: 'ASSERTED — a reclose cycle is in progress' });
+  if (out.closedInRecord) obs.push({ k: `${bits.CLOSE} after the trip`, v: 'ASSERTED — a close command was actually issued inside this record' });
+  if (out.closeFailInRecord) obs.push({ k: `${bits.CF} after the trip`, v: 'ASSERTED — close failure' });
+  if (bits.BKR) obs.push({ k: `${bits.BKR} at end of record`, v: stateAt(bits.BKR, endIdx).state ? 'closed' : 'open' });
+
+  // ── Verdict ────────────────────────────────────────────────────────────────
+  out.verdict = buildRecloseVerdict(out, gateResults, sch, P, A);
+  // The shot schedule means two different things depending on the verdict: it's either what
+  // is about to happen, or it's the sequence this device is capable of running that this
+  // particular event isn't going to reach. The UI has to say which — a countdown to a close
+  // that will never be issued is worse than no countdown at all.
+  out.planIsLive = out.verdict.tone !== 'bad';
+  return out;
+}
+
+// The site's own words for an SV, when they wrote any — "SV06T" means nothing to a reader,
+// "SV06T (OPEN TAVRIDA)" means everything. Falls back to the bare name.
+function rcGloss(P, name) {
+  const m = /^SV(\d+)T?$/.exec(name || '');
+  if (!m) return name;
+  const sv = (P.svSettings || []).find(x => x.num === parseInt(m[1], 10));
+  if (!sv || !sv.equation || !sv.equation.includes('#')) return name;
+  const c = sv.equation.split('#').slice(1).join('#').trim();
+  return c ? `${name} (${c.toLowerCase()})` : name;
+}
+// Same, applied to every SV name inside a rendered branch expression.
+function rcGlossText(P, text) {
+  return (text || '').replace(/\bSV\d+T?\b/g, m => rcGloss(P, m));
+}
+
+// Explains, in one sentence, why an equation came out false — naming the terms rather than
+// making the reader diff the equation against the bit list themselves.
+function describeWhyFalse(res) {
+  if (!res || !res.branches || !res.branches.length) return '';
+  // For a single-branch (pure AND) equation, name the operands that are not satisfied.
+  if (res.branches.length === 1) {
+    const bad = res.branches[0].leaves.filter(l => !l.effective);
+    if (!bad.length) return '';
+    return `Held down by ${bad.map(l => `${l.negated ? 'NOT ' : ''}${l.name}${l.negated ? ' (it IS asserted)' : ' (not asserted)'}`).join(' and ')}.`;
+  }
+  // For an OR of branches, none of them is true — say so compactly.
+  return `None of its ${res.branches.length} alternative terms is satisfied.`;
+}
+
+function describeWhyTrue(res) {
+  if (!res || !res.branches || !res.branches.length) return '';
+  const t = res.branches.find(b => b.value);
+  return t ? `Satisfied via ${t.text}.` : '';
+}
+
+// Absolute wall-clock of the trip instant, so projected close times can be given as real
+// times of day rather than only as "+60 s". Returns null when the record has no timestamp.
+function eventClockMsAtTrip(P, tripIdx, msPerSample) {
+  const ts = P.timestamp || P.eventTimestamp || (P.eventInfo && P.eventInfo.timestamp) || null;
+  if (!ts) return null;
+  const base = getTimestampMs(ts);
+  if (base == null || isNaN(base)) return null;
+  const trigIdx = (P.triggerSampleIndex != null && P.triggerSampleIndex >= 0) ? P.triggerSampleIndex : 0;
+  return base + (tripIdx - trigIdx) * msPerSample;
+}
+
+function formatClockOffset(baseMs, offsetMs) {
+  try {
+    const d = new Date(baseMs + offsetMs);
+    if (isNaN(d.getTime())) return null;
+    const p = (n, w) => String(n).padStart(w || 2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  } catch (e) { return null; }
+}
+
+function formatDuration(sec) {
+  if (sec == null) return '—';
+  if (sec < 60) return `${sec % 1 === 0 ? sec : sec.toFixed(2)} s`;
+  const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+  return `${sec % 1 === 0 ? sec : sec.toFixed(1)} s (${m} min${s ? ` ${s} s` : ''})`;
+}
+
+// Collapses the gate-by-gate result into the single sentence that goes at the top of the tab
+// and in the banner. Ordered by decisiveness: an element that's switched off beats a blocked
+// initiate, which beats a lockout drive, which beats a pending supervision.
+function buildRecloseVerdict(out, gr, sch, P, A) {
+  const V = (kind, tone, headline, detail, extra) => Object.assign({ kind, tone, headline, detail }, extra || {});
+
+  if (out.enabled === false) {
+    return V('disabled', 'bad', 'Will NOT auto-close — reclosing is disabled',
+      `The reclosing element is switched off on this device (E79 := ${sch.E79raw}). No automatic close will be attempted after this trip, or after any trip. The recloser stays open until somebody closes it — front-panel pushbutton, SCADA, or a field visit.`);
+  }
+
+  if (out.inLockoutAtTrip) {
+    return V('already-lockout', 'bad', 'Will NOT auto-close — already in lockout before this trip',
+      `${out.bits.LO} was already asserted when this trip occurred, so the recloser was in lockout going in. Automatic reclosing does not resume until the device is closed manually and stays closed for the reset-from-lockout time${sch.resetFromLockoutDelay != null ? ` (79RSLD = ${sch.resetFromLockoutDelay} s)` : ''}.`);
+  }
+
+  const recovery = sch.resetFromLockoutDelay != null
+    ? ` Once it is closed manually, the breaker has to stay closed for ${formatDuration(sch.resetFromLockoutDelay)} (79RSLD) before automatic reclosing is armed again.`
+    : '';
+
+  const dtl = out.gates.find(g => g.key === 'DTL');
+  if (dtl && dtl.status === 'blocked') {
+    return V('lockout', 'bad', 'Will NOT auto-close — this trip drives it to lockout',
+      `${dtl.summary} The breaker stays open until it is closed manually.${recovery}`);
+  }
+
+  const ri = out.gates.find(g => g.key === 'RI');
+  if (ri && ri.status === 'blocked') {
+    return V('no-initiate', 'bad', 'Will NOT auto-close — this trip does not initiate a reclose',
+      `${ri.summary} The reclose element stays in Reset with the breaker open; it is not counting toward a close.`);
+  }
+  const ris = out.gates.find(g => g.key === 'RIS');
+  if (ris && ris.status === 'blocked') {
+    return V('no-initiate', 'bad', 'Will NOT auto-close — initiate supervision rejected it',
+      ris.summary);
+  }
+
+  if (out.attemptsRemaining === 0 && out.shotKnown && out.shots) {
+    return V('exhausted', 'bad', 'Will NOT auto-close — all reclose attempts already used',
+      `The shot counter was already at SH${out.shotAtTrip} of ${out.shots} when this trip occurred, so there is no attempt left in the sequence. This trip takes the recloser to lockout.`);
+  }
+
+  if (out.lockoutAssertedAfterTrip) {
+    return V('lockout', 'bad', 'Will NOT auto-close — the recloser went to lockout in this record',
+      `${out.bits.LO} asserts after the trip inside this record. Whatever the settings allow in principle, this particular event ended in lockout.${recovery}`);
+  }
+
+  // From here the sequence is running. The only question left is what the close waits on.
+  const cls = out.gates.find(g => g.key === 'CLS');
+  const next = out.plan[0];
+  const whenText = next
+    ? `Attempt ${next.shot} of ${out.shots} is due ${next.openIntervalSec != null ? `${formatDuration(next.openIntervalSec)} after the trip${next.clock ? ` — about ${next.clock}` : ''}` : 'after its open interval'} (${next.setting}).`
+    : '';
+  const remainText = out.attemptsRemaining
+    ? `${out.attemptsRemaining} attempt${out.attemptsRemaining === 1 ? '' : 's'} remaining of ${out.shots}.`
+    : '';
+
+  if (cls && cls.pass === false) {
+    const held = (cls.heldBy || []).length
+      ? ` It is currently held down by ${cls.heldBy.map(l => `${l.negated ? 'NOT ' : ''}${rcGloss(P, l.name)}`).join(' and ')}.`
+      : '';
+    return V('armed-held', 'warn', 'Will attempt to auto-close — but the close is currently held by supervision',
+      `${whenText} ${remainText} Close supervision (${cls.sel}) was not satisfied when this record ended, and the close is not issued until it is — the open interval expiring is not enough on its own.${held} Whether the close actually goes out depends on line conditions after this record, which it cannot see.`);
+  }
+  if (cls && cls.pass === true && cls.equation) {
+    return V('armed', 'ok', 'Will auto-close',
+      `${whenText} ${remainText} Close supervision (${cls.sel}) was satisfied at the end of this record; assuming line conditions hold, the close goes out when the open interval expires.`);
+  }
+  if (cls && cls.pass === true && !cls.equation) {
+    return V('armed', 'ok', 'Will auto-close',
+      `${whenText} ${remainText} No close-supervision permissive is configured, so the close is issued the moment the open interval expires — there is no line condition for it to wait on.`);
+  }
+  if (out.enabled === true) {
+    return V('armed', 'ok', 'Will auto-close',
+      `${whenText} ${remainText} No close-supervision permissive stands in the way.`);
+  }
+  return V('unknown', 'unknown', 'Reclose behaviour could not be determined',
+    'This file does not carry enough of the reclosing settings block to say what the recloser will do next.');
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// RECLOSING TAB — RENDERING
+// ══════════════════════════════════════════════════════════════════════
+// Answers, in order: will it come back by itself, when, how many times, and what has to be
+// true on the line before each attempt actually closes. The ordering is deliberate — the
+// verdict first, because that's the only thing some readers need, then the conditions that
+// produced it, then the schedule, then the reference material.
+
+const RC_TONE = {
+  bad:     { color: 'var(--red)',    bg: 'var(--red-dim)',    border: '#5c1414', icon: '⛔' },
+  warn:    { color: 'var(--yellow)', bg: 'var(--yellow-dim)', border: '#5c4506', icon: '⏳' },
+  ok:      { color: 'var(--green)',  bg: 'var(--green-dim)',  border: '#0a3d2a', icon: '🔄' },
+  unknown: { color: 'var(--accent)', bg: 'var(--accent-dim)', border: '#123a5c', icon: '❔' },
+};
+
+const RC_STATUS = {
+  settled: { label: 'MET',      color: 'var(--green)',     bg: 'var(--green-dim)',  border: '#0a3d2a' },
+  blocked: { label: 'BLOCKING', color: 'var(--red)',       bg: 'var(--red-dim)',    border: '#5c1414' },
+  pending: { label: 'PENDING',  color: 'var(--yellow)',    bg: 'var(--yellow-dim)', border: '#5c4506' },
+  unknown: { label: 'UNKNOWN',  color: 'var(--text-dim)',  bg: 'transparent',       border: 'var(--card-border)' },
+};
+
+function rcStatusPill(status) {
+  const s = RC_STATUS[status] || RC_STATUS.unknown;
+  return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:0.06em;color:${s.color};background:${s.bg};border:1px solid ${s.border};white-space:nowrap;">${s.label}</span>`;
+}
+
+// One live term of a reclose equation: name, whether it's used inverted, and what it was
+// actually doing in this record. Green = this term is helping the equation be true.
+function rcLeafChip(leaf, P) {
+  const good = leaf.effective;
+  const color = !leaf.known ? 'var(--text-muted)' : (good ? 'var(--green)' : 'var(--red)');
+  const bg = !leaf.known ? 'transparent' : (good ? 'var(--green-dim)' : 'var(--red-dim)');
+  const mark = !leaf.known ? '?' : (good ? '✓' : '✕');
+  const stateWord = !leaf.known ? 'not in this record' : (leaf.state ? 'asserted' : 'not asserted');
+  return `<span title="${escapeAttr(`${leaf.name} is ${stateWord}${leaf.negated ? ' — and this term uses NOT, so it needs the bit LOW' : ''}`)}"
+    style="display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:4px;font-family:var(--mono);font-size:11px;color:${color};background:${bg};border:1px solid ${color}33;margin:2px 4px 2px 0;">
+    ${leaf.negated ? '<span style="opacity:0.75">NOT</span> ' : ''}${leaf.name} <span style="font-weight:700">${mark}</span></span>`;
+}
+
+function buildRecloseGateRows(RC, P) {
+  return RC.gates.map(g => {
+    const ev = g.evaluation;
+    const leaves = [];
+    if (ev && ev.branches) ev.branches.forEach(b => b.leaves.forEach(l => leaves.push(l)));
+    // De-duplicate: the same bit can appear in more than one branch and only needs showing once.
+    const seen = new Set();
+    const uniqLeaves = leaves.filter(l => { const k = l.name + '|' + l.negated; if (seen.has(k)) return false; seen.add(k); return true; });
+    return `<tr>
+      <td style="white-space:nowrap;vertical-align:top;padding-top:12px;">${rcStatusPill(g.status)}</td>
+      <td style="vertical-align:top;">
+        <div style="font-weight:700;color:var(--text);font-size:12.5px;">${g.title}
+          ${g.sel ? `<span style="font-family:var(--mono);font-size:11px;color:var(--accent);font-weight:500;margin-left:6px;">${g.sel}</span>` : ''}</div>
+        <div style="font-size:11.5px;color:var(--text-muted);margin-top:3px;line-height:1.5;">${g.what || ''}</div>
+        ${g.equation ? `<div class="code-block" style="margin-top:7px;font-size:11px;padding:7px 10px;">${linkifyEquationBits(g.equation.split('#')[0].trim(), P)}${g.equation.includes('#') ? ` <span class="sv-comment" style="color:var(--text-muted)"># ${g.equation.split('#').slice(1).join('#').trim()}</span>` : ''}</div>` : ''}
+        <div style="font-size:12px;color:var(--text-dim);margin-top:7px;line-height:1.55;">${g.summary || ''}</div>
+        ${uniqLeaves.length ? `<div style="margin-top:6px;">${uniqLeaves.map(l => rcLeafChip(l, P)).join('')}</div>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function buildReclosePlanTable(RC, P) {
+  if (!RC.plan.length) return '';
+  const rows = RC.plan.map(s => `<tr>
+    <td style="font-weight:700;color:var(--text);white-space:nowrap;">Attempt ${s.shot}<span style="color:var(--text-muted);font-weight:400"> of ${RC.shots}</span></td>
+    <td style="font-family:var(--mono);color:var(--accent);white-space:nowrap;">${s.setting}</td>
+    <td style="white-space:nowrap;">${s.openIntervalSec != null ? formatDuration(s.openIntervalSec) : (s.openIntervalRaw === 'OFF' ? 'OFF' : '—')}</td>
+    <td style="white-space:nowrap;">${s.cumulativeSec != null ? formatDuration(s.cumulativeSec) : '—'}</td>
+    <td style="white-space:nowrap;font-family:var(--mono);">${s.clock || '—'}</td>
+    <td>${s.supervised ? `held until ${RC.gates.find(g => g.key === 'CLS')?.sel || '79CLS'} is satisfied` : 'issued as soon as the interval expires'}</td>
+  </tr>`).join('');
+  const live = RC.planIsLive;
+  return `<div class="card ${live ? 'blue-accent' : ''}"><div class="card-header">📅 ${live ? 'Reclose Sequence — What Happens Next' : 'Reclose Sequence as Configured — Not Running for This Event'}</div>
+    ${live ? '' : `<div style="background:var(--red-dim);border:1px solid #5c1414;border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:var(--text-dim);line-height:1.55;">
+      <b style="color:var(--red)">None of the attempts below will be made for this trip.</b> ${RC.verdict.headline.replace(/^Will NOT auto-close — /, 'Reason: ')}. The schedule is shown because it is what this device would do on a trip that <em>does</em> initiate a reclose — useful for judging whether the block was the right outcome.
+    </div>`}
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;line-height:1.6;">
+      ${RC.shotKnown
+        ? `The shot counter was at <b style="color:var(--text)">SH${RC.shotAtTrip}</b> when this trip occurred, so the sequence resumes at attempt ${RC.startShot + 1}.`
+        : `No shot-counter bit (SH0…SH4) is carried in this record, so the sequence below is shown from the start — if the recloser had already used attempts before this trip, the remaining count is smaller than shown.`}
+      "Time after trip" is cumulative and assumes the worst case: every close is followed immediately by another trip, so the intervals stack. If any close holds, the sequence stops there and the reset timer takes over.
+    </p>
+    <div class="table-scroll"><table class="data-table"><thead><tr>
+      <th>Attempt</th><th>Setting</th><th>Open interval</th><th>Time after trip</th><th>Approx. clock</th><th>Close is…</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="margin-top:10px;padding:10px 12px;background:var(--red-dim);border:1px solid #5c1414;border-radius:6px;font-size:12px;color:var(--text-dim);line-height:1.55;">
+      <b style="color:var(--red)">After attempt ${RC.shots}:</b> if the fault is still there and the device trips again, the shot counter is exhausted and the recloser goes to <b style="color:var(--red)">lockout</b> — it stays open until somebody closes it.
+    </div>
+    ${RC.tripClockMs != null ? `<div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Clock times are derived from this record's own timestamp plus the open intervals, so they're approximate — anything that stalls the open-interval timer or holds close supervision pushes them later.</div>` : ''}
+  </div>`;
+}
+
+function buildRecloseSchemeCard(RC, P) {
+  const sch = RC.scheme;
+  const rows = [];
+  rows.push(['E79', sch.E79raw ?? '—', 'Reclosing enable / number of shots']);
+  sch.openIntervals.forEach((v, i) => {
+    if (v == null) return;
+    rows.push([`79OI${i + 1}`, typeof v === 'number' ? formatDuration(v) : String(v), `Open interval before reclose attempt ${i + 1}`]);
+  });
+  if (sch.resetDelay != null) rows.push(['79RSD', formatDuration(sch.resetDelay), 'Reset time from Cycle — how long the breaker must stay closed after a reclose before the shot counter clears back to zero']);
+  if (sch.resetFromLockoutDelay != null) rows.push(['79RSLD', formatDuration(sch.resetFromLockoutDelay), 'Reset time from Lockout — how long the breaker must stay closed after a manual close before automatic reclosing is armed again']);
+  if (sch.closeSupLimitOff) rows.push(['79CLSD', 'OFF', 'Close supervision limit — OFF, so the recloser waits indefinitely for close supervision instead of locking out']);
+  else if (sch.closeSupLimit != null) rows.push(['79CLSD', formatDuration(sch.closeSupLimit), 'Close supervision limit — if supervision is not satisfied within this time after the open interval expires, the recloser goes to lockout']);
+
+  const eqRows = RECLOSE_EQ_SPECS.filter(s => sch.eq && sch.eq[s.key]).map(s => `<tr>
+      <td style="font-family:var(--mono);color:var(--accent);white-space:nowrap;vertical-align:top;">${sch.eqName[s.key]}</td>
+      <td style="vertical-align:top;">
+        <div style="font-weight:600;color:var(--text);font-size:12px;">${s.title}</div>
+        <div class="code-block" style="margin:5px 0 0;font-size:11px;padding:6px 9px;">${linkifyEquationBits(sch.eq[s.key].split('#')[0].trim(), P)}${sch.eq[s.key].includes('#') ? ` <span style="color:var(--text-muted)"># ${sch.eq[s.key].split('#').slice(1).join('#').trim()}</span>` : ''}</div>
+        <div style="font-size:11.5px;color:var(--text-muted);margin-top:5px;line-height:1.5;">${s.what}</div>
+      </td></tr>`).join('');
+
+  return `<div class="card"><div class="card-header">⚙️ Reclosing Scheme as Configured</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">Decoded from this file's own settings block — the complete ANSI 79 configuration on this device, independent of what happened in this particular event.</p>
+    ${rows.length ? `<table class="data-table"><thead><tr><th>Setting</th><th>Value</th><th>What it controls</th></tr></thead><tbody>
+      ${rows.map(([k, v, d]) => `<tr><td style="color:var(--accent);font-family:var(--mono);white-space:nowrap;">${k}</td><td style="white-space:nowrap;font-weight:600;">${v}</td><td style="font-family:var(--sans);color:var(--text-dim)">${d}</td></tr>`).join('')}
+    </tbody></table>` : '<p style="color:var(--text-dim);font-size:12.5px;">No numeric 79 settings found in this file.</p>'}
+    ${eqRows ? `<div style="margin-top:18px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text);margin-bottom:8px;">Reclose Control Equations</div>
+      <table class="data-table"><tbody>${eqRows}</tbody></table>` : ''}
+  </div>`;
+}
+
+function buildRecloseEndCard(RC, P) {
+  const reset = RC.reset || {};
+  const hasReset = reset.fromCycleSec != null || reset.fromLockoutSec != null || reset.blockedBy;
+  if (!RC.lockoutPaths.length && !hasReset && !RC.notes.length) return '';
+  return `<div class="card yellow-accent"><div class="card-header">🔚 How the Sequence Ends</div>
+    ${RC.lockoutPaths.length ? `<div style="font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--red);margin-bottom:8px;">Every path to lockout</div>
+      ${RC.lockoutPaths.map(p => `<div style="background:var(--red-dim);border:1px solid #5c1414;border-radius:6px;padding:10px 12px;margin-bottom:7px;">
+        <div style="font-size:12.5px;font-weight:700;color:var(--red);margin-bottom:3px;">${p.title}</div>
+        <div style="font-size:12px;color:var(--text-dim);line-height:1.55;">${p.detail}</div></div>`).join('')}` : ''}
+    ${hasReset ? `<div style="font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--green);margin:16px 0 8px;">Returning to normal</div>
+      <div style="background:var(--green-dim);border:1px solid #0a3d2a;border-radius:6px;padding:10px 12px;font-size:12px;color:var(--text-dim);line-height:1.6;">
+        ${reset.fromCycleSec != null ? `<div><b style="color:var(--green)">After a successful reclose:</b> the breaker must stay closed for <b style="color:var(--text)">${formatDuration(reset.fromCycleSec)}</b> (79RSD) before the shot counter clears back to SH0 and the full set of attempts is available again. A trip inside that window continues the same sequence at the next shot instead of starting over.</div>` : ''}
+        ${reset.fromLockoutSec != null ? `<div style="margin-top:7px;"><b style="color:var(--green)">After a manual close out of lockout:</b> the breaker must stay closed for <b style="color:var(--text)">${formatDuration(reset.fromLockoutSec)}</b> (79RSLD) before automatic reclosing is armed again.</div>` : ''}
+        ${reset.blockedBy ? `<div style="margin-top:7px;"><b style="color:var(--yellow)">Reset can be held off:</b> <span style="font-family:var(--mono)">${reset.blockedBy.sel}</span> := <span style="font-family:var(--mono)">${reset.blockedBy.eq.split('#')[0].trim()}</span> blocks the reset timer while asserted, keeping the shot counter where it is.</div>` : ''}
+      </div>` : ''}
+    ${RC.notes.length ? RC.notes.map(n => `<div style="margin-top:12px;padding:10px 12px;background:var(--yellow-dim);border:1px solid #5c4506;border-radius:6px;font-size:12px;color:var(--text-dim);line-height:1.55;">${n}</div>`).join('') : ''}
+  </div>`;
+}
+
+function buildRecloseObservedCard(RC, P) {
+  if (!RC.observed.length) return '';
+  return `<div class="card"><div class="card-header">👁️ What This Record Actually Shows</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">The 79 relay-word bits as recorded — the device's own account of where it was in the sequence, as distinct from what the settings say it should do.</p>
+    <table class="data-table"><tbody>
+      ${RC.observed.map(o => `<tr><td style="font-weight:600;color:var(--text);white-space:nowrap;font-family:var(--mono);font-size:11.5px;">${o.k}</td><td>${o.v}</td></tr>`).join('')}
+    </tbody></table>
+    <div style="margin-top:10px;font-size:11px;color:var(--text-muted);line-height:1.5;">
+      This record covers ${(RC.recordEndMsAfterTrip / 1000).toFixed(2)} s after the trip. Open intervals on this device are measured in tens to hundreds of seconds, so the close itself happens long after the last sample here — the sequence above is projected from the settings, not observed.
+    </div>
+  </div>`;
+}
+
+function buildRecloseTabHTML(P, A) {
+  const RC = A && A.reclose;
+  if (!RC) return `<div class="card"><div class="card-header">🔄 Automatic Reclosing</div>
+    <p style="color:var(--text-dim);font-size:13px;">No reclosing analysis available for this record.</p></div>`;
+
+  const v = RC.verdict || {};
+  const tone = RC_TONE[v.tone] || RC_TONE.unknown;
+
+  const glance = [];
+  if (RC.enabled === true && RC.shots) glance.push(['Shots configured', `${RC.shots}`]);
+  if (RC.enabled === false) glance.push(['Reclosing', 'Disabled (E79 off)']);
+  if (RC.shotKnown) glance.push(['Shot at trip', `SH${RC.shotAtTrip}`]);
+  if (RC.enabled === true) glance.push([RC.planIsLive ? 'Attempts remaining' : 'Attempts this event', RC.planIsLive ? `${RC.attemptsRemaining}` : '0']);
+  if (RC.planIsLive && RC.plan.length && RC.plan[0].openIntervalSec != null) glance.push(['Next attempt in', formatDuration(RC.plan[0].openIntervalSec)]);
+  const totalSec = RC.plan.length ? RC.plan[RC.plan.length - 1].cumulativeSec : null;
+  if (totalSec != null && RC.plan.length > 1) glance.push([RC.planIsLive ? 'Full sequence spans' : 'Configured sequence spans', formatDuration(totalSec)]);
+
+  const verdictCard = `<div class="card" style="border-top:3px solid ${tone.color};">
+    <div style="display:flex;align-items:flex-start;gap:12px;">
+      <div style="font-size:26px;line-height:1;">${tone.icon}</div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px;">Automatic Reclosing — Verdict</div>
+        <div style="font-size:17px;font-weight:700;color:${tone.color};line-height:1.35;">${v.headline || ''}</div>
+        <p style="font-size:13px;color:var(--text-dim);line-height:1.65;margin-top:8px;">${v.detail || ''}</p>
+      </div>
+    </div>
+    ${glance.length ? `<div class="trip-timing" style="margin-top:14px;">${glance.map(([k, val]) =>
+      `<div class="timing-chip"><span class="label">${k}:</span> <span class="value">${val}</span></div>`).join('')}</div>` : ''}
+  </div>`;
+
+  const gateCard = RC.gates.length ? `<div class="card red-accent"><div class="card-header">✅ Conditions That Decide the Auto-Close</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:6px;line-height:1.6;">
+      Every gate the relay's own reclose logic puts between this trip and a close command, evaluated against the digital states in this record.
+    </p>
+    <div class="tab-legend" style="margin-bottom:12px;">
+      <span>${rcStatusPill('settled')} decided by this record — condition satisfied</span>
+      <span>${rcStatusPill('blocked')} decided by this record — this is what stops the close</span>
+      <span>${rcStatusPill('pending')} checked after the record ends; the state shown is an indication, not the answer</span>
+      <span>${rcStatusPill('unknown')} references bits this file doesn't carry</span>
+    </div>
+    <table class="data-table"><tbody>${buildRecloseGateRows(RC, P)}</tbody></table>
+  </div>` : '';
+
+  return verdictCard + gateCard + buildReclosePlanTable(RC, P) + buildRecloseEndCard(RC, P)
+    + buildRecloseObservedCard(RC, P) + buildRecloseSchemeCard(RC, P);
+}
+
+// Compact verdict strip for the top banner — one line, so the "does it come back?" question
+// is answered without leaving the summary view. Silent when the file carries no 79 data at
+// all, so non-recloser relays don't get an empty block.
+function buildRecloseBannerBlock(P, A) {
+  const RC = A && A.reclose;
+  if (!RC || !RC.available || !RC.verdict || RC.verdict.kind === 'no-data') return '';
+  const v = RC.verdict;
+  const tone = RC_TONE[v.tone] || RC_TONE.unknown;
+  const next = RC.plan && RC.plan[0];
+  const bits = [];
+  // Only advertise a countdown when a close is actually coming. On a blocked verdict the same
+  // numbers would read as a promise the relay isn't going to keep.
+  if (RC.planIsLive) {
+    if (RC.enabled === true && RC.shots) bits.push(`${RC.attemptsRemaining} of ${RC.shots} attempt${RC.shots === 1 ? '' : 's'} left`);
+    if (next && next.openIntervalSec != null) bits.push(`next in ${formatDuration(next.openIntervalSec)}${next.clock ? ` (~${next.clock})` : ''}`);
+  } else if (RC.enabled === true && RC.shots) {
+    bits.push(`${RC.shots}-shot scheme, not being run for this event`);
+  }
+  return `<div style="margin-top:14px;background:${tone.bg};border:1px solid ${tone.border};border-radius:8px;padding:12px 14px;">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <span style="font-size:15px;">${tone.icon}</span>
+      <span style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-muted);">Auto-Reclose</span>
+      <span style="font-size:12.5px;font-weight:700;color:${tone.color};">${v.headline}</span>
+      ${bits.length ? `<span style="font-size:11.5px;color:var(--text-dim);">— ${bits.join(' · ')}</span>` : ''}
+      <span style="margin-left:auto;font-size:11px;color:var(--text-muted);cursor:pointer;" onclick="openRecloseTab()">Full reclose analysis →</span>
+    </div>
+  </div>`;
+}
+
+function openRecloseTab() {
+  const btn = document.querySelector('.tab-btn[data-tab="reclose"]');
+  if (btn) { btn.click(); btn.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // UI RENDERING
@@ -5095,6 +6111,7 @@ function renderBanner() {
             </div>
           </div>
           <p style="color:var(--text-dim);font-size:13px;">The digital word did not show a trip transition in this event record. The protection elements and SV logic tabs contain the underlying element states for this record.</p>
+          ${buildRecloseBannerBlock(PARSED, ANALYSIS)}
         </div>
         ${chartsHTML}
       </div>
@@ -5157,6 +6174,7 @@ function renderBanner() {
           <div class="timing-chip"><span class="label">${cause.isEventReport ? 'Event Report Equation:' : 'Trip Equation:'}</span> <span class="value">${(cause.isEventReport ? (PARSED.erEquationName || 'ER') : (cause.sourceEquationName || PARSED.tripEquationName || 'TR'))}${cause.immediateCause ? ' via ' + cause.immediateCause : ''}</span></div>
           ${renderChartedBitChipHTML(PARSED, ANALYSIS)}
         </div>
+        ${buildRecloseBannerBlock(PARSED, ANALYSIS)}
         ${buildConsistencyWarningBanner(PARSED, ANALYSIS)}
         ${buildInvestigationPanel(PARSED, ANALYSIS)}
       </div>
@@ -8313,6 +9331,7 @@ function renderTabs() {
     { id: 'currents', label: 'Currents', icon: '〰️' },
     { id: 'protection', label: 'Protection', icon: '🛡️' },
     { id: 'diagnostics', label: 'Diagnostics', icon: '🩺' },
+    { id: 'reclose', label: 'Reclosing', icon: '🔄' },
     { id: 'sv', label: 'SV Logic', icon: '🔗' },
     { id: 'freq', label: 'Frequency', icon: '📊' },
     { id: 'equations', label: 'Equations', icon: '📋' },
@@ -8474,6 +9493,11 @@ function renderContent() {
   html += `<div class="tab-panel" id="panel-diagnostics">
     ${buildCloseAttemptCard(P, A)}
     ${buildConsistencyChecksCard(P, A)}
+  </div>`;
+
+  // ── Reclosing ──
+  html += `<div class="tab-panel" id="panel-reclose">
+    ${buildRecloseTabHTML(P, A)}
   </div>`;
 
   // ── SV Logic ──
