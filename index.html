@@ -712,6 +712,9 @@ body.dragging-file #drop-overlay { display: flex; }
   padding: 6px 8px;
   margin-bottom: 6px;
 }
+/* Positioned against the VIEWPORT rather than the chip, so an ancestor's overflow:hidden
+   cannot clip it — see positionPickerDropdown(). top/left are set inline by that function. */
+.charted-bit-dropdown.floating { position: fixed; z-index: 1200; }
 .charted-bit-search:focus { outline: none; border-color: var(--accent); }
 .charted-bit-list { max-height: 220px; overflow-y: auto; }
 .charted-bit-option {
@@ -6046,11 +6049,6 @@ function renderChartedLogicSlot() {
 // pinned bit's timing against the resolved chain already on the chart.
 function svflagsPickerHTML(P, A) {
   if (SVFLAGS_HIDE_PICKER || !P) return '';
-  const chips = EXTRA_FLAG_BITS.map(l =>
-    `<span class="svflags-pin" title="Click to remove ${l} from the chart">${l}<button type="button" class="svflags-pin-x" onclick="event.stopPropagation(); removeFlagBit('${l.replace(/'/g, "\\'")}');">&times;</button></span>`
-  ).join('');
-  const clearBtn = EXTRA_FLAG_BITS.length > 1
-    ? `<button type="button" class="svflags-clear" onclick="event.stopPropagation(); clearFlagBits();">clear all</button>` : '';
   return `<div class="svflags-bit-bar" id="svflagsBitBar">
     <div class="timing-chip charted-bit-chip svflags-add-chip">
       <button type="button" class="charted-bit-btn" onclick="event.stopPropagation(); toggleFlagBitDropdown();">+ Add bit ▾</button>
@@ -6058,19 +6056,28 @@ function svflagsPickerHTML(P, A) {
         <input type="text" class="charted-bit-search" id="flagBitSearch" placeholder="Search bits…" oninput="renderFlagBitOptions(this.value)">
         <div class="charted-bit-list" id="flagBitList"></div>
       </div>
-    </div>${chips}${clearBtn}
+    </div><span class="svflags-pins" id="svflagsPins">${svflagsPinsHTML()}</span>
   </div>`;
+}
+// Just the pinned-bit chips. Kept separate from the bar so a pick can refresh them WITHOUT
+// replacing the "+ Add bit" chip — the open dropdown is a child of that chip, and rebuilding it
+// mid-selection closed the panel after every single pick.
+function svflagsPinsHTML() {
+  const chips = EXTRA_FLAG_BITS.map(l =>
+    `<span class="svflags-pin" title="Click to remove ${l} from the chart">${l}<button type="button" class="svflags-pin-x" onclick="event.stopPropagation(); removeFlagBit('${l.replace(/'/g, "\\'")}');">&times;</button></span>`
+  ).join('');
+  const clearBtn = EXTRA_FLAG_BITS.length > 1
+    ? `<button type="button" class="svflags-clear" onclick="event.stopPropagation(); clearFlagBits();">clear all</button>` : '';
+  return chips + clearBtn;
 }
 function toggleFlagBitDropdown() {
   const dd = document.getElementById('flagBitDropdown');
   if (!dd) return;
-  const opening = dd.style.display === 'none';
-  dd.style.display = opening ? 'block' : 'none';
-  if (opening) {
-    renderFlagBitOptions('');
-    const search = document.getElementById('flagBitSearch');
-    if (search) { search.value = ''; search.focus(); }
-  }
+  if (dd.style.display !== 'none') { closePickerDropdown(dd); return; }
+  renderFlagBitOptions('');
+  openPickerDropdown(dd);
+  const search = document.getElementById('flagBitSearch');
+  if (search) { search.value = ''; search.focus(); }
 }
 function renderFlagBitOptions(filterText) {
   const list = document.getElementById('flagBitList');
@@ -6085,7 +6092,11 @@ function renderFlagBitOptions(filterText) {
     const pinned = EXTRA_FLAG_BITS.includes(l);
     const auto = !pinned && already.has(l);
     const note = auto ? ` <span class="svflags-opt-note">already shown</span>` : '';
-    return `<div class="charted-bit-option ${pinned ? 'pinned' : ''} ${auto ? 'dimmed' : ''}" onclick="toggleFlagBit('${l.replace(/'/g, "\\'")}')">${pinned ? '&#10003; ' : ''}${l}${note}</div>`;
+    // stopPropagation matters here specifically: picking an option re-renders this list, which
+    // detaches the clicked node — by the time the event reaches the document-level
+    // outside-click handler, `e.target.closest('.svflags-add-chip')` is null on the orphan and
+    // the panel would close after every single pick, defeating the multi-select.
+    return `<div class="charted-bit-option ${pinned ? 'pinned' : ''} ${auto ? 'dimmed' : ''}" onclick="event.stopPropagation(); toggleFlagBit('${l.replace(/'/g, "\\'")}')">${pinned ? '&#10003; ' : ''}${l}${note}</div>`;
   }).join('') || `<div class="charted-bit-option-empty">No matching bits</div>`;
 }
 function toggleFlagBit(label) {
@@ -6114,12 +6125,14 @@ function refreshSVFlagsChart() {
   if (!slot || !html) { if (typeof renderBanner === 'function') renderBanner(); return; }
   const svgM = html.match(/<div class="chart-svg-slot"[^>]*>([\s\S]*?)<\/div>\s*(?=<div class="svflags-bit-bar"|<div class="sv-legend")/);
   if (svgM) slot.innerHTML = svgM[1];
-  const barM = html.match(/<div class="svflags-bit-bar" id="svflagsBitBar">[\s\S]*?<\/div>\s*(?=<div class="sv-legend")/);
-  const bar = document.getElementById('svflagsBitBar');
-  if (bar && barM) bar.outerHTML = barM[0];
+  // Chips only — never the surrounding bar, so the dropdown stays open across picks.
+  const pins = document.getElementById('svflagsPins');
+  if (pins) pins.innerHTML = svflagsPinsHTML();
   const legM = html.match(/<div class="sv-legend">[\s\S]*<\/div>/);
   const leg = slot.parentElement && slot.parentElement.querySelector('.sv-legend');
   if (leg && legM) leg.outerHTML = legM[0];
+  // Adding or removing a row changes the chart's height, which moves the anchor button under it.
+  positionPickerDropdown(OPEN_PICKER_DD);
 }
 
 function renderChartedBitChipHTML(P, A) {
@@ -6138,16 +6151,67 @@ function renderChartedBitChipHTML(P, A) {
     </div>
   </div>`;
 }
+// ── BIT-PICKER DROPDOWN PLACEMENT ────────────────────────────────────────────
+// Both pickers live inside `.trip-banner`, which sets `overflow: hidden` to clip its own
+// decorative corner glow. That clip also cut the dropdown off at the banner's bottom edge — it
+// read as the tab bar below covering it, but the tab bar was never involved. A fixed-position
+// element is laid out against the viewport, not the banner, so it escapes the clip entirely;
+// the trade is that its coordinates now have to be computed and kept in sync by hand.
+//
+// While positioning, also: flip above the anchor when there isn't room below, clamp horizontally
+// to the viewport, and cap the scrollable list to whatever vertical space actually remains — so
+// the search box and the list are always both reachable no matter where on the page the chart is.
+let OPEN_PICKER_DD = null;
+
+function positionPickerDropdown(dd) {
+  if (!dd || dd.style.display === 'none') return;
+  const anchor = dd.parentElement && dd.parentElement.querySelector('.charted-bit-btn');
+  if (!anchor) return;
+  const GAP = 6, EDGE = 8, LIST_MAX = 220, LIST_MIN = 96;
+  const list = dd.querySelector('.charted-bit-list');
+  const r = anchor.getBoundingClientRect();
+  dd.classList.add('floating');
+  // Measure from a known origin before deciding where it goes.
+  dd.style.left = '0px'; dd.style.top = '0px';
+  if (list) list.style.maxHeight = LIST_MAX + 'px';
+  const chromeH = dd.offsetHeight - (list ? list.offsetHeight : 0);   // search box, filter row, padding
+  const roomBelow = window.innerHeight - r.bottom - GAP - EDGE;
+  const roomAbove = r.top - GAP - EDGE;
+  const goUp = roomBelow < chromeH + LIST_MIN && roomAbove > roomBelow;
+  const room = Math.max(goUp ? roomAbove : roomBelow, chromeH + LIST_MIN);
+  if (list) list.style.maxHeight = Math.max(LIST_MIN, Math.min(LIST_MAX, room - chromeH)) + 'px';
+  const h = dd.offsetHeight, w = dd.offsetWidth;
+  dd.style.left = Math.round(Math.min(Math.max(EDGE, r.left), Math.max(EDGE, window.innerWidth - w - EDGE))) + 'px';
+  dd.style.top = Math.round(goUp ? Math.max(EDGE, r.top - GAP - h) : r.bottom + GAP) + 'px';
+}
+function openPickerDropdown(dd) {
+  if (!dd) return;
+  if (OPEN_PICKER_DD && OPEN_PICKER_DD !== dd) closePickerDropdown(OPEN_PICKER_DD);
+  dd.style.display = 'block';
+  OPEN_PICKER_DD = dd;
+  positionPickerDropdown(dd);
+}
+function closePickerDropdown(dd) {
+  if (!dd) return;
+  dd.style.display = 'none';
+  dd.classList.remove('floating');
+  dd.style.left = ''; dd.style.top = '';
+  const list = dd.querySelector('.charted-bit-list');
+  if (list) list.style.maxHeight = '';
+  if (OPEN_PICKER_DD === dd) OPEN_PICKER_DD = null;
+}
+// Capture-phase so scrolling any inner container (not just the page) re-anchors it too.
+window.addEventListener('scroll', () => positionPickerDropdown(OPEN_PICKER_DD), true);
+window.addEventListener('resize', () => positionPickerDropdown(OPEN_PICKER_DD));
+
 function toggleChartedBitDropdown() {
   const dd = document.getElementById('chartedBitDropdown');
   if (!dd) return;
-  const opening = dd.style.display === 'none';
-  dd.style.display = opening ? 'block' : 'none';
-  if (opening) {
-    renderChartedBitOptions('');
-    const search = document.getElementById('chartedBitSearch');
-    if (search) { search.value = ''; search.focus(); }
-  }
+  if (dd.style.display !== 'none') { closePickerDropdown(dd); return; }
+  renderChartedBitOptions('');
+  openPickerDropdown(dd);
+  const search = document.getElementById('chartedBitSearch');
+  if (search) { search.value = ''; search.focus(); }
 }
 function renderChartedBitOptions(filterText) {
   const list = document.getElementById('chartedBitList');
@@ -6162,8 +6226,7 @@ function renderChartedBitOptions(filterText) {
 }
 function selectChartedBit(label) {
   CHARTED_BIT = label;
-  const dd = document.getElementById('chartedBitDropdown');
-  if (dd) dd.style.display = 'none';
+  closePickerDropdown(document.getElementById('chartedBitDropdown'));
   const btn = document.querySelector('#chartedBitChip .charted-bit-btn');
   if (btn) btn.textContent = label + ' ▾';
   renderChartedLogicSlot();
@@ -6172,14 +6235,16 @@ function setChartedFilterRelevant(checked) {
   CHARTED_FILTER_RELEVANT = !!checked;
   renderChartedLogicSlot();
 }
-// Close either bit-picker dropdown when clicking anywhere outside it.
+// Close either bit-picker dropdown when clicking anywhere outside it. Both are now
+// fixed-positioned and so are no longer DOM-contained by their chip on screen, but they are
+// still descendants of it in the tree, so containment tests remain the right check.
 document.addEventListener('click', (e) => {
   const fdd = document.getElementById('flagBitDropdown');
-  if (fdd && fdd.style.display !== 'none' && !(e.target.closest && e.target.closest('.svflags-add-chip'))) fdd.style.display = 'none';
+  if (fdd && fdd.style.display !== 'none' && !(e.target.closest && e.target.closest('.svflags-add-chip'))) closePickerDropdown(fdd);
   const dd = document.getElementById('chartedBitDropdown');
   if (!dd || dd.style.display === 'none') return;
   const chip = document.getElementById('chartedBitChip');
-  if (chip && !chip.contains(e.target)) dd.style.display = 'none';
+  if (chip && !chip.contains(e.target)) closePickerDropdown(dd);
 });
 
 function renderBanner() {
