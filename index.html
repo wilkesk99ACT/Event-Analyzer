@@ -1824,7 +1824,16 @@ function parseCEV(text, fileName) {
   if (evtHeaderIdx >= 0 && evtHeaderIdx + 1 < lines.length) {
     const hdr = lines[evtHeaderIdx].replace(/"/g, '').split(',').map(h => h.trim());
     const vals = lines[evtHeaderIdx + 1].replace(/"/g, '').split(',').map(v => v.trim());
-    const get = (key) => { const idx = hdr.indexOf(key); return idx >= 0 ? vals[idx] : null; };
+    // SEL-751 event-summary headers put a unit suffix on every measurement column — "IA(A)",
+    // "IG(A)", "VA(V)" — while other formats use the bare name. Matching only the bare name
+    // silently returned null for all of them, which left calibrateAnalogBasis() with no
+    // fault-current reference at all and no way to notice the file was mis-scaled.
+    const findIdx = (key) => {
+      const direct = hdr.indexOf(key);
+      if (direct >= 0) return direct;
+      return hdr.findIndex(h => h.replace(/\s*\([^)]*\)\s*$/, '').trim() === key);
+    };
+    const get = (key) => { const idx = findIdx(key); return idx >= 0 ? vals[idx] : null; };
 
     R.eventInfo = {
       refNum: get('REF_NUM') || get('REC_NUM') || '',
@@ -2247,13 +2256,13 @@ function analogDataIsPrimary(P) {
 // Snap an observed ratio to the nearest candidate in log space, but refuse to snap at all if
 // nothing is within ~25% — a wild ratio means the reference isn't what we assumed it was, and
 // falling back to "uncalibrated" is safer than confidently applying a fabricated scale.
-function snapToCandidate(ratio, candidates) {
+function snapToCandidate(ratio, candidates, tol = 1.25) {
   let best = null, bestErr = Infinity;
   for (const c of candidates) {
     const err = Math.abs(Math.log(ratio / c.v));
     if (err < bestErr) { bestErr = err; best = c; }
   }
-  return (best && bestErr <= Math.log(1.25)) ? best : null;
+  return (best && bestErr <= Math.log(tol)) ? best : null;
 }
 
 function medianOf(a) {
@@ -2278,12 +2287,31 @@ function calibrateAnalogBasis(R) {
   const isPrimary = analogDataIsPrimary(R);
   const voltIsKV = detectChannelUnit(R, ['VA', 'VAY', 'VB', 'VBY'], '').toUpperCase() === 'KV';
 
+  // The relay's event-summary fault currents are all sampled at ONE instant — the fault — not
+  // at each channel's individual maximum. Comparing each channel against its own peak over the
+  // whole record therefore compares two different moments: on SEL-751 record 10824 that made
+  // IA read 244 A (its own late peak) against a summary value of 126.6 A, a spurious 0.52
+  // ratio that dragged the median away from the truth. Locating the common instant first —
+  // the sample where phase current is greatest — makes all four channels agree to 0.3%.
+  const magSeries = {};
+  const seriesFor = (key) => {
+    if (!(key in magSeries)) {
+      const arr = data.map(r => r[key] || 0);
+      magSeries[key] = arr.some(v => Math.abs(v) > 1e-9) ? computeRmsMagnitude(arr, N) : null;
+    }
+    return magSeries[key];
+  };
+  let faultIdx = 0, faultPeak = -1;
+  for (let i = 0; i < data.length; i++) {
+    let m = 0;
+    for (const ch of ['IA', 'IB', 'IC']) { const sr = seriesFor(ch); if (sr && sr[i] > m) m = sr[i]; }
+    if (m > faultPeak) { faultPeak = m; faultIdx = i; }
+  }
   const peakMag = (key) => {
-    const s = data.map(r => r[key] || 0);
-    if (!s.some(v => Math.abs(v) > 1e-9)) return null;
-    const m = computeRmsMagnitude(s, N);
-    const p = Math.max(...m);
-    return p > 0 ? p : null;
+    const sr = seriesFor(key);
+    if (!sr) return null;
+    const v = sr[faultIdx];
+    return v > 0 ? v : null;
   };
 
   // ── Reference 1: the relay's own fault currents ──────────────────────────────
@@ -2305,11 +2333,18 @@ function calibrateAnalogBasis(R) {
   let vRatio = null;
   if (R.settings?.VNOM > 0) {
     const vRefChannelUnits = isPrimary ? (R.settings.VNOM * PTR) / (voltIsKV ? 1000 : 1) : R.settings.VNOM;
+    // Median over the PRE-FAULT window only. Taking it over the whole record silently assumes
+    // voltage sits near nominal for most of the file, which is false for any record that keeps
+    // capturing after the breaker opens. On SEL-751 record 10824 the bus is dead for more than
+    // half the capture, so the whole-record median was exactly 0 — the reference evaluated to
+    // zero, vRatio came out null, and the file fell through to "uncalibrated" with no warning.
+    const trigIdx = R.triggerSampleIndex;
+    const pfEnd = (trigIdx != null && trigIdx > 8) ? trigIdx : data.length;
     const meds = [];
     for (const ch of ['VAY', 'VBY', 'VCY', 'VA', 'VB', 'VC']) {
       const s = data.map(r => r[ch] || 0);
       if (!s.some(v => Math.abs(v) > 1e-9)) continue;
-      const m = medianOf(computeRmsMagnitude(s, N));
+      const m = medianOf(computeRmsMagnitude(s, N).slice(0, pfEnd));
       if (m > 0) meds.push(m);
     }
     const obsV = medianOf(meds);
@@ -2321,8 +2356,28 @@ function calibrateAnalogBasis(R) {
     { v: Math.SQRT2, scale: Math.SQRT2, name: 'RMS-scaled filtered data (x sqrt(2))' },
   ];
 
+  // The VOLTAGE reference carries a second ambiguity the current reference does not: VNOM may
+  // be the nominal phase-to-PHASE secondary voltage while the channels are phase-to-neutral, or
+  // vice versa, which puts a stray sqrt(3) in the ratio. On SEL-751 record 10824 VNOM = 120 is
+  // phase-to-phase (measured 487 V primary L-L / PTR 4 = 122 V secondary) while VA/VB/VC are
+  // phase-to-neutral at 281 V primary, giving an observed ratio of 1.707.
+  //
+  // That number is the whole reason this needs separate handling: sqrt(2) = 1.414 and
+  // sqrt(3) = 1.732 are only 22% apart, so the 25% snap window used for currents cannot tell
+  // them apart — 1.707 snapped to sqrt(2) and applied a 41% magnitude error to any file where
+  // the voltage reference was the only one available. Enumerating the sqrt(3) variants
+  // explicitly and tightening the window to 10% separates them cleanly (1.414 x 1.10 = 1.56
+  // vs 1.732 / 1.10 = 1.57, no overlap) and makes the connection convention an explicit,
+  // reported conclusion rather than a silent assumption.
+  const V_CANDIDATES = [
+    { v: 1, scale: 1, name: 'instantaneous samples, VNOM phase-to-neutral' },
+    { v: Math.SQRT2, scale: Math.SQRT2, name: 'RMS-scaled filtered data, VNOM phase-to-neutral' },
+    { v: Math.sqrt(3), scale: 1, name: 'instantaneous samples, VNOM phase-to-phase' },
+    { v: Math.SQRT2 * Math.sqrt(3), scale: Math.SQRT2, name: 'RMS-scaled filtered data, VNOM phase-to-phase' },
+  ];
+
   const iHit = iRatios.length ? snapToCandidate(medianOf(iRatios), CANDIDATES) : null;
-  const vHit = vRatio ? snapToCandidate(vRatio, CANDIDATES) : null;
+  const vHit = vRatio ? snapToCandidate(vRatio, V_CANDIDATES, 1.10) : null;
 
   const chosen = iHit || vHit;
   if (!chosen) return;
@@ -2355,9 +2410,15 @@ function calcU1Time(multiple, td) {
 // `scale` is the per-file magnitude calibration from calibrateAnalogBasis() (P.magScale):
 // 1.0 for true instantaneous samples, sqrt(2) for RMS-scaled filtered data. Defaulting it to
 // 1 keeps every uncalibrated/other-format caller behaving exactly as before.
-function computeRMS(arr, key, scale = 1) {
+function computeRMS(arr, key, scale = 1, samplesPerCycle = null) {
   if (!arr.length) return 0;
-  return scale * Math.sqrt(arr.reduce((s, r) => s + r[key] * r[key], 0) / arr.length);
+  // On filtered quarter-cycle data a mean-of-squares returns |X|/sqrt(2) for the same reason
+  // the point-by-point sliding RMS did (see isFilteredQuarterCycle), so the sqrt(2) has to go
+  // back in. There is no exact pairwise substitute here because this is a window AVERAGE by
+  // design — but over a window where the magnitude is roughly steady, which is exactly what the
+  // pre-fault and fault summary windows are, the correction is exact.
+  const filt = isFilteredQuarterCycle(samplesPerCycle) ? Math.SQRT2 : 1;
+  return scale * filt * Math.sqrt(arr.reduce((s, r) => s + r[key] * r[key], 0) / arr.length);
 }
 
 function analyzeCEV(P, prevEvent) {
@@ -2417,8 +2478,8 @@ function analyzeCEV(P, prevEvent) {
 
     A.voltages[term] = {};
     for (const [ph, key] of Object.entries(phases)) {
-      const pfRaw = computeRMS(preFault, key, MAGS);
-      const fRaw = computeRMS(faultData, key, MAGS);
+      const pfRaw = computeRMS(preFault, key, MAGS, P.eventInfo.samPerCycA);
+      const fRaw = computeRMS(faultData, key, MAGS, P.eventInfo.samPerCycA);
       const pf = toKvSec(pfRaw, ptr), f = toKvSec(fRaw, ptr);
       A.voltages[term][ph] = {
         preFault: pf,
@@ -2485,8 +2546,8 @@ function analyzeCEV(P, prevEvent) {
   // Current analysis
   A.currents = {};
   for (const ch of ['IA', 'IB', 'IC', 'IG', 'IN']) {
-    const pfRMS = computeRMS(preFault, ch, MAGS);
-    const fRMS = computeRMS(faultData, ch, MAGS);
+    const pfRMS = computeRMS(preFault, ch, MAGS, P.eventInfo.samPerCycA);
+    const fRMS = computeRMS(faultData, ch, MAGS, P.eventInfo.samPerCycA);
     // Same primary/secondary correction as the protection table: when the channel is already
     // primary-referred, the raw figure IS the primary amps and the secondary figure is the one
     // that has to be derived (previously both were computed as if the channel were secondary,
@@ -6195,9 +6256,53 @@ function renderBanner() {
 // this is a standard RMS-envelope approximation of what SynchroWAVe shows, not a
 // byte-for-bit reproduction of SEL's internal DSP filter, but it produces the same
 // "flat pre-fault, rises during the fault" magnitude envelope shape.
+// ── SEL *FILTERED* (4 samples/cycle) EVENT REPORTS ────────────────────────────
+// A CEV whose header reports SAM/CYC_A = 4 is a FILTERED report. Its analog columns are not
+// instantaneous waveform samples: they are the relay's own digital-filter output, emitted once
+// per quarter cycle and already scaled so each value is an RMS-referred projection of the
+// phasor. Two consecutive samples are therefore 90 degrees apart and ARE the real and
+// imaginary parts of the phasor:
+//
+//     X[n] = x[n] + j*x[n-1]        |X[n]| = hypot(x[n], x[n-1])     (already RMS)
+//
+// Running a conventional sliding RMS over those values instead returns |X|/sqrt(2) in steady
+// state, because each quadrature pair contributes X^2 spread across two samples. Worse, during
+// a fast transient the 4-sample window spans a full cycle of a magnitude that is still moving,
+// so it also smears and delays the peak — the error is not even a constant factor and cannot
+// be corrected by a scalar.
+//
+// Verified against SEL-751 record 10824 (BG fault, 8/14/2026). At the trigger instant the
+// quadrature form returns IA 126.2 / IB 821.2 / IC 319.8 A and VA 73.7 / VB 94.0 / VC 248.5 V,
+// matching both the relay's own event-summary row (126.6 / 821.6 / 319.8 / 73.685 / 94.272 /
+// 248.040) and SynchroWAVe's .Mag cursor readout. The sliding-RMS form returned
+// 72.5 / 532.9 / 231.0 / 53.1 / 66.3 / 174.4 for the same instant — low by sqrt(2) on the
+// slow-moving voltages and by 1.54x on the fast-moving fault current.
+//
+// A raw/unfiltered report (16 or 32 samples/cycle) carries true instantaneous samples and must
+// keep using the sliding-window form, so this branches on the file's own declared rate rather
+// than being applied everywhere.
+function isFilteredQuarterCycle(samplesPerCycle) { return samplesPerCycle === 4; }
+
+// One sentence under each magnitude chart saying which of the two methods produced it, so the
+// number on screen can always be traced back to how it was derived.
+function magMethodNote(P) {
+  const spc = P?.eventInfo?.samPerCycA || 32;
+  return isFilteredQuarterCycle(spc)
+    ? `Filtered report (${spc} samples/cycle): magnitude is the quarter-cycle phasor |x[n] + j&middot;x[n&minus;1]|, already RMS — the same quantity SynchroWAVe plots as .Mag and the relay quotes in its event summary.`
+    : `Raw report (${spc} samples/cycle): magnitude is a 1-cycle sliding RMS of the recorded instantaneous samples — an approximation of SynchroWAVe's Mag trace, not a re-implementation of SEL's exact DSP filter.`;
+}
+
 function computeRmsMagnitude(samples, windowSize, scale = 1) {
   const n = samples.length;
   const out = new Array(n).fill(0);
+  if (isFilteredQuarterCycle(windowSize)) {
+    for (let i = 0; i < n; i++) {
+      const cur = samples[i] || 0;
+      const prev = i > 0 ? (samples[i - 1] || 0) : 0;
+      out[i] = scale * Math.hypot(cur, prev);
+    }
+    return out;
+  }
   const sq = [];
   let sumSq = 0;
   for (let i = 0; i < n; i++) {
@@ -6233,6 +6338,20 @@ function computeRmsMagnitude(samples, windowSize, scale = 1) {
 function computeFundamentalPhasors(samples, N, scale = 1) {
   const n = samples.length;
   const re = new Array(n).fill(0), im = new Array(n).fill(0);
+  // Filtered quarter-cycle data (see isFilteredQuarterCycle): the phasor is available exactly,
+  // with no DFT window at all. The sign convention below matches the DFT branch that follows —
+  // re = |X|*cos(theta_n), im = |X|*sin(theta_n), |X| in RMS — so every derived quantity
+  // (positive/negative/zero sequence, phase-to-phase) inherits the fix unchanged.
+  // Convention checked on the pre-fault window of SEL-751 record 10824: a balanced ABC-rotation
+  // record yields V2/V1 = 0.2% and 3V0 ~ 1 V, and 3I0 derived from IA/IB/IC lands on 950.0 A
+  // against the relay's separately measured IG channel of 950.0 A.
+  if (isFilteredQuarterCycle(N)) {
+    for (let i = 0; i < n; i++) {
+      re[i] = scale * (samples[i] || 0);
+      im[i] = scale * (i > 0 ? (samples[i - 1] || 0) : 0);
+    }
+    return { re, im };
+  }
   const cosT = new Array(N), sinT = new Array(N);
   for (let k = 0; k < N; k++) {
     cosT[k] = Math.cos(2 * Math.PI * k / N);
@@ -7924,7 +8043,7 @@ function buildCurrentMagChart(P, A, compact, heightOverride) {
 
   const svg = renderMagnitudeChartSVG(traces, { msPerSample, yUnit: unit, forceZeroBaseline: true, triggerIdx: triggerIdxFull, tripIdx: tripIdxFull });
   return `<div class="card blue-accent"><div class="card-header">〰️ Current Magnitude (RMS envelope)</div>${svg}
-    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Magnitude is a 1-cycle sliding RMS of the recorded instantaneous samples — an approximation of SynchroWAVe's Mag trace, not a re-implementation of SEL's exact DSP filter.</div>
+    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">${magMethodNote(P)}</div>
   </div>`;
 }
 
@@ -7968,7 +8087,7 @@ function buildVoltageMagChart(P, A, compact, heightOverride) {
 
   const svg = renderMagnitudeChartSVG(traces, { msPerSample, yUnit: unit, forceZeroBaseline: false, triggerIdx: triggerIdxFull, tripIdx: tripIdxFull });
   return `<div class="card blue-accent"><div class="card-header">🔌 Voltage Magnitude (RMS envelope)</div>${svg}
-    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Magnitude is a 1-cycle sliding RMS of the recorded instantaneous samples — an approximation of SynchroWAVe's Mag trace, not a re-implementation of SEL's exact DSP filter.</div>
+    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">${magMethodNote(P)}</div>
   </div>`;
 }
 
