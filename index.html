@@ -458,6 +458,11 @@ body.dragging-file #drop-overlay { display: flex; }
   color: var(--text-muted);
   font-weight: 600;
 }
+.logic-timer-label.logic-timer-running {
+  color: var(--green);
+  border-color: var(--green);
+  font-weight: 700;
+}
 .logic-timer-box {
   border-style: dashed;
 }
@@ -1613,6 +1618,67 @@ function svDelayMs(P, value, freq) {
   return { ms: value / freq * 1000, unit: 'cycles', assumed: unit == null };
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// TIMER PROGRESS AT A GIVEN INSTANT
+// ══════════════════════════════════════════════════════════════════════
+// How far through its delay a base -> timed-output pair is, as of `viewDigIdx`. Measured from
+// the record's own transitions (never from a delay setting), so it works identically for SVs and
+// for hardware protection elements — including elements whose delay setting isn't parsed, or
+// whose setting units are ambiguous across SEL families.
+//
+// Returns { frac, kind, elapsedSamples, totalSamples } while the timer is genuinely running, or
+// null when it isn't — stable, never completes in this record, or resets partway (which is
+// indeterminate, and guessing at it would invent a countdown that never happened).
+// Shared by the local logic graph and the main-page trip tree so the two can never disagree.
+function measuredTimerPhase(P, base, target, viewDigIdx) {
+  if (!P || viewDigIdx == null || !base || !target) return null;
+  const trans = P.digitalTransitions || [];
+  const lastTo = (label, atIdx, want) => {
+    let found = null;
+    for (const t of trans) {
+      if (t.digitalSampleIdx > atIdx) break;
+      const c = t.changes.find(ch => ch.label === label);
+      if (c && c.asserted === want) found = t.digitalSampleIdx;
+    }
+    return found;
+  };
+  const nextTo = (label, afterIdx, want) => {
+    for (const t of trans) {
+      if (t.digitalSampleIdx <= afterIdx) continue;
+      const c = t.changes.find(ch => ch.label === label);
+      if (c && c.asserted === want) return t.digitalSampleIdx;
+    }
+    return null;
+  };
+  const baseSt = currentBitState(base), targetSt = currentBitState(target);
+  if (!baseSt || !targetSt) return null;
+  const run = (want) => {
+    // want=true  -> pickup  (base asserted, timed output hasn't caught up)
+    // want=false -> dropout (base released, timed output hasn't dropped out)
+    const tStart = lastTo(base, viewDigIdx, want);
+    if (tStart == null) return null;            // already in this state at record start — no origin to measure from
+    const tBaseReverts = nextTo(base, tStart, !want);
+    const tEnd = nextTo(target, tStart, want);
+    if (tEnd == null) return null;              // never actually completes in this record
+    if (tBaseReverts != null && tBaseReverts < tEnd) return null; // reset before completing
+    const total = Math.max(1, tEnd - tStart);
+    return { frac: Math.max(0, Math.min(1, (viewDigIdx - tStart) / total)),
+             kind: want ? 'pickup' : 'dropout',
+             elapsedSamples: Math.max(0, Math.min(total, viewDigIdx - tStart)), totalSamples: total };
+  };
+  if (baseSt.state && !targetSt.state) return run(true);
+  if (!baseSt.state && targetSt.state) return run(false);
+  return null; // stable — both already agree
+}
+
+// The instant the logic diagrams are currently being read at, as a DIGITAL sample index: the
+// scrubber/cursor position when one is set, otherwise the trip moment.
+function logicViewDigitalIdx() {
+  return (typeof LLG_VIEW_SAMPLE_IDX !== 'undefined' && LLG_VIEW_SAMPLE_IDX != null)
+    ? LLG_VIEW_SAMPLE_IDX
+    : (ANALYSIS?.tripCause?.tripTransition?.digitalSampleIdx ?? null);
+}
+
 // Best-effort lookup of a definite-time delay setting for a given element base (e.g. "50A1"),
 // trying the handful of naming conventions SEL uses across relay families. Returns null (and
 // the explanation falls back to qualitative wording) if nothing matches — this is inherently
@@ -2287,6 +2353,24 @@ function parseCEV(text, fileName) {
     R.overcurrentElements[`${fam}TC`] = m(new RegExp(`${fam}TC\\s*:=\\s*(.+)`));
   });
 
+  // SEL-751 names its inverse-time elements by LEVEL — 51P1P / 51P1C / 51P1TD — where the
+  // SEL-651R this parser was first built against uses the "J curve" form, 51PJP / 51PJC /
+  // 51PJTD. Same element, different convention, and looking only for the J form meant every
+  // SEL-751 file produced an EMPTY inverse-time table: on 35KV CLEARSKY record 10722, a
+  // phase-to-ground fault, both 51P1 (7.50 A sec) and 51G1 (1.00 A sec) were configured and
+  // neither appeared anywhere in the Protection tab. Filled in under the same J-form keys the
+  // row builder already reads, and only where the J form didn't already match, so 651R files
+  // are untouched.
+  ['51P1', '51P2', '51G1', '51G2', '51N1', '51N2', '51Q'].forEach(fam => {
+    if (R.overcurrentElements[`${fam}JP`] != null) return;
+    const jp = mf(new RegExp(`(?:^|[^A-Z0-9])${fam}P\\s*:=\\s*([\\d.]+)`, 'm'));
+    if (jp == null) return;
+    R.overcurrentElements[`${fam}JP`] = jp;
+    R.overcurrentElements[`${fam}JC`] = m(new RegExp(`(?:^|[^A-Z0-9])${fam}C\\s*:=\\s*(\\S+)`, 'm'));
+    R.overcurrentElements[`${fam}JTD`] = mf(new RegExp(`(?:^|[^A-Z0-9])${fam}TD\\s*:=\\s*([\\d.]+)`, 'm'));
+    if (!R.overcurrentElements[`${fam}TC`]) R.overcurrentElements[`${fam}TC`] = m(new RegExp(`(?:^|[^A-Z0-9])${fam}TC\\s*:=\\s*(.+)`, 'm'));
+  });
+
   // Voltage element pickups — Y and Z terminal, phase levels 1-4, phase-to-phase, and the
   // sequence family (zero/neg/pos-seq overvoltage: 59#N1/N2, 59#Q1, 59#V1).
   const vPairs = [];
@@ -2294,8 +2378,17 @@ function parseCEV(text, fileName) {
     for (let lvl = 1; lvl <= 4; lvl++) vPairs.push(`27${t}P${lvl}P`, `59${t}P${lvl}P`);
     vPairs.push(`27${t}PP1P`, `59${t}PP1P`, `59${t}N1P`, `59${t}N2P`, `59${t}Q1P`, `59${t}V1P`);
   });
+  // SEL-751 voltage elements carry NO Y/Z terminal letter (27P1P, 59P1P, 27PP1P) and name the
+  // residual/zero-sequence overvoltage element 59G — where the 651R uses 59YN. Neither form was
+  // recognised, so the whole voltage table came out empty on every SEL-751 file. That is the
+  // direct cause of "59G1 asserted but nothing listed for it" on record 10722.
+  //
+  // The left-boundary guard is what keeps the two conventions apart: without it the bare key
+  // "59P1P" would happily match inside a 651R's "59YP1P" and cross-wire the two namings.
+  for (let lvl = 1; lvl <= 4; lvl++) vPairs.push(`27P${lvl}P`, `59P${lvl}P`);
+  vPairs.push('27PP1P', '27PP2P', '59PP1P', '59PP2P', '59G1P', '59G2P', '59Q1P', '59Q2P', '59V1P');
   vPairs.forEach(k => {
-    const re = new RegExp(k.replace(/([()])/g,'\\$1') + '\\s*:=\\s*([\\d.]+|OFF)');
+    const re = new RegExp('(?:^|[^A-Z0-9])' + k.replace(/([()])/g,'\\$1') + '\\s*:=\\s*([\\d.]+|OFF)', 'm');
     const vm = S.match(re);
     R.voltageElements[k] = vm && vm[1] !== 'OFF' ? parseFloat(vm[1]) : null;
   });
@@ -2648,6 +2741,16 @@ function analyzeCEV(P, prevEvent) {
       bc: computePhaseDiffMagnitude(sB, sC, cyc, MAGS),
       ca: computePhaseDiffMagnitude(sC, sA, cyc, MAGS),
     };
+    // The 651R exposes a separate relay bit per phase (27YA1, 27YB1, 27YC1), so its rows compare
+    // one phase each. The 751 exposes ONE bit per level (27P1) that answers for all three, so its
+    // rows need the worst phase: the lowest for an undervoltage element, the highest for an
+    // overvoltage one. Same for the phase-to-phase trio.
+    const v = seriesV[term];
+    const worst = (keys, pick) => v[keys[0]].map((_, i) => pick(v[keys[0]][i] || 0, v[keys[1]][i] || 0, v[keys[2]][i] || 0));
+    v.minPhase = worst(['A', 'B', 'C'], Math.min);
+    v.maxPhase = worst(['A', 'B', 'C'], Math.max);
+    v.minPP = worst(['ab', 'bc', 'ca'], Math.min);
+    v.maxPP = worst(['ab', 'bc', 'ca'], Math.max);
   });
 
   // Everything evalOcRowAtIdx/evalVoltRowAtIdx (defined at top level, outside analyzeCEV) need
@@ -2709,9 +2812,9 @@ function analyzeCEV(P, prevEvent) {
   });
 
   // Inverse-time families — 51P, 51G1, 51G2, 51Q, 51N1, 51N2.
-  const timeLabel = { '51P': 'Phase', '51G1': 'Ground Lvl1', '51G2': 'Ground Lvl2', '51Q': 'Neg-Seq', '51N1': 'Neutral Lvl1', '51N2': 'Neutral Lvl2' };
-  const timeSeriesKey = { '51P': 'maxPhaseI', '51G1': 'groundI', '51G2': 'groundI', '51Q': 'negSeqI', '51N1': 'neutralI', '51N2': 'neutralI' };
-  ['51P', '51G1', '51G2', '51Q', '51N1', '51N2'].forEach(fam => {
+  const timeLabel = { '51P': 'Phase', '51P1': 'Phase Lvl1', '51P2': 'Phase Lvl2', '51G1': 'Ground Lvl1', '51G2': 'Ground Lvl2', '51Q': 'Neg-Seq', '51N1': 'Neutral Lvl1', '51N2': 'Neutral Lvl2' };
+  const timeSeriesKey = { '51P': 'maxPhaseI', '51P1': 'maxPhaseI', '51P2': 'maxPhaseI', '51G1': 'groundI', '51G2': 'groundI', '51Q': 'negSeqI', '51N1': 'neutralI', '51N2': 'neutralI' };
+  ['51P', '51P1', '51P2', '51G1', '51G2', '51Q', '51N1', '51N2'].forEach(fam => {
     const p = OC[`${fam}JP`];
     if (p) addOCRow(fam, `${timeLabel[fam]} Time OC (${OC[`${fam}JC`] || 'U1'})`, p, OC[`${fam}JTD`] || 1, 'td', timeSeriesKey[fam], OC[`${fam}JC`] || 'U1', OC[`${fam}JTD`] || 1, OC[`${fam}TC`], '51');
   });
@@ -2754,6 +2857,33 @@ function analyzeCEV(P, prevEvent) {
       if (!pickup) return;
       A.voltageRows.push({ element: elName, type: 'OV', typeLabel, term: T, pickup, kind });
     });
+  });
+
+  // SEL-751 rows. Named exactly as the relay's own bits (27P1, 59G1, 59Q1 …) so a row lines up
+  // with what the digital word and the flags chart call the same element. Each is skipped unless
+  // this file actually configures it, so 651R files add nothing here.
+  [
+    ['27P1P', 'UV', 'minPhase', '27P1', 'Undervoltage Lvl1 (lowest phase)'],
+    ['27P2P', 'UV', 'minPhase', '27P2', 'Undervoltage Lvl2 (lowest phase)'],
+    ['27P3P', 'UV', 'minPhase', '27P3', 'Undervoltage Lvl3 (lowest phase)'],
+    ['27P4P', 'UV', 'minPhase', '27P4', 'Undervoltage Lvl4 (lowest phase)'],
+    ['59P1P', 'OV', 'maxPhase', '59P1', 'Overvoltage Lvl1 (highest phase)'],
+    ['59P2P', 'OV', 'maxPhase', '59P2', 'Overvoltage Lvl2 (highest phase)'],
+    ['59P3P', 'OV', 'maxPhase', '59P3', 'Overvoltage Lvl3 (highest phase)'],
+    ['59P4P', 'OV', 'maxPhase', '59P4', 'Overvoltage Lvl4 (highest phase)'],
+    ['27PP1P', 'UV', 'minPP', '27PP1', 'Undervoltage Lvl1 (lowest phase-to-phase)'],
+    ['27PP2P', 'UV', 'minPP', '27PP2', 'Undervoltage Lvl2 (lowest phase-to-phase)'],
+    ['59PP1P', 'OV', 'maxPP', '59PP1', 'Overvoltage Lvl1 (highest phase-to-phase)'],
+    ['59PP2P', 'OV', 'maxPP', '59PP2', 'Overvoltage Lvl2 (highest phase-to-phase)'],
+    ['59G1P', 'OV', 'zero', '59G1', 'Residual/Zero-Seq OV (3V0)'],
+    ['59G2P', 'OV', 'zero', '59G2', 'Residual/Zero-Seq OV (3V0) Lvl2'],
+    ['59Q1P', 'OV', 'neg', '59Q1', 'Neg-Seq OV (V2)'],
+    ['59Q2P', 'OV', 'neg', '59Q2', 'Neg-Seq OV (V2) Lvl2'],
+    ['59V1P', 'OV', 'pos', '59V1', 'Pos-Seq OV (V1)'],
+  ].forEach(([settingKey, type, kind, elName, typeLabel]) => {
+    const pickup = VE[settingKey];
+    if (!pickup) return;
+    A.voltageRows.push({ element: elName, type, typeLabel, term: 'Y', pickup, kind });
   });
 
   A.voltageStatus = A.voltageRows.map(row => evalVoltRowAtIdx(A, row, defaultProtIdx));
@@ -5922,6 +6052,37 @@ function buildLogicTreeSection(P, A) {
       const edgeTitle = measured
         ? `${childLabel} → ${node.label} — timer ran ${delayMs} ms in this record${settingNote}`
         : `${childLabel} → ${node.label} — ${delayMs} ms pickup timer${conv && conv.assumed ? ' (setting units not confirmed by this record; read as cycles)' : ''}${settingNote}`;
+
+      // ── Timer progress ──────────────────────────────────────────────────────
+      // While the cursor sits inside the delay, fill the connector from the input end at the
+      // same real pace the timer ran — the identical treatment the local logic graph gives its
+      // timer edges, via the same shared measuredTimerPhase(), so scrubbing or playing back the
+      // event shows the timer counting rather than the output snapping from false to true. When
+      // the cursor is anywhere else (before it starts, after it completes, or in a record where
+      // it never completes) this falls through to the plain dashed connector exactly as before.
+      const phase = measuredTimerPhase(P, childLabel, node.label, logicViewDigitalIdx());
+      const msPerDigSample = 1000 / ((freqForDelay) * (P?.eventInfo?.samPerCycD || 4));
+      if (phase) {
+        const elapsedMs = Math.round(phase.elapsedSamples * msPerDigSample);
+        const totalMs = Math.round(phase.totalSamples * msPerDigSample);
+        const pct = Math.round(phase.frac * 100);
+        const running = phase.kind === 'pickup';
+        const bgCol = running ? falseColor : trueColor;
+        const fillCol = running ? trueColor : falseColor;
+        const px = cx + (x - cx) * phase.frac, py = cy + (ny - cy) * phase.frac;
+        const progTitle = `${childLabel} → ${node.label} — ${phase.kind} timer ${pct}% complete (${elapsedMs} of ${totalMs} ms)${settingNote}`;
+        linesHTML += titledEdge(cx, cy, x, ny, bgCol, '2,3', progTitle);
+        if (phase.frac > 0.01) linesHTML += titledEdge(cx, cy, px, py, fillCol, '', progTitle, 2.5);
+        // The gap between two adjacent boxes is narrow, so the badge shows the percentage only —
+        // the shortest string that still reads as "in progress". Elapsed and total ms are on hover,
+        // and the fill on the connector itself already carries the fraction visually.
+        const midXp = (cx + x) / 2 - 16;
+        boxesHTML += `<div class="logic-timer-label logic-timer-running" style="left:${midXp}px;top:${ny - 16}px;" title="${progTitle}">⏱ ${pct}%</div>`;
+        boxesHTML += `<div class="logic-box logic-sv-box logic-timer-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${prefix}${tt(node.label, P)}</div>`;
+        renderNode(node.child, node.label);
+        return;
+      }
+
       linesHTML += titledEdge(cx, cy, x, ny, node.value ? trueColor : falseColor, '2,3', edgeTitle);
       const midX = (cx + x) / 2 - 16;
       const badgeTitle = measured
@@ -7689,9 +7850,21 @@ function syncMainScrubber(idxFull) {
 // digitalSampleIdx and the analogSampleIdx it occurred at, so converting an analog index to the
 // digital state in effect at that moment is just "the last transition at or before this analog
 // index".
+// Analog and digital samples are both REGULAR streams (SAM/CYC_A and SAM/CYC_D), so converting
+// between the two index spaces is the plain rate ratio.
+//
+// These used to SNAP to the nearest digital transition instead. That is harmless for reading a
+// bit's state — nothing changes between transitions, by definition — but it is wrong for
+// anything continuous, and timer progress is exactly that: while a delay is running nothing else
+// changes, so there are no transitions to snap to, the mapped index froze, and the progress
+// fraction stalled mid-timer instead of advancing (observed on record 10895: the 27PP1 -> 27PP1T
+// fill sat at 28% across three consecutive cursor positions). The ratio is exact and continuous.
+// The old transition-walk is kept as a fallback for any file that doesn't declare both rates.
 function analogIdxToDigitalIdx(analogIdx) {
   const trans = (PARSED && PARSED.digitalTransitions) || [];
   if (!trans.length) return null;
+  const spcA = PARSED?.eventInfo?.samPerCycA, spcD = PARSED?.eventInfo?.samPerCycD;
+  if (spcA > 0 && spcD > 0) return Math.max(0, Math.round(analogIdx * spcD / spcA));
   let dIdx = 0;
   for (const t of trans) {
     if (t.analogSampleIdx <= analogIdx) dIdx = t.digitalSampleIdx; else break;
@@ -7700,6 +7873,8 @@ function analogIdxToDigitalIdx(analogIdx) {
 }
 function digitalIdxToAnalogIdx(digitalIdx) {
   const trans = (PARSED && PARSED.digitalTransitions) || [];
+  const spcA = PARSED?.eventInfo?.samPerCycA, spcD = PARSED?.eventInfo?.samPerCycD;
+  if (spcA > 0 && spcD > 0) return Math.max(0, Math.round(digitalIdx * spcA / spcD));
   let aIdx = 0;
   for (const t of trans) {
     if (t.digitalSampleIdx <= digitalIdx) aIdx = t.analogSampleIdx; else break;
@@ -11314,32 +11489,13 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
   function timedPhaseFor(e) {
     if (timedViewIdx == null) return null;
     if (e.priority) {
-      const base = llgDisplayLabel(e.from), target = llgDisplayLabel(e.to);
-      const baseSt = currentBitState(base), targetSt = currentBitState(target);
-      if (!baseSt || !targetSt) return null;
-      if (baseSt.state && !targetSt.state) {
-        // Pickup in progress: base asserted, timed output hasn't caught up yet.
-        const tBaseOn = lastTransitionTo(base, timedViewIdx, true);
-        if (tBaseOn == null) return null; // was already asserted at record start — no start point to animate from
-        const tBaseOffAfter = nextTransitionTo(base, tBaseOn, false);
-        const tTargetOnAfter = nextTransitionTo(target, tBaseOn, true);
-        if (tTargetOnAfter == null) return null; // never actually completes in this record
-        if (tBaseOffAfter != null && tBaseOffAfter < tTargetOnAfter) return null; // reset before pickup completed — indeterminate, don't guess
-        const frac = Math.max(0, Math.min(1, (timedViewIdx - tBaseOn) / Math.max(1, tTargetOnAfter - tBaseOn)));
-        return { frac, kind: 'pickup', bgColor: 'var(--text-muted)', overlayColor: 'var(--red)' };
-      }
-      if (!baseSt.state && targetSt.state) {
-        // Dropout in progress: base has released, timed output hasn't dropped out yet.
-        const tBaseOff = lastTransitionTo(base, timedViewIdx, false);
-        if (tBaseOff == null) return null;
-        const tBaseOnAfter = nextTransitionTo(base, tBaseOff, true);
-        const tTargetOffAfter = nextTransitionTo(target, tBaseOff, false);
-        if (tTargetOffAfter == null) return null;
-        if (tBaseOnAfter != null && tBaseOnAfter < tTargetOffAfter) return null; // re-picked-up before dropout completed
-        const frac = Math.max(0, Math.min(1, (timedViewIdx - tBaseOff) / Math.max(1, tTargetOffAfter - tBaseOff)));
-        return { frac, kind: 'dropout', bgColor: 'var(--red)', overlayColor: 'var(--text-muted)' };
-      }
-      return null; // stable — both already agree, nothing to animate
+      // Delegates to the shared measuredTimerPhase() so this chart and the main-page trip tree
+      // compute identical progress; only the colour choice differs between the two renderers.
+      const ph = measuredTimerPhase(P, llgDisplayLabel(e.from), llgDisplayLabel(e.to), timedViewIdx);
+      if (!ph) return null;
+      return ph.kind === 'pickup'
+        ? Object.assign({}, ph, { bgColor: 'var(--text-muted)', overlayColor: 'var(--red)' })
+        : Object.assign({}, ph, { bgColor: 'var(--red)', overlayColor: 'var(--text-muted)' });
     }
     return svOwnDelayPhaseFor(e);
   }
