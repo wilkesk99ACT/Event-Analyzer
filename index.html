@@ -725,6 +725,34 @@ body.dragging-file #drop-overlay { display: flex; }
 .charted-bit-option:hover { background: var(--accent-dim); color: var(--accent); }
 .charted-bit-option.active { color: var(--yellow); font-weight: 700; }
 .charted-bit-option-empty { font-size: 12px; color: var(--text-muted); padding: 5px 8px; }
+.charted-bit-option.pinned { color: var(--yellow); font-weight: 700; }
+.charted-bit-option.dimmed { color: var(--text-muted); }
+.svflags-opt-note { font-family: var(--font); font-size: 10px; color: var(--text-muted); font-style: italic; }
+
+/* ── "Add bit" picker on the SV / Trip Chain Flags chart ── */
+.svflags-bit-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 8px 4px 0;
+}
+.svflags-add-chip { padding: 2px 4px; }
+.svflags-pin {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  color: var(--yellow); background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.45); border-radius: 999px;
+  padding: 2px 4px 2px 9px;
+}
+.svflags-pin-x {
+  background: none; border: none; cursor: pointer; padding: 0 3px;
+  color: var(--yellow); font-size: 14px; line-height: 1; opacity: 0.7;
+}
+.svflags-pin-x:hover { opacity: 1; }
+.svflags-clear {
+  background: none; border: none; cursor: pointer;
+  font-size: 11px; color: var(--text-muted); text-decoration: underline; padding: 2px 4px;
+}
+.svflags-clear:hover { color: var(--text-dim); }
+.svflags-legend-note { color: var(--text-muted); font-style: italic; }
 
 /* ── Tab Bar ── */
 .tab-bar {
@@ -6010,6 +6038,90 @@ function renderChartedLogicSlot() {
   slot.innerHTML = buildChartedLocalGraphHTML(label) ||
     `<div style="color:var(--text-dim);font-size:12px;padding:8px 2px;">Nothing to show for ${tt(label, PARSED)}.</div>`;
 }
+// ══════════════════════════════════════════════════════════════════════
+// SV / TRIP CHAIN FLAGS — "add a bit" picker
+// ══════════════════════════════════════════════════════════════════════
+// Mirrors the "Logic Bit Charted" picker's interaction (same searchable list from
+// getAllChartableBitLabels, same CSS) but multi-select, since the whole point is comparing a
+// pinned bit's timing against the resolved chain already on the chart.
+function svflagsPickerHTML(P, A) {
+  if (SVFLAGS_HIDE_PICKER || !P) return '';
+  const chips = EXTRA_FLAG_BITS.map(l =>
+    `<span class="svflags-pin" title="Click to remove ${l} from the chart">${l}<button type="button" class="svflags-pin-x" onclick="event.stopPropagation(); removeFlagBit('${l.replace(/'/g, "\\'")}');">&times;</button></span>`
+  ).join('');
+  const clearBtn = EXTRA_FLAG_BITS.length > 1
+    ? `<button type="button" class="svflags-clear" onclick="event.stopPropagation(); clearFlagBits();">clear all</button>` : '';
+  return `<div class="svflags-bit-bar" id="svflagsBitBar">
+    <div class="timing-chip charted-bit-chip svflags-add-chip">
+      <button type="button" class="charted-bit-btn" onclick="event.stopPropagation(); toggleFlagBitDropdown();">+ Add bit ▾</button>
+      <div class="charted-bit-dropdown" id="flagBitDropdown" style="display:none;">
+        <input type="text" class="charted-bit-search" id="flagBitSearch" placeholder="Search bits…" oninput="renderFlagBitOptions(this.value)">
+        <div class="charted-bit-list" id="flagBitList"></div>
+      </div>
+    </div>${chips}${clearBtn}
+  </div>`;
+}
+function toggleFlagBitDropdown() {
+  const dd = document.getElementById('flagBitDropdown');
+  if (!dd) return;
+  const opening = dd.style.display === 'none';
+  dd.style.display = opening ? 'block' : 'none';
+  if (opening) {
+    renderFlagBitOptions('');
+    const search = document.getElementById('flagBitSearch');
+    if (search) { search.value = ''; search.focus(); }
+  }
+}
+function renderFlagBitOptions(filterText) {
+  const list = document.getElementById('flagBitList');
+  if (!list || !PARSED) return;
+  const all = getAllChartableBitLabels(PARSED, ANALYSIS);
+  const q = (filterText || '').trim().toUpperCase();
+  const filtered = q ? all.filter(l => l.toUpperCase().includes(q)) : all;
+  // Bits already on the chart by way of the resolved cause chain are shown but marked, so it is
+  // obvious why picking one does nothing visible rather than looking like the click was dropped.
+  const already = new Set(svflagsBaseLabels(PARSED, ANALYSIS));
+  list.innerHTML = filtered.slice(0, 300).map(l => {
+    const pinned = EXTRA_FLAG_BITS.includes(l);
+    const auto = !pinned && already.has(l);
+    const note = auto ? ` <span class="svflags-opt-note">already shown</span>` : '';
+    return `<div class="charted-bit-option ${pinned ? 'pinned' : ''} ${auto ? 'dimmed' : ''}" onclick="toggleFlagBit('${l.replace(/'/g, "\\'")}')">${pinned ? '&#10003; ' : ''}${l}${note}</div>`;
+  }).join('') || `<div class="charted-bit-option-empty">No matching bits</div>`;
+}
+function toggleFlagBit(label) {
+  const i = EXTRA_FLAG_BITS.indexOf(label);
+  if (i >= 0) EXTRA_FLAG_BITS.splice(i, 1); else EXTRA_FLAG_BITS.push(label);
+  refreshSVFlagsChart();
+  renderFlagBitOptions(document.getElementById('flagBitSearch')?.value || '');
+}
+function removeFlagBit(label) {
+  const i = EXTRA_FLAG_BITS.indexOf(label);
+  if (i >= 0) { EXTRA_FLAG_BITS.splice(i, 1); refreshSVFlagsChart(); }
+}
+function clearFlagBits() {
+  if (!EXTRA_FLAG_BITS.length) return;
+  EXTRA_FLAG_BITS = [];
+  refreshSVFlagsChart();
+}
+// Rebuilds the flags chart in place. The SVG's own height changes with the row count, so this
+// swaps the slot's CONTENTS (never the slot element itself — wireChartInteractivity's wheel and
+// mousedown listeners are bound to that element and are registered once per load) and refreshes
+// the sibling picker bar and legend, which live outside the slot.
+function refreshSVFlagsChart() {
+  if (!PARSED || !ANALYSIS) return;
+  const slot = document.getElementById('chartSlot-svflags');
+  const html = buildSVFlagsChart(PARSED, ANALYSIS, true);
+  if (!slot || !html) { if (typeof renderBanner === 'function') renderBanner(); return; }
+  const svgM = html.match(/<div class="chart-svg-slot"[^>]*>([\s\S]*?)<\/div>\s*(?=<div class="svflags-bit-bar"|<div class="sv-legend")/);
+  if (svgM) slot.innerHTML = svgM[1];
+  const barM = html.match(/<div class="svflags-bit-bar" id="svflagsBitBar">[\s\S]*?<\/div>\s*(?=<div class="sv-legend")/);
+  const bar = document.getElementById('svflagsBitBar');
+  if (bar && barM) bar.outerHTML = barM[0];
+  const legM = html.match(/<div class="sv-legend">[\s\S]*<\/div>/);
+  const leg = slot.parentElement && slot.parentElement.querySelector('.sv-legend');
+  if (leg && legM) leg.outerHTML = legM[0];
+}
+
 function renderChartedBitChipHTML(P, A) {
   if (!P || !A) return '';
   const current = currentChartedBitLabel();
@@ -6060,8 +6172,10 @@ function setChartedFilterRelevant(checked) {
   CHARTED_FILTER_RELEVANT = !!checked;
   renderChartedLogicSlot();
 }
-// Close the bit-picker dropdown when clicking anywhere outside it.
+// Close either bit-picker dropdown when clicking anywhere outside it.
 document.addEventListener('click', (e) => {
+  const fdd = document.getElementById('flagBitDropdown');
+  if (fdd && fdd.style.display !== 'none' && !(e.target.closest && e.target.closest('.svflags-add-chip'))) fdd.style.display = 'none';
   const dd = document.getElementById('chartedBitDropdown');
   if (!dd || dd.style.display === 'none') return;
   const chip = document.getElementById('chartedBitChip');
@@ -6072,6 +6186,7 @@ function renderBanner() {
   if (PARSED.format === 'form6') { renderForm6Banner(); return; }
   const el = document.getElementById('tripBanner');
   const cause = ANALYSIS.tripCause;
+  EXTRA_FLAG_BITS = [];
   resetChartZoom(); // a freshly (re)loaded event has a different sample range — don't carry over a stale zoom window from whatever was previously displayed
 
   // ── DEBUG PANEL — shows parsing diagnostics ──
@@ -7269,6 +7384,19 @@ let PLAY_MARK_A = null, PLAY_MARK_B = null;
 // whatever bit is chosen); false shows the fuller, unpruned local logic graph — the same one
 // the per-bit tooltip popup uses — for that bit instead.
 let CHARTED_BIT = null;
+
+// ── USER-PINNED BITS ON THE SV / TRIP CHAIN FLAGS CHART ──────────────────────
+// The flags chart shows the bits the analysis resolved as the trip cause plus the small
+// "relevant to this trip" set. That is the right default, but it is a CONCLUSION — and checking a
+// conclusion means being able to plot a bit the analysis did NOT pick, precisely because you
+// suspect it matters. EXTRA_FLAG_BITS holds whatever the operator pinned, in the order pinned,
+// and survives zooming, cursor moves and playback (it is read fresh on every rebuild).
+// Deliberately NOT persisted across loading a different event: the bit names are file-specific
+// and a stale pin would silently render as a permanently-low row on the next record.
+let EXTRA_FLAG_BITS = [];
+// Set only for the duration of a GIF/PNG export, so the picker chrome (which is interactive and
+// meaningless in a still image) is left out of exported frames while the pinned ROWS stay in.
+let SVFLAGS_HIDE_PICKER = false;
 let CHARTED_FILTER_RELEVANT = true;
 // Captured by renderBanner each render — the plain sequence-diagram fallback used only when the
 // DEFAULT bit has no bakeable logic tree at all (mirrors the tool's original fallback).
@@ -7626,6 +7754,9 @@ async function downloadMainGIF() {
   const origLabel = 'GIF';
   try {
     btns.forEach(b => { b.textContent = '…'; b.disabled = true; });
+    // Pinned ROWS stay in the export (they are part of what the operator is showing); the picker
+    // chrome around them does not — it is interactive and reads as clutter in a still frame.
+    SVFLAGS_HIDE_PICKER = true;
     // Use a fixed chart width for the DURATION of this export only — every mini chart this
     // builds while it's set reads BANNER_CHART_WIDTH internally, so this single override is what
     // decouples the exported media's size from whatever width the live page happens to be at.
@@ -7848,6 +7979,7 @@ async function downloadMainGIF() {
     console.error('Main GIF export failed:', err);
     alert('Could not generate the GIF in this browser. The play button and scrubber still work for stepping through the event.');
   } finally {
+    SVFLAGS_HIDE_PICKER = false;
     BANNER_CHART_WIDTH = savedBannerWidth;
     CHART_ZOOM.current = savedZoom.current; CHART_ZOOM.voltage = savedZoom.voltage;
     CHART_ZOOM.relevant = savedZoom.relevant; CHART_ZOOM.svflags = savedZoom.svflags;
@@ -8207,13 +8339,25 @@ function renderBooleanFlagsSVG(rows, opts, P) {
   const barH = rowH * 0.44;
   rows.forEach((row, i) => {
     const cy = marginTop + i * rowH + rowH / 2;
-    rowsHTML += `<line x1="${marginLeft}" y1="${cy}" x2="${marginLeft + plotW}" y2="${cy}" stroke="var(--accent)" stroke-width="1" opacity="0.4"/>`;
+    // Manually pinned rows are drawn in amber against the chain's blue. They are an operator's
+    // hypothesis placed next to the relay's resolved logic, and a reader glancing at this chart
+    // should never have to wonder which of the two a given row is.
+    const rowColor = row.pinned ? 'var(--yellow)' : 'var(--accent)';
+    rowsHTML += `<line x1="${marginLeft}" y1="${cy}" x2="${marginLeft + plotW}" y2="${cy}" stroke="${rowColor}" stroke-width="1" opacity="0.4"/>`;
     row.intervals.forEach(([s, e]) => {
       if (e < startMs || s > endMs) return; // outside the visible window
       const x1 = xScale(Math.max(s, startMs)), x2 = xScale(Math.min(e, endMs));
-      rowsHTML += `<rect x="${x1.toFixed(1)}" y="${(cy - barH / 2).toFixed(1)}" width="${Math.max(1, x2 - x1).toFixed(1)}" height="${barH.toFixed(1)}" fill="var(--accent)" opacity="0.9" rx="1.5"/>`;
+      rowsHTML += `<rect x="${x1.toFixed(1)}" y="${(cy - barH / 2).toFixed(1)}" width="${Math.max(1, x2 - x1).toFixed(1)}" height="${barH.toFixed(1)}" fill="${rowColor}" opacity="0.9" rx="1.5"/>`;
     });
-    rowsHTML += `<text x="${marginLeft - 8}" y="${(cy + 3.2).toFixed(1)}" text-anchor="end" font-size="${fontSize}" font-family="var(--mono)" fill="var(--text-dim)" class="svg-bit-label" onclick="event.stopPropagation(); showBitDetail('${row.label.replace(/'/g, "\\'")}');"><title>${(P ? (getSVTooltip(row.label, P) || '') : '').replace(/"/g, '&quot;') || 'Click for details'}</title>${row.label}</text>`;
+    // A pinned bit that never asserts renders as a bare baseline, which is indistinguishable from
+    // "asserted somewhere off-screen" or from a bit whose name didn't resolve. Say which it is —
+    // "this bit never operates in this record" is frequently the answer being looked for.
+    if (row.pinned && !row.intervals.length) {
+      rowsHTML += `<text x="${(marginLeft + 6).toFixed(1)}" y="${(cy + 3.2).toFixed(1)}" font-size="${(fontSize - 1.5).toFixed(1)}" fill="var(--text-muted)" font-style="italic">never asserts in this record</text>`;
+    } else if (row.pinned && !row.intervals.some(([s, e]) => e >= startMs && s <= endMs)) {
+      rowsHTML += `<text x="${(marginLeft + 6).toFixed(1)}" y="${(cy + 3.2).toFixed(1)}" font-size="${(fontSize - 1.5).toFixed(1)}" fill="var(--text-muted)" font-style="italic">asserts outside this zoom window</text>`;
+    }
+    rowsHTML += `<text x="${marginLeft - 8}" y="${(cy + 3.2).toFixed(1)}" text-anchor="end" font-size="${fontSize}" font-family="var(--mono)" fill="${row.pinned ? 'var(--yellow)' : 'var(--text-dim)'}" class="svg-bit-label" onclick="event.stopPropagation(); showBitDetail('${row.label.replace(/'/g, "\\'")}');"><title>${(P ? (getSVTooltip(row.label, P) || '') : '').replace(/"/g, '&quot;') || 'Click for details'}</title>${row.label}</text>`;
   });
 
   const bg = opts.bg || 'var(--card)';
@@ -9350,10 +9494,27 @@ function getTripRelevantLabels(P, A) {
   return set;
 }
 
+// The labels the ANALYSIS puts on the flags chart on its own: the resolved trip-cause chain plus
+// the small "relevant to this trip" set. Split out from buildSVFlagsChart so the bit picker can
+// mark these as "already shown" instead of letting a click on one look like it did nothing.
+function svflagsBaseLabels(P, A) {
+  const cause = A?.tripCause;
+  if (!cause || !cause.causeChain?.length) return [];
+  const seen = new Set();
+  const labels = cause.causeChain.map(c => c.label).filter(l => { if (seen.has(l)) return false; seen.add(l); return true; });
+  [cause.immediateCause, cause.causeChain[cause.causeChain.length - 1]?.label].filter(Boolean)
+    .forEach(l => { if (!labels.includes(l)) labels.push(l); });
+  getTripRelevantLabels(P, A).forEach(l => { if (!labels.includes(l)) labels.push(l); });
+  return labels;
+}
+
 function buildSVFlagsChart(P, A, compact) {
   const data = P.analogData || [];
   const cause = A?.tripCause;
-  if (!data.length || !cause || !cause.causeChain?.length) return '';
+  // A pinned bit is reason enough to draw the chart even when no trip cause resolved — that case
+  // (an ER-only record, or logic this build can't resolve) is exactly when manually plotting a
+  // few bits is the only way to see the sequence at all.
+  if (!data.length || (!(cause && cause.causeChain?.length) && !EXTRA_FLAG_BITS.length)) return '';
 
   const samplesPerCycle = P.eventInfo.samPerCycA || 32;
   const msPerSample = 1000 / ((P.eventInfo.freq || 60) * samplesPerCycle);
@@ -9363,21 +9524,19 @@ function buildSVFlagsChart(P, A, compact) {
   // no length cap. The bit directly responsible for the trip (immediateCause, e.g. "SV14T")
   // and the final trip/ER label (e.g. "TRIP3P" or "ER") are guaranteed to be present even if
   // the chain summary didn't already include them under that exact name.
-  const seen = new Set();
-  let labels = cause.causeChain
-    .map(c => c.label)
-    .filter(l => { if (seen.has(l)) return false; seen.add(l); return true; });
-  const mustInclude = [cause.immediateCause, cause.causeChain[cause.causeChain.length - 1]?.label].filter(Boolean);
-  mustInclude.forEach(l => { if (!labels.includes(l)) labels.push(l); });
+  // The analysis's own set (resolved chain + the "relevant to this trip" bits, the same set the
+  // Event Timeline's filter uses so the two features agree on what counts) ...
+  let labels = svflagsBaseLabels(P, A);
 
-  // Beyond the resolved logic chain itself, always surface a small set of bits that give
-  // essential context for THIS trip even when they aren't literally part of the equation that
-  // produced it — same "relevant to this trip" set the Event Timeline's filter uses, so the
-  // two features agree on what counts.
-  getTripRelevantLabels(P, A).forEach(l => { if (!labels.includes(l)) labels.push(l); });
+  // ... then whatever the operator pinned via the picker, appended and flagged so they are drawn
+  // in a distinct colour. Keeping them visually separate matters: the chart is read as "what the
+  // relay's logic did", and a hand-added bit is an operator's hypothesis sitting next to it, not
+  // part of the resolved cause.
+  const pinnedSet = new Set();
+  EXTRA_FLAG_BITS.forEach(l => { if (!labels.includes(l)) { labels.push(l); pinnedSet.add(l); } });
 
   const rows = labels
-    .map(label => ({ label, intervals: computeAssertIntervals(P, label, totalMs, msPerSample) }))
+    .map(label => ({ label, pinned: pinnedSet.has(label), intervals: computeAssertIntervals(P, label, totalMs, msPerSample) }))
     // Chronological, top to bottom: whichever bit asserts earliest in the record is drawn
     // first, matching how an operator would actually narrate the sequence of events. A bit
     // already asserted at t=0 sorts first (interval start 0); one that never actually asserts
@@ -9395,6 +9554,8 @@ function buildSVFlagsChart(P, A, compact) {
     const m = l.match(/^SV(\d+)T$/);
     return !(m && labels.includes(`SV${m[1]}`));
   });
+  const pinnedNote = pinnedSet.size
+    ? `<span class="sv-legend-item svflags-legend-note">Rows in amber were added manually and are not part of the resolved trip cause.</span>` : '';
   const legendHTML = `<div class="sv-legend">${legendLabels.map(l => {
     const svM = l.match(/^SV(\d+)T?$/);
     const sv = svM ? (P.svSettings || []).find(s => s.num === parseInt(svM[1])) : null;
@@ -9409,9 +9570,9 @@ function buildSVFlagsChart(P, A, compact) {
     }
     const eq = sv ? `<span class="sv-legend-eq">[${linkifyEquationBits(sv.equation.split('#')[0].trim(), P)}]</span> ` : '';
     return `<span class="sv-legend-item">${tt(l, P)}: ${eq}${short}</span>`;
-  }).join('')}</div>`;
+  }).join('')}${pinnedNote}</div>`;
 
-  const tripTransition = cause.tripTransition;
+  const tripTransition = cause?.tripTransition;
   // Use analogSampleIdx here too (not tripTransition.timeMs) so the TRIP marker lands
   // at the exact same x position as it does in the magnitude charts above.
   const tripMs = (tripTransition?.analogSampleIdx != null) ? tripTransition.analogSampleIdx * msPerSample : null;
@@ -9433,12 +9594,12 @@ function buildSVFlagsChart(P, A, compact) {
       marginTop: 12, marginBottom: 24,
       rowH: 30, numVGrid: 8, fontSize: 12, totalMs, startMs, endMs, triggerMs, tripMs, cursorMs, markAMs, markBMs, compact: true, bg: 'var(--card)',
     }, P);
-    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">SV / Trip Chain Flags${zoomHintHTML('svflags')}</div><div class="chart-svg-slot" id="chartSlot-svflags">${svg}</div>${legendHTML}</div>`;
+    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">SV / Trip Chain Flags${zoomHintHTML('svflags')}</div><div class="chart-svg-slot" id="chartSlot-svflags">${svg}</div>${svflagsPickerHTML(P, A)}${legendHTML}</div>`;
   }
 
   const svg = renderBooleanFlagsSVG(rows, { totalMs, triggerMs, tripMs, marginLeft: 110 }, P);
-  return `<div class="card blue-accent"><div class="card-header">🔗 SV / Trip Chain Flags</div>${svg}${legendHTML}
-    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Boolean state of each element in the resolved trip-cause chain, reconstructed from digital transitions across the full record.</div>
+  return `<div class="card blue-accent"><div class="card-header">🔗 SV / Trip Chain Flags</div>${svg}${svflagsPickerHTML(P, A)}${legendHTML}
+    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Boolean state of each element in the resolved trip-cause chain, reconstructed from digital transitions across the full record. Use <b>+ Add bit</b> to plot any other bit in the record alongside it.</div>
   </div>`;
 }
 
