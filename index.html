@@ -2578,6 +2578,12 @@ function calibrateAnalogBasis(R) {
   R.magScale = 1;
   R.basisCalibration = { magScale: 1, source: 'none', confidence: 'uncalibrated', detail:
     'No in-file reference (event-summary fault currents or VNOM x PTR) was available to calibrate magnitude scaling; magnitudes are shown as a conventional RMS of the samples.' };
+  // Whether this file's VNOM setting is nominal phase-to-PHASE or phase-to-NEUTRAL secondary
+  // voltage (see the V_CANDIDATES note below) — null until/unless the voltage reference below
+  // resolves it. Set here (not just alongside R.magScale) so it still defaults sanely on any
+  // early return in this function, and consulted anywhere VNOM x PTR is used to state an
+  // expected PRIMARY voltage (e.g. the top-bar "Expected V(L-N) primary" figure).
+  R.vnomIsPhaseToPhase = null;
 
   const data = R.analogData || [];
   if (!data.length) return;
@@ -2695,6 +2701,11 @@ function calibrateAnalogBasis(R) {
 
   const iHit = iRatios.length ? snapToCandidate(medianOf(iRatios), CANDIDATES) : null;
   const vHit = vRatio ? snapToCandidate(vRatio, V_CANDIDATES, 1.10) : null;
+  // Record the VNOM L-L/L-N determination independently of which reference ends up chosen for
+  // magScale below (e.g. a file with clean event-summary fault currents will let iHit win the
+  // magScale decision even though vHit — computed from actual VA/VB/VC samples vs VNOM x PTR —
+  // is exactly what tells us whether VNOM is phase-to-phase or phase-to-neutral in this file).
+  if (vHit) R.vnomIsPhaseToPhase = /phase-to-phase/.test(vHit.name);
 
   // Score both candidate scales against the record's own voltage element bits.
   const bitScores = CANDIDATES.map(c => ({ cand: c, score: elementBitCrossCheck(R, c.scale) }))
@@ -11630,19 +11641,28 @@ function selectEvent(idx) {
   if (PARSED.format !== 'form6') {
     if (PARSED.settings.PTRY) ratios.push(`PTR=${PARSED.settings.PTRY}`);
     if (PARSED.settings.VNOM) ratios.push(`VNOM=${PARSED.settings.VNOM}V`);
-    // Expected phase-to-neutral primary voltage: VNOM (nominal secondary, SEL convention —
-    // see calibrateAnalogBasis) x PTR. Same "VNOM x PTR = nominal primary phase voltage"
-    // relationship already relied on elsewhere (pre-fault voltage checks, %VNOM fallback
-    // reference for 59 elements) — surfaced here so it doesn't have to be hand-computed
-    // from CTR/PTR/VNOM every time. Assumes the ordinary convention that VNOM and the VA/VB/VC
-    // channels are both phase-to-neutral; a file that turns out to be phase-to-phase (flagged,
-    // when detectable, in the magnitude-calibration note under Voltages) would make this read
-    // sqrt(3) too high.
-    if (PARSED.settings.VNOM && PARSED.settings.PTRY) {
-      const vPri = PARSED.settings.VNOM * PARSED.settings.PTRY;
+    // Expected phase-to-neutral primary voltage: VNOM (nominal secondary) x PTR — but VNOM
+    // is NOT reliably phase-to-neutral. Some SEL files set it to the nominal phase-to-PHASE
+    // secondary voltage instead (see the V_CANDIDATES / vRatio note in calibrateAnalogBasis,
+    // which already has to solve exactly this ambiguity to calibrate magnitude scale). Naively
+    // reporting VNOM x PTR as if it were always phase-to-neutral overstates it by sqrt(3) (73%)
+    // on any file where the convention is actually phase-to-phase — confirmed on a real 751
+    // PRIM_VAL=YES file where VNOM x PTR = 22,864 V but the file's own primary-referred VA/VB/VC
+    // samples average ~13,200 V (22,864 / sqrt(3) = 13,201 V — a match, not a coincidence).
+    // calibrateAnalogBasis() resolves this per-file, from the actual samples, and records it on
+    // PARSED.vnomIsPhaseToPhase (true/false/null-if-undetermined); use that instead of assuming.
+    const ptrForVnom = PARSED.settings.PTRY || PARSED.settings.PTRZ;
+    if (PARSED.settings.VNOM && ptrForVnom) {
+      const llFactor = PARSED.vnomIsPhaseToPhase === true ? Math.sqrt(3) : 1;
+      const vPri = (PARSED.settings.VNOM * ptrForVnom) / llFactor;
       const vPriStr = vPri >= 1000 ? `${(vPri / 1000).toFixed(2)} kV` : `${vPri.toFixed(1)} V`;
-      vPriText = `Expected V(L-N) primary ≈ ${vPriStr}`;
-      vPriTitle = `Expected phase-to-neutral primary voltage ≈ VNOM × PTR = ${PARSED.settings.VNOM} × ${PARSED.settings.PTRY} = ${vPri.toFixed(1)} V (${vPriStr}). Assumes VNOM and the phase channels are both phase-to-neutral, per the usual SEL convention.`;
+      const unresolved = PARSED.vnomIsPhaseToPhase == null;
+      vPriText = `Expected V(L-N) primary ≈ ${vPriStr}${unresolved ? ' *' : ''}`;
+      vPriTitle = PARSED.vnomIsPhaseToPhase === true
+        ? `Expected phase-to-neutral primary voltage ≈ (VNOM ÷ sqrt(3)) × PTR = (${PARSED.settings.VNOM} ÷ 1.732) × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). This file's VNOM is nominal phase-to-PHASE secondary voltage (detected from its own VA/VB/VC samples vs VNOM × PTR), so the sqrt(3) is divided back out.`
+        : unresolved
+          ? `Expected phase-to-neutral primary voltage ≈ VNOM × PTR = ${PARSED.settings.VNOM} × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). * Could not confirm from this file's own voltage samples whether VNOM is phase-to-neutral or phase-to-phase — assuming the more common phase-to-neutral convention. Treat this figure with caution and cross-check against the measured pre-fault voltage in the Voltages tab.`
+          : `Expected phase-to-neutral primary voltage ≈ VNOM × PTR = ${PARSED.settings.VNOM} × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). Confirmed from this file's own voltage samples that VNOM is already phase-to-neutral.`;
     }
   }
   document.getElementById('topBarRatios').textContent = ratios.join(' | ');
