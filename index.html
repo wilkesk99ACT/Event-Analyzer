@@ -1996,11 +1996,18 @@ function parseCEV(text, fileName) {
     // SEL-751 format: has extra header fields, timestamp at line 3 (0-indexed: 2), event summary at line 5 (0-indexed: 5)
     R.format = 'sel751';
     R.fid = lines[0]?.replace(/"/g, '').split(',')[0] || '';
-    R.device = lines[1]?.replace(/"/g, '').split(',')[0] || '';
+    const line1Parts = lines[1]?.replace(/"/g, '').split(',') || [];
+    R.device = line1Parts[0] || '';
+    // SER_NUM (4th field on the FID line) identifies the physical relay. Used to reconcile
+    // the VNOM L-L/L-N convention across multiple events from the same device — see
+    // reconcileVnomAcrossEvents() — since that convention is fixed by the relay's PT wiring
+    // and cannot differ between two records from the same unit with the same CTR/PTR/VNOM.
+    R.serialNumber = line1Parts[3] || '';
   } else {
     R.format = 'sel651r';
     R.fid = line0.split(',')[0] || '';
     R.device = line1.split(',')[0] || '';
+    R.serialNumber = '';
   }
 
   // ── Find timestamp line (MONTH,DAY,YEAR...) ──
@@ -2768,6 +2775,45 @@ function calibrateAnalogBasis(R) {
     elementBitAgreement: bestBit ? { scale: bestBit.cand.scale, rate: +bestBit.score.rate.toFixed(3), samples: bestBit.score.total } : null,
     detail: `Analog channels read as ${isPrimary ? 'PRIMARY' : 'SECONDARY'}-referred; magnitudes ${chosen.scale === 1 ? 'need no scaling correction' : 'scaled by sqrt(2)'} (${chosen.name}).${bitNote}`,
   };
+}
+
+// The VNOM L-L/L-N convention (see calibrateAnalogBasis' V_CANDIDATES block) is fixed by how
+// a relay's PTs are wired — it is a property of the physical device + settings, not of any one
+// event. calibrateAnalogBasis() resolves it per-file from that file's own pre-fault voltage
+// samples, which fails when a record's pre-fault window happens to be mostly dead bus with
+// only a still-rising energization tail (seen on a real PV SEL-751 pair, events 11097/11098:
+// 11097's pre-fault window sat settled at ~13.4 kV the whole way through and resolved cleanly;
+// 11098, captured ~2m15s later, was de-energized for all but the last few samples before its
+// trigger, so the "restrict to top 10% of window peak" logic caught only the mid-ramp tail and
+// produced a ratio that snapped to neither candidate). When multiple events from the SAME
+// device (matched by serial number, falling back to device string, + identical CTR/PTR/VNOM)
+// are loaded together, borrow a confidently-resolved determination for any sibling whose own
+// window came back null, rather than leaving it an unexplained "*". Does not touch magScale —
+// only the VNOM L-L/L-N flag, which is what the top-bar "Expected V(L-N) primary" figure uses.
+function reconcileVnomAcrossEvents(results) {
+  const keyFor = (p) => [p.serialNumber || p.device || '', p.settings?.CTR, p.settings?.PTRY, p.settings?.VNOM].join('|');
+  const byKey = {};
+  for (const r of results) {
+    if (!r.parsed || r.parsed.format === 'form6') continue;
+    if (r.parsed.vnomIsPhaseToPhase === undefined) continue; // no VNOM-based figure applies to this file at all
+    const k = keyFor(r.parsed);
+    (byKey[k] = byKey[k] || []).push(r);
+  }
+  for (const k in byKey) {
+    const group = byKey[k];
+    if (group.length < 2) continue;
+    const resolved = group.find(r => r.parsed.vnomIsPhaseToPhase != null);
+    if (!resolved) continue;
+    for (const r of group) {
+      if (r.parsed.vnomIsPhaseToPhase == null) {
+        r.parsed.vnomIsPhaseToPhase = resolved.parsed.vnomIsPhaseToPhase;
+        r.parsed.vnomInferredFromSibling = resolved.parsed.eventInfo?.refNum || resolved.parsed.fileName || 'a sibling event';
+        if (r.parsed.basisCalibration) {
+          r.parsed.basisCalibration.confidence = `medium (VNOM convention inferred from sibling event ${r.parsed.vnomInferredFromSibling} on the same relay — this file's own pre-fault window did not resolve it)`;
+        }
+      }
+    }
+  }
 }
 
 
@@ -11494,6 +11540,8 @@ function processFiles(files) {
         : analyzeCEV(results[i].parsed, prevEvt);
     }
 
+    reconcileVnomAcrossEvents(results);
+
     ALL_EVENTS = results;
     CURRENT_IDX = 0;
 
@@ -11672,9 +11720,12 @@ function selectEvent(idx) {
       const llFactor = PARSED.vnomIsPhaseToPhase === true ? Math.sqrt(3) : 1;
       const vPri = (PARSED.settings.VNOM * ptrForVnom) / llFactor;
       const vPriStr = vPri >= 1000 ? `${(vPri / 1000).toFixed(2)} kV` : `${vPri.toFixed(1)} V`;
+      const inferredFromSibling = !!PARSED.vnomInferredFromSibling;
       const unresolved = PARSED.vnomIsPhaseToPhase == null;
-      vPriText = `Expected V(L-N) primary ≈ ${vPriStr}${unresolved ? ' *' : ''}`;
-      vPriTitle = PARSED.vnomIsPhaseToPhase === true
+      vPriText = `Expected V(L-N) primary ≈ ${vPriStr}${unresolved ? ' *' : inferredFromSibling ? ' †' : ''}`;
+      vPriTitle = inferredFromSibling
+        ? `Expected phase-to-neutral primary voltage ≈ ${PARSED.vnomIsPhaseToPhase ? '(VNOM ÷ sqrt(3)) × PTR' : 'VNOM × PTR'} = ${vPri.toFixed(1)} V (${vPriStr}). † This file's own pre-fault voltage samples could not confirm the VNOM L-L/L-N convention (e.g. bus was still de-energized or mid-recovery through most of the pre-fault window), so it was inferred from event ${PARSED.vnomInferredFromSibling} — the same relay, same CTR/PTR/VNOM settings. Cross-check against the measured voltage in the Voltages tab if this event's own energization looks incomplete.`
+        : PARSED.vnomIsPhaseToPhase === true
         ? `Expected phase-to-neutral primary voltage ≈ (VNOM ÷ sqrt(3)) × PTR = (${PARSED.settings.VNOM} ÷ 1.732) × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). This file's VNOM is nominal phase-to-PHASE secondary voltage (detected from its own VA/VB/VC samples vs VNOM × PTR), so the sqrt(3) is divided back out.`
         : unresolved
           ? `Expected phase-to-neutral primary voltage ≈ VNOM × PTR = ${PARSED.settings.VNOM} × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). * Could not confirm from this file's own voltage samples whether VNOM is phase-to-neutral or phase-to-phase — assuming the more common phase-to-neutral convention. Treat this figure with caution and cross-check against the measured pre-fault voltage in the Voltages tab.`
