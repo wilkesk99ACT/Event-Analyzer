@@ -11625,11 +11625,28 @@ function selectEvent(idx) {
     `${devInfo || PARSED.fileName} — Event #${PARSED.eventInfo.refNum} — ${PARSED.eventInfo.eventType}`;
   document.getElementById('topBarTimestamp').textContent = formatTimestamp(ts);
   const ratios = PARSED.format === 'form6' ? ['Form6-TS COMTRADE'] : [`CTR=${PARSED.settings.CTR || '?'}`];
+  let vPriTitle = '';
   if (PARSED.format !== 'form6') {
     if (PARSED.settings.PTRY) ratios.push(`PTR=${PARSED.settings.PTRY}`);
     if (PARSED.settings.VNOM) ratios.push(`VNOM=${PARSED.settings.VNOM}V`);
+    // Expected phase-to-neutral primary voltage: VNOM (nominal secondary, SEL convention —
+    // see calibrateAnalogBasis) x PTR. Same "VNOM x PTR = nominal primary phase voltage"
+    // relationship already relied on elsewhere (pre-fault voltage checks, %VNOM fallback
+    // reference for 59 elements) — surfaced here so it doesn't have to be hand-computed
+    // from CTR/PTR/VNOM every time. Assumes the ordinary convention that VNOM and the VA/VB/VC
+    // channels are both phase-to-neutral; a file that turns out to be phase-to-phase (flagged,
+    // when detectable, in the magnitude-calibration note under Voltages) would make this read
+    // sqrt(3) too high.
+    if (PARSED.settings.VNOM && PARSED.settings.PTRY) {
+      const vPri = PARSED.settings.VNOM * PARSED.settings.PTRY;
+      const vPriStr = vPri >= 1000 ? `${(vPri / 1000).toFixed(2)}kV` : `${vPri.toFixed(1)}V`;
+      ratios.push(`VLN(pri)≈${vPriStr}`);
+      vPriTitle = `Expected phase-to-neutral primary voltage ≈ VNOM × PTR = ${PARSED.settings.VNOM} × ${PARSED.settings.PTRY} = ${vPri.toFixed(1)} V (${vPriStr}). Assumes VNOM and the phase channels are both phase-to-neutral, per the usual SEL convention.`;
+    }
   }
-  document.getElementById('topBarRatios').textContent = ratios.join(' | ');
+  const topBarRatiosEl = document.getElementById('topBarRatios');
+  topBarRatiosEl.textContent = ratios.join(' | ');
+  topBarRatiosEl.title = vPriTitle;
 
   // Update event selector active state
   document.querySelectorAll('.evt-btn').forEach((btn, i) => {
