@@ -2667,7 +2667,23 @@ function calibrateAnalogBasis(R) {
       if (!s.some(v => Math.abs(v) > 1e-9)) continue;
       const win = computeRmsMagnitude(s, N).slice(lo, hi).filter(v => v > 0);
       if (win.length < Math.max(4, N / 2)) continue;
-      const m = medianOf(win);
+      // The whole-record fallback above assumes voltage sits near nominal for MOST of the
+      // record, which breaks the other way on a short capture that trips early and stays open
+      // for the remainder: e.g. a trigger at sample 2 of 720 leaves ~715 samples in this window,
+      // of which only the first ~20-30 are actually energized before the bus decays to ~0 for
+      // the rest — 90%+ of the window is post-trip dead bus. A plain median over that window is
+      // itself ~0, not "nominal", producing a nonsense vRatio (seen as high as 3800x on a real
+      // CASH SOLAR "59 Trip" file) that should have snapped to a sane candidate. Restricting to
+      // samples within 10% of THIS channel's own peak within the window isolates the settled
+      // energized level (whichever portion of the window that is) from a decayed/dead tail or
+      // lead, without assuming which end of the window is which. A looser threshold (tried at
+      // 50%) still pulls in a wide swath of the post-trip RC-decay ramp — which decays at a
+      // different rate on each phase — so the three per-channel medians disagreed by up to 40%;
+      // tight to the peak (~90%+) is what actually converges all three channels on the same
+      // settled value.
+      const chMax = Math.max(...win);
+      const dominant = win.filter(v => v >= chMax * 0.9);
+      const m = medianOf(dominant.length ? dominant : win);
       if (m > 0) meds.push(m);
     }
     const obsV = medianOf(meds);
