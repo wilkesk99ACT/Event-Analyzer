@@ -1,9 +1,9 @@
-// Top summary banner for the current event.
 
 function renderBanner() {
   if (PARSED.format === 'form6') { renderForm6Banner(); return; }
   const el = document.getElementById('tripBanner');
   const cause = ANALYSIS.tripCause;
+  EXTRA_FLAG_BITS = [];
   resetChartZoom(); // a freshly (re)loaded event has a different sample range — don't carry over a stale zoom window from whatever was previously displayed
 
   // ── DEBUG PANEL — shows parsing diagnostics ──
@@ -104,6 +104,7 @@ function renderBanner() {
             </div>
           </div>
           <p style="color:var(--text-dim);font-size:13px;">The digital word did not show a trip transition in this event record. The protection elements and SV logic tabs contain the underlying element states for this record.</p>
+          ${buildRecloseBannerBlock(PARSED, ANALYSIS)}
         </div>
         ${chartsHTML}
       </div>
@@ -166,6 +167,7 @@ function renderBanner() {
           <div class="timing-chip"><span class="label">${cause.isEventReport ? 'Event Report Equation:' : 'Trip Equation:'}</span> <span class="value">${(cause.isEventReport ? (PARSED.erEquationName || 'ER') : (cause.sourceEquationName || PARSED.tripEquationName || 'TR'))}${cause.immediateCause ? ' via ' + cause.immediateCause : ''}</span></div>
           ${renderChartedBitChipHTML(PARSED, ANALYSIS)}
         </div>
+        ${buildRecloseBannerBlock(PARSED, ANALYSIS)}
         ${buildConsistencyWarningBanner(PARSED, ANALYSIS)}
         ${buildInvestigationPanel(PARSED, ANALYSIS)}
       </div>
@@ -186,3 +188,38 @@ function renderBanner() {
 // this is a standard RMS-envelope approximation of what SynchroWAVe shows, not a
 // byte-for-bit reproduction of SEL's internal DSP filter, but it produces the same
 // "flat pre-fault, rises during the fault" magnitude envelope shape.
+// ── SEL *FILTERED* (4 samples/cycle) EVENT REPORTS ────────────────────────────
+// A CEV whose header reports SAM/CYC_A = 4 is a FILTERED report. Its analog columns are not
+// instantaneous waveform samples: they are the relay's own digital-filter output, emitted once
+// per quarter cycle and already scaled so each value is an RMS-referred projection of the
+// phasor. Two consecutive samples are therefore 90 degrees apart and ARE the real and
+// imaginary parts of the phasor:
+//
+//     X[n] = x[n] + j*x[n-1]        |X[n]| = hypot(x[n], x[n-1])     (already RMS)
+//
+// Running a conventional sliding RMS over those values instead returns |X|/sqrt(2) in steady
+// state, because each quadrature pair contributes X^2 spread across two samples. Worse, during
+// a fast transient the 4-sample window spans a full cycle of a magnitude that is still moving,
+// so it also smears and delays the peak — the error is not even a constant factor and cannot
+// be corrected by a scalar.
+//
+// Verified against SEL-751 record 10824 (BG fault, 8/14/2026). At the trigger instant the
+// quadrature form returns IA 126.2 / IB 821.2 / IC 319.8 A and VA 73.7 / VB 94.0 / VC 248.5 V,
+// matching both the relay's own event-summary row (126.6 / 821.6 / 319.8 / 73.685 / 94.272 /
+// 248.040) and SynchroWAVe's .Mag cursor readout. The sliding-RMS form returned
+// 72.5 / 532.9 / 231.0 / 53.1 / 66.3 / 174.4 for the same instant — low by sqrt(2) on the
+// slow-moving voltages and by 1.54x on the fast-moving fault current.
+//
+// A raw/unfiltered report (16 or 32 samples/cycle) carries true instantaneous samples and must
+// keep using the sliding-window form, so this branches on the file's own declared rate rather
+// than being applied everywhere.
+function isFilteredQuarterCycle(samplesPerCycle) { return samplesPerCycle === 4; }
+
+// One sentence under each magnitude chart saying which of the two methods produced it, so the
+// number on screen can always be traced back to how it was derived.
+function magMethodNote(P) {
+  const spc = P?.eventInfo?.samPerCycA || 32;
+  return isFilteredQuarterCycle(spc)
+    ? `Filtered report (${spc} samples/cycle): magnitude is the quarter-cycle phasor |x[n] + j&middot;x[n&minus;1]|, already RMS — the same quantity SynchroWAVe plots as .Mag and the relay quotes in its event summary.`
+    : `Raw report (${spc} samples/cycle): magnitude is a 1-cycle sliding RMS of the recorded instantaneous samples — an approximation of SynchroWAVe's Mag trace, not a re-implementation of SEL's exact DSP filter.`;
+}

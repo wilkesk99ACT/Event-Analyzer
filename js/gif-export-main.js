@@ -1,5 +1,3 @@
-// Animated GIF export of the main event charts.
-
 async function downloadMainGIF() {
   if (!PARSED || !ANALYSIS) return;
   const trans = PARSED.digitalTransitions || [];
@@ -14,6 +12,9 @@ async function downloadMainGIF() {
   const origLabel = 'GIF';
   try {
     btns.forEach(b => { b.textContent = '…'; b.disabled = true; });
+    // Pinned ROWS stay in the export (they are part of what the operator is showing); the picker
+    // chrome around them does not — it is interactive and reads as clutter in a still frame.
+    SVFLAGS_HIDE_PICKER = true;
     // Use a fixed chart width for the DURATION of this export only — every mini chart this
     // builds while it's set reads BANNER_CHART_WIDTH internally, so this single override is what
     // decouples the exported media's size from whatever width the live page happens to be at.
@@ -236,6 +237,7 @@ async function downloadMainGIF() {
     console.error('Main GIF export failed:', err);
     alert('Could not generate the GIF in this browser. The play button and scrubber still work for stepping through the event.');
   } finally {
+    SVFLAGS_HIDE_PICKER = false;
     BANNER_CHART_WIDTH = savedBannerWidth;
     CHART_ZOOM.current = savedZoom.current; CHART_ZOOM.voltage = savedZoom.voltage;
     CHART_ZOOM.relevant = savedZoom.relevant; CHART_ZOOM.svflags = savedZoom.svflags;

@@ -1,5 +1,3 @@
-// Zoom/scrub interactivity and the current/voltage/relevant-quantity chart builders.
-
 function rerenderZoomChart(kind) {
   const slot = document.getElementById('chartSlot-' + kind);
   if (!slot || !PARSED || !ANALYSIS) return;
@@ -181,7 +179,7 @@ function buildCurrentMagChart(P, A, compact, heightOverride) {
 
   const svg = renderMagnitudeChartSVG(traces, { msPerSample, yUnit: unit, forceZeroBaseline: true, triggerIdx: triggerIdxFull, tripIdx: tripIdxFull });
   return `<div class="card blue-accent"><div class="card-header">〰️ Current Magnitude (RMS envelope)</div>${svg}
-    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Magnitude is a 1-cycle sliding RMS of the recorded instantaneous samples — an approximation of SynchroWAVe's Mag trace, not a re-implementation of SEL's exact DSP filter.</div>
+    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">${magMethodNote(P)}</div>
   </div>`;
 }
 
@@ -225,7 +223,7 @@ function buildVoltageMagChart(P, A, compact, heightOverride) {
 
   const svg = renderMagnitudeChartSVG(traces, { msPerSample, yUnit: unit, forceZeroBaseline: false, triggerIdx: triggerIdxFull, tripIdx: tripIdxFull });
   return `<div class="card blue-accent"><div class="card-header">🔌 Voltage Magnitude (RMS envelope)</div>${svg}
-    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Magnitude is a 1-cycle sliding RMS of the recorded instantaneous samples — an approximation of SynchroWAVe's Mag trace, not a re-implementation of SEL's exact DSP filter.</div>
+    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">${magMethodNote(P)}</div>
   </div>`;
 }
 
@@ -345,13 +343,25 @@ function renderBooleanFlagsSVG(rows, opts, P) {
   const barH = rowH * 0.44;
   rows.forEach((row, i) => {
     const cy = marginTop + i * rowH + rowH / 2;
-    rowsHTML += `<line x1="${marginLeft}" y1="${cy}" x2="${marginLeft + plotW}" y2="${cy}" stroke="var(--accent)" stroke-width="1" opacity="0.4"/>`;
+    // Manually pinned rows are drawn in amber against the chain's blue. They are an operator's
+    // hypothesis placed next to the relay's resolved logic, and a reader glancing at this chart
+    // should never have to wonder which of the two a given row is.
+    const rowColor = row.pinned ? 'var(--yellow)' : 'var(--accent)';
+    rowsHTML += `<line x1="${marginLeft}" y1="${cy}" x2="${marginLeft + plotW}" y2="${cy}" stroke="${rowColor}" stroke-width="1" opacity="0.4"/>`;
     row.intervals.forEach(([s, e]) => {
       if (e < startMs || s > endMs) return; // outside the visible window
       const x1 = xScale(Math.max(s, startMs)), x2 = xScale(Math.min(e, endMs));
-      rowsHTML += `<rect x="${x1.toFixed(1)}" y="${(cy - barH / 2).toFixed(1)}" width="${Math.max(1, x2 - x1).toFixed(1)}" height="${barH.toFixed(1)}" fill="var(--accent)" opacity="0.9" rx="1.5"/>`;
+      rowsHTML += `<rect x="${x1.toFixed(1)}" y="${(cy - barH / 2).toFixed(1)}" width="${Math.max(1, x2 - x1).toFixed(1)}" height="${barH.toFixed(1)}" fill="${rowColor}" opacity="0.9" rx="1.5"/>`;
     });
-    rowsHTML += `<text x="${marginLeft - 8}" y="${(cy + 3.2).toFixed(1)}" text-anchor="end" font-size="${fontSize}" font-family="var(--mono)" fill="var(--text-dim)" class="svg-bit-label" onclick="event.stopPropagation(); showBitDetail('${row.label.replace(/'/g, "\\'")}');"><title>${(P ? (getSVTooltip(row.label, P) || '') : '').replace(/"/g, '&quot;') || 'Click for details'}</title>${row.label}</text>`;
+    // A pinned bit that never asserts renders as a bare baseline, which is indistinguishable from
+    // "asserted somewhere off-screen" or from a bit whose name didn't resolve. Say which it is —
+    // "this bit never operates in this record" is frequently the answer being looked for.
+    if (row.pinned && !row.intervals.length) {
+      rowsHTML += `<text x="${(marginLeft + 6).toFixed(1)}" y="${(cy + 3.2).toFixed(1)}" font-size="${(fontSize - 1.5).toFixed(1)}" fill="var(--text-muted)" font-style="italic">never asserts in this record</text>`;
+    } else if (row.pinned && !row.intervals.some(([s, e]) => e >= startMs && s <= endMs)) {
+      rowsHTML += `<text x="${(marginLeft + 6).toFixed(1)}" y="${(cy + 3.2).toFixed(1)}" font-size="${(fontSize - 1.5).toFixed(1)}" fill="var(--text-muted)" font-style="italic">asserts outside this zoom window</text>`;
+    }
+    rowsHTML += `<text x="${marginLeft - 8}" y="${(cy + 3.2).toFixed(1)}" text-anchor="end" font-size="${fontSize}" font-family="var(--mono)" fill="${row.pinned ? 'var(--yellow)' : 'var(--text-dim)'}" class="svg-bit-label" onclick="event.stopPropagation(); showBitDetail('${row.label.replace(/'/g, "\\'")}');"><title>${(P ? (getSVTooltip(row.label, P) || '') : '').replace(/"/g, '&quot;') || 'Click for details'}</title>${row.label}</text>`;
   });
 
   const bg = opts.bg || 'var(--card)';
@@ -449,9 +459,3 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
     <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">${note}</div>
   </div>`;
 }
-
-// Build the SV/digital flags panel from whichever labels actually appear in the
-// resolved trip-cause chain (the same chain driving the sequence-diagram in the
-// banner) — usually SV/timer pairs, but generalizes to any element or the trip bit
-// itself, matching how SynchroWAVe shows exactly the points relevant to the trip.
-// Render one sequence-component consistency check (zero or negative) as an HTML block.

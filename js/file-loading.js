@@ -1,4 +1,4 @@
-// File input handling: reading files, ZIP bundle extraction, multi-event list management.
+
 
 let ALL_EVENTS = []; // Array of { parsed, analysis, fileName }
 let CURRENT_IDX = 0;
@@ -144,6 +144,8 @@ function processFiles(files) {
         : analyzeCEV(results[i].parsed, prevEvt);
     }
 
+    reconcileVnomAcrossEvents(results);
+
     ALL_EVENTS = results;
     CURRENT_IDX = 0;
 
@@ -228,4 +230,3 @@ function processFiles(files) {
     }),
   ]).then(finish);
 }
-

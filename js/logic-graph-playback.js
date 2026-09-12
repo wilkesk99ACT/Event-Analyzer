@@ -1,5 +1,6 @@
-// Logic-graph scrub/playback controls and fullscreen view.
 
+// Holds the currently-displayed chart's graph + params so the timeline can re-render it at any
+// time. Set by renderLocalLogicGraph.
 let LLG_CURRENT = null;
 
 // Rebuilds ONLY the inner SVG + boxes of the currently-shown chart, at whatever LLG_VIEW_SAMPLE_IDX
@@ -290,10 +291,3 @@ function stopLogicChartPlay() {
   if (LLG_PLAY_TIMER) { clearInterval(LLG_PLAY_TIMER); LLG_PLAY_TIMER = null; }
   document.querySelectorAll('.llgPlayBtn').forEach(b => { b.textContent = '▶'; });
 }
-
-// Builds an animated GIF stepping through the event's DISTINCT digital states, holding each
-// long enough to read (≈900ms). Uses a tiny self-contained GIF encoder (gif89a, per-frame local
-// palette) so it works offline with no library — the diagram is already just SVG/divs we can
-// rasterize the same way the PNG export does. Frames are the set of digital-sample indices where
-// something actually changed (plus the initial state and the final/trip state), so the GIF only
-// has as many frames as there are meaningful states.

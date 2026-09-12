@@ -1,5 +1,5 @@
-// App bootstrap: wires up the drop zone and file input.
 
+// File input handling
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const dropOverlay = document.getElementById('drop-overlay');

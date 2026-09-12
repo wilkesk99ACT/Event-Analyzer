@@ -1,5 +1,12 @@
-// Chart zoom/cursor state and the main timeline scrub/playback controls.
 
+// ══════════════════════════════════════════════════════════════════════
+// TIME-AXIS ZOOM/PAN — scroll to zoom, drag to pan, double-click to reset
+// ══════════════════════════════════════════════════════════════════════
+// CHART_ZOOM holds the current visible sample-index window per chart ('current'/'voltage'/
+// 'relevant'), or null for the full record. CHART_GEOM holds the pixel/margin/index geometry
+// from the MOST RECENT render of each chart, so the interaction handlers (registered once,
+// globally, below) can convert a mouse position back into a sample index without duplicating
+// layout constants. CHART_DRAG tracks an in-progress pan gesture.
 const CHART_ZOOM = {};
 const CHART_GEOM = {};
 let CHART_DRAG = null;
@@ -15,6 +22,19 @@ let PLAY_MARK_A = null, PLAY_MARK_B = null;
 // whatever bit is chosen); false shows the fuller, unpruned local logic graph — the same one
 // the per-bit tooltip popup uses — for that bit instead.
 let CHARTED_BIT = null;
+
+// ── USER-PINNED BITS ON THE SV / TRIP CHAIN FLAGS CHART ──────────────────────
+// The flags chart shows the bits the analysis resolved as the trip cause plus the small
+// "relevant to this trip" set. That is the right default, but it is a CONCLUSION — and checking a
+// conclusion means being able to plot a bit the analysis did NOT pick, precisely because you
+// suspect it matters. EXTRA_FLAG_BITS holds whatever the operator pinned, in the order pinned,
+// and survives zooming, cursor moves and playback (it is read fresh on every rebuild).
+// Deliberately NOT persisted across loading a different event: the bit names are file-specific
+// and a stale pin would silently render as a permanently-low row on the next record.
+let EXTRA_FLAG_BITS = [];
+// Set only for the duration of a GIF/PNG export, so the picker chrome (which is interactive and
+// meaningless in a still image) is left out of exported frames while the pinned ROWS stay in.
+let SVFLAGS_HIDE_PICKER = false;
 let CHARTED_FILTER_RELEVANT = true;
 // Captured by renderBanner each render — the plain sequence-diagram fallback used only when the
 // DEFAULT bit has no bakeable logic tree at all (mirrors the tool's original fallback).
@@ -109,9 +129,21 @@ function syncMainScrubber(idxFull) {
 // digitalSampleIdx and the analogSampleIdx it occurred at, so converting an analog index to the
 // digital state in effect at that moment is just "the last transition at or before this analog
 // index".
+// Analog and digital samples are both REGULAR streams (SAM/CYC_A and SAM/CYC_D), so converting
+// between the two index spaces is the plain rate ratio.
+//
+// These used to SNAP to the nearest digital transition instead. That is harmless for reading a
+// bit's state — nothing changes between transitions, by definition — but it is wrong for
+// anything continuous, and timer progress is exactly that: while a delay is running nothing else
+// changes, so there are no transitions to snap to, the mapped index froze, and the progress
+// fraction stalled mid-timer instead of advancing (observed on record 10895: the 27PP1 -> 27PP1T
+// fill sat at 28% across three consecutive cursor positions). The ratio is exact and continuous.
+// The old transition-walk is kept as a fallback for any file that doesn't declare both rates.
 function analogIdxToDigitalIdx(analogIdx) {
   const trans = (PARSED && PARSED.digitalTransitions) || [];
   if (!trans.length) return null;
+  const spcA = PARSED?.eventInfo?.samPerCycA, spcD = PARSED?.eventInfo?.samPerCycD;
+  if (spcA > 0 && spcD > 0) return Math.max(0, Math.round(analogIdx * spcD / spcA));
   let dIdx = 0;
   for (const t of trans) {
     if (t.analogSampleIdx <= analogIdx) dIdx = t.digitalSampleIdx; else break;
@@ -120,6 +152,8 @@ function analogIdxToDigitalIdx(analogIdx) {
 }
 function digitalIdxToAnalogIdx(digitalIdx) {
   const trans = (PARSED && PARSED.digitalTransitions) || [];
+  const spcA = PARSED?.eventInfo?.samPerCycA, spcD = PARSED?.eventInfo?.samPerCycD;
+  if (spcA > 0 && spcD > 0) return Math.max(0, Math.round(digitalIdx * spcA / spcD));
   let aIdx = 0;
   for (const t of trans) {
     if (t.digitalSampleIdx <= digitalIdx) aIdx = t.analogSampleIdx; else break;

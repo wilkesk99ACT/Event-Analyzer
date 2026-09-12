@@ -1,4 +1,9 @@
-// Logic-tree explanation panel: badges, protection/voltage tables, evidence blocks, charted-bit picker.
+// ════════════════════════════════════════════════════════════════════════════
+// UI RENDERING
+// ════════════════════════════════════════════════════════════════════════════
+
+let PARSED = null;
+let ANALYSIS = null;
 
 function badge(asserted, label) {
   const cls = asserted ? 'badge-red' : 'badge-green';
@@ -336,11 +341,55 @@ function buildLogicTreeSection(P, A) {
       const cx = xOf(node.child.depth) + LOGIC_BOX_W, cy = yOf(node.child.row) + LOGIC_BOX_H / 2;
       const ny = y + LOGIC_BOX_H / 2;
       const freqForDelay = (typeof PARSED !== 'undefined' && PARSED?.eventInfo?.freq) || 60;
-      const delayMs = Math.round((node.pickupDelay / freqForDelay) * 1000);
-      linesHTML += titledEdge(cx, cy, x, ny, node.value ? trueColor : falseColor, '2,3',
-        `${node.child.label} → ${node.label} (${node.pickupDelay} cyc / ${delayMs} ms pickup timer)`);
+      const childLabel = node.child.label || node.child.name;
+      // An SV timer carries its delay as a settings value in CYCLES. A protection element's timer
+      // carries the delay MEASURED from this record instead — deliberately, because element delay
+      // settings are expressed in cycles by some SEL families and in seconds by others, and the
+      // measured gap between the two bits needs no such assumption to be correct.
+      const measured = node.measuredMs != null;
+      const conv = (!measured && node.pickupDelay != null) ? svDelayMs(P, node.pickupDelay, freqForDelay) : null;
+      const delayMs = measured ? Math.round(node.measuredMs) : (conv ? Math.round(conv.ms) : null);
+      const settingNote = node.settingValue != null ? ` · setting ${node.settingLabel} = ${node.settingValue}` : '';
+      const edgeTitle = measured
+        ? `${childLabel} → ${node.label} — timer ran ${delayMs} ms in this record${settingNote}`
+        : `${childLabel} → ${node.label} — ${delayMs} ms pickup timer${conv && conv.assumed ? ' (setting units not confirmed by this record; read as cycles)' : ''}${settingNote}`;
+
+      // ── Timer progress ──────────────────────────────────────────────────────
+      // While the cursor sits inside the delay, fill the connector from the input end at the
+      // same real pace the timer ran — the identical treatment the local logic graph gives its
+      // timer edges, via the same shared measuredTimerPhase(), so scrubbing or playing back the
+      // event shows the timer counting rather than the output snapping from false to true. When
+      // the cursor is anywhere else (before it starts, after it completes, or in a record where
+      // it never completes) this falls through to the plain dashed connector exactly as before.
+      const phase = measuredTimerPhase(P, childLabel, node.label, logicViewDigitalIdx());
+      const msPerDigSample = 1000 / ((freqForDelay) * (P?.eventInfo?.samPerCycD || 4));
+      if (phase) {
+        const elapsedMs = Math.round(phase.elapsedSamples * msPerDigSample);
+        const totalMs = Math.round(phase.totalSamples * msPerDigSample);
+        const pct = Math.round(phase.frac * 100);
+        const running = phase.kind === 'pickup';
+        const bgCol = running ? falseColor : trueColor;
+        const fillCol = running ? trueColor : falseColor;
+        const px = cx + (x - cx) * phase.frac, py = cy + (ny - cy) * phase.frac;
+        const progTitle = `${childLabel} → ${node.label} — ${phase.kind} timer ${pct}% complete (${elapsedMs} of ${totalMs} ms)${settingNote}`;
+        linesHTML += titledEdge(cx, cy, x, ny, bgCol, '2,3', progTitle);
+        if (phase.frac > 0.01) linesHTML += titledEdge(cx, cy, px, py, fillCol, '', progTitle, 2.5);
+        // The gap between two adjacent boxes is narrow, so the badge shows the percentage only —
+        // the shortest string that still reads as "in progress". Elapsed and total ms are on hover,
+        // and the fill on the connector itself already carries the fraction visually.
+        const midXp = (cx + x) / 2 - 16;
+        boxesHTML += `<div class="logic-timer-label logic-timer-running" style="left:${midXp}px;top:${ny - 16}px;" title="${progTitle}">⏱ ${pct}%</div>`;
+        boxesHTML += `<div class="logic-box logic-sv-box logic-timer-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${prefix}${tt(node.label, P)}</div>`;
+        renderNode(node.child, node.label);
+        return;
+      }
+
+      linesHTML += titledEdge(cx, cy, x, ny, node.value ? trueColor : falseColor, '2,3', edgeTitle);
       const midX = (cx + x) / 2 - 16;
-      boxesHTML += `<div class="logic-timer-label" style="left:${midX}px;top:${ny - 16}px;" title="Pickup delay: ${node.pickupDelay} cyc (${delayMs} ms)">⏱ ${delayMs}ms</div>`;
+      const badgeTitle = measured
+        ? `Measured in this record: ${delayMs} ms${settingNote}`
+        : `${delayMs} ms${conv && conv.assumed ? ' — setting units not confirmed by this record; read as cycles' : ''}${settingNote}`;
+      boxesHTML += `<div class="logic-timer-label" style="left:${midX}px;top:${ny - 16}px;" title="${badgeTitle}">⏱ ${delayMs}ms${measured ? '' : '*'}</div>`;
       boxesHTML += `<div class="logic-box logic-sv-box logic-timer-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${prefix}${tt(node.label, P)}</div>`;
       renderNode(node.child, node.label);
       return;
@@ -587,6 +636,100 @@ function renderChartedLogicSlot() {
   slot.innerHTML = buildChartedLocalGraphHTML(label) ||
     `<div style="color:var(--text-dim);font-size:12px;padding:8px 2px;">Nothing to show for ${tt(label, PARSED)}.</div>`;
 }
+// ══════════════════════════════════════════════════════════════════════
+// SV / TRIP CHAIN FLAGS — "add a bit" picker
+// ══════════════════════════════════════════════════════════════════════
+// Mirrors the "Logic Bit Charted" picker's interaction (same searchable list from
+// getAllChartableBitLabels, same CSS) but multi-select, since the whole point is comparing a
+// pinned bit's timing against the resolved chain already on the chart.
+function svflagsPickerHTML(P, A) {
+  if (SVFLAGS_HIDE_PICKER || !P) return '';
+  return `<div class="svflags-bit-bar" id="svflagsBitBar">
+    <div class="timing-chip charted-bit-chip svflags-add-chip">
+      <button type="button" class="charted-bit-btn" onclick="event.stopPropagation(); toggleFlagBitDropdown();">+ Add bit ▾</button>
+      <div class="charted-bit-dropdown" id="flagBitDropdown" style="display:none;">
+        <input type="text" class="charted-bit-search" id="flagBitSearch" placeholder="Search bits…" oninput="renderFlagBitOptions(this.value)">
+        <div class="charted-bit-list" id="flagBitList"></div>
+      </div>
+    </div><span class="svflags-pins" id="svflagsPins">${svflagsPinsHTML()}</span>
+  </div>`;
+}
+// Just the pinned-bit chips. Kept separate from the bar so a pick can refresh them WITHOUT
+// replacing the "+ Add bit" chip — the open dropdown is a child of that chip, and rebuilding it
+// mid-selection closed the panel after every single pick.
+function svflagsPinsHTML() {
+  const chips = EXTRA_FLAG_BITS.map(l =>
+    `<span class="svflags-pin" title="Click to remove ${l} from the chart">${l}<button type="button" class="svflags-pin-x" onclick="event.stopPropagation(); removeFlagBit('${l.replace(/'/g, "\\'")}');">&times;</button></span>`
+  ).join('');
+  const clearBtn = EXTRA_FLAG_BITS.length > 1
+    ? `<button type="button" class="svflags-clear" onclick="event.stopPropagation(); clearFlagBits();">clear all</button>` : '';
+  return chips + clearBtn;
+}
+function toggleFlagBitDropdown() {
+  const dd = document.getElementById('flagBitDropdown');
+  if (!dd) return;
+  if (dd.style.display !== 'none') { closePickerDropdown(dd); return; }
+  renderFlagBitOptions('');
+  openPickerDropdown(dd);
+  const search = document.getElementById('flagBitSearch');
+  if (search) { search.value = ''; search.focus(); }
+}
+function renderFlagBitOptions(filterText) {
+  const list = document.getElementById('flagBitList');
+  if (!list || !PARSED) return;
+  const all = getAllChartableBitLabels(PARSED, ANALYSIS);
+  const q = (filterText || '').trim().toUpperCase();
+  const filtered = q ? all.filter(l => l.toUpperCase().includes(q)) : all;
+  // Bits already on the chart by way of the resolved cause chain are shown but marked, so it is
+  // obvious why picking one does nothing visible rather than looking like the click was dropped.
+  const already = new Set(svflagsBaseLabels(PARSED, ANALYSIS));
+  list.innerHTML = filtered.slice(0, 300).map(l => {
+    const pinned = EXTRA_FLAG_BITS.includes(l);
+    const auto = !pinned && already.has(l);
+    const note = auto ? ` <span class="svflags-opt-note">already shown</span>` : '';
+    // stopPropagation matters here specifically: picking an option re-renders this list, which
+    // detaches the clicked node — by the time the event reaches the document-level
+    // outside-click handler, `e.target.closest('.svflags-add-chip')` is null on the orphan and
+    // the panel would close after every single pick, defeating the multi-select.
+    return `<div class="charted-bit-option ${pinned ? 'pinned' : ''} ${auto ? 'dimmed' : ''}" onclick="event.stopPropagation(); toggleFlagBit('${l.replace(/'/g, "\\'")}')">${pinned ? '&#10003; ' : ''}${l}${note}</div>`;
+  }).join('') || `<div class="charted-bit-option-empty">No matching bits</div>`;
+}
+function toggleFlagBit(label) {
+  const i = EXTRA_FLAG_BITS.indexOf(label);
+  if (i >= 0) EXTRA_FLAG_BITS.splice(i, 1); else EXTRA_FLAG_BITS.push(label);
+  refreshSVFlagsChart();
+  renderFlagBitOptions(document.getElementById('flagBitSearch')?.value || '');
+}
+function removeFlagBit(label) {
+  const i = EXTRA_FLAG_BITS.indexOf(label);
+  if (i >= 0) { EXTRA_FLAG_BITS.splice(i, 1); refreshSVFlagsChart(); }
+}
+function clearFlagBits() {
+  if (!EXTRA_FLAG_BITS.length) return;
+  EXTRA_FLAG_BITS = [];
+  refreshSVFlagsChart();
+}
+// Rebuilds the flags chart in place. The SVG's own height changes with the row count, so this
+// swaps the slot's CONTENTS (never the slot element itself — wireChartInteractivity's wheel and
+// mousedown listeners are bound to that element and are registered once per load) and refreshes
+// the sibling picker bar and legend, which live outside the slot.
+function refreshSVFlagsChart() {
+  if (!PARSED || !ANALYSIS) return;
+  const slot = document.getElementById('chartSlot-svflags');
+  const html = buildSVFlagsChart(PARSED, ANALYSIS, true);
+  if (!slot || !html) { if (typeof renderBanner === 'function') renderBanner(); return; }
+  const svgM = html.match(/<div class="chart-svg-slot"[^>]*>([\s\S]*?)<\/div>\s*(?=<div class="svflags-bit-bar"|<div class="sv-legend")/);
+  if (svgM) slot.innerHTML = svgM[1];
+  // Chips only — never the surrounding bar, so the dropdown stays open across picks.
+  const pins = document.getElementById('svflagsPins');
+  if (pins) pins.innerHTML = svflagsPinsHTML();
+  const legM = html.match(/<div class="sv-legend">[\s\S]*<\/div>/);
+  const leg = slot.parentElement && slot.parentElement.querySelector('.sv-legend');
+  if (leg && legM) leg.outerHTML = legM[0];
+  // Adding or removing a row changes the chart's height, which moves the anchor button under it.
+  positionPickerDropdown(OPEN_PICKER_DD);
+}
+
 function renderChartedBitChipHTML(P, A) {
   if (!P || !A) return '';
   const current = currentChartedBitLabel();
@@ -603,16 +746,67 @@ function renderChartedBitChipHTML(P, A) {
     </div>
   </div>`;
 }
+// ── BIT-PICKER DROPDOWN PLACEMENT ────────────────────────────────────────────
+// Both pickers live inside `.trip-banner`, which sets `overflow: hidden` to clip its own
+// decorative corner glow. That clip also cut the dropdown off at the banner's bottom edge — it
+// read as the tab bar below covering it, but the tab bar was never involved. A fixed-position
+// element is laid out against the viewport, not the banner, so it escapes the clip entirely;
+// the trade is that its coordinates now have to be computed and kept in sync by hand.
+//
+// While positioning, also: flip above the anchor when there isn't room below, clamp horizontally
+// to the viewport, and cap the scrollable list to whatever vertical space actually remains — so
+// the search box and the list are always both reachable no matter where on the page the chart is.
+let OPEN_PICKER_DD = null;
+
+function positionPickerDropdown(dd) {
+  if (!dd || dd.style.display === 'none') return;
+  const anchor = dd.parentElement && dd.parentElement.querySelector('.charted-bit-btn');
+  if (!anchor) return;
+  const GAP = 6, EDGE = 8, LIST_MAX = 220, LIST_MIN = 96;
+  const list = dd.querySelector('.charted-bit-list');
+  const r = anchor.getBoundingClientRect();
+  dd.classList.add('floating');
+  // Measure from a known origin before deciding where it goes.
+  dd.style.left = '0px'; dd.style.top = '0px';
+  if (list) list.style.maxHeight = LIST_MAX + 'px';
+  const chromeH = dd.offsetHeight - (list ? list.offsetHeight : 0);   // search box, filter row, padding
+  const roomBelow = window.innerHeight - r.bottom - GAP - EDGE;
+  const roomAbove = r.top - GAP - EDGE;
+  const goUp = roomBelow < chromeH + LIST_MIN && roomAbove > roomBelow;
+  const room = Math.max(goUp ? roomAbove : roomBelow, chromeH + LIST_MIN);
+  if (list) list.style.maxHeight = Math.max(LIST_MIN, Math.min(LIST_MAX, room - chromeH)) + 'px';
+  const h = dd.offsetHeight, w = dd.offsetWidth;
+  dd.style.left = Math.round(Math.min(Math.max(EDGE, r.left), Math.max(EDGE, window.innerWidth - w - EDGE))) + 'px';
+  dd.style.top = Math.round(goUp ? Math.max(EDGE, r.top - GAP - h) : r.bottom + GAP) + 'px';
+}
+function openPickerDropdown(dd) {
+  if (!dd) return;
+  if (OPEN_PICKER_DD && OPEN_PICKER_DD !== dd) closePickerDropdown(OPEN_PICKER_DD);
+  dd.style.display = 'block';
+  OPEN_PICKER_DD = dd;
+  positionPickerDropdown(dd);
+}
+function closePickerDropdown(dd) {
+  if (!dd) return;
+  dd.style.display = 'none';
+  dd.classList.remove('floating');
+  dd.style.left = ''; dd.style.top = '';
+  const list = dd.querySelector('.charted-bit-list');
+  if (list) list.style.maxHeight = '';
+  if (OPEN_PICKER_DD === dd) OPEN_PICKER_DD = null;
+}
+// Capture-phase so scrolling any inner container (not just the page) re-anchors it too.
+window.addEventListener('scroll', () => positionPickerDropdown(OPEN_PICKER_DD), true);
+window.addEventListener('resize', () => positionPickerDropdown(OPEN_PICKER_DD));
+
 function toggleChartedBitDropdown() {
   const dd = document.getElementById('chartedBitDropdown');
   if (!dd) return;
-  const opening = dd.style.display === 'none';
-  dd.style.display = opening ? 'block' : 'none';
-  if (opening) {
-    renderChartedBitOptions('');
-    const search = document.getElementById('chartedBitSearch');
-    if (search) { search.value = ''; search.focus(); }
-  }
+  if (dd.style.display !== 'none') { closePickerDropdown(dd); return; }
+  renderChartedBitOptions('');
+  openPickerDropdown(dd);
+  const search = document.getElementById('chartedBitSearch');
+  if (search) { search.value = ''; search.focus(); }
 }
 function renderChartedBitOptions(filterText) {
   const list = document.getElementById('chartedBitList');
@@ -627,8 +821,7 @@ function renderChartedBitOptions(filterText) {
 }
 function selectChartedBit(label) {
   CHARTED_BIT = label;
-  const dd = document.getElementById('chartedBitDropdown');
-  if (dd) dd.style.display = 'none';
+  closePickerDropdown(document.getElementById('chartedBitDropdown'));
   const btn = document.querySelector('#chartedBitChip .charted-bit-btn');
   if (btn) btn.textContent = label + ' ▾';
   renderChartedLogicSlot();
@@ -637,11 +830,14 @@ function setChartedFilterRelevant(checked) {
   CHARTED_FILTER_RELEVANT = !!checked;
   renderChartedLogicSlot();
 }
-// Close the bit-picker dropdown when clicking anywhere outside it.
+// Close either bit-picker dropdown when clicking anywhere outside it. Both are now
+// fixed-positioned and so are no longer DOM-contained by their chip on screen, but they are
+// still descendants of it in the tree, so containment tests remain the right check.
 document.addEventListener('click', (e) => {
+  const fdd = document.getElementById('flagBitDropdown');
+  if (fdd && fdd.style.display !== 'none' && !(e.target.closest && e.target.closest('.svflags-add-chip'))) closePickerDropdown(fdd);
   const dd = document.getElementById('chartedBitDropdown');
   if (!dd || dd.style.display === 'none') return;
   const chip = document.getElementById('chartedBitChip');
-  if (chip && !chip.contains(e.target)) dd.style.display = 'none';
+  if (chip && !chip.contains(e.target)) closePickerDropdown(dd);
 });
-

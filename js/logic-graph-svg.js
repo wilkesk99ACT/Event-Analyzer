@@ -1,4 +1,3 @@
-// SVG rendering of the local logic graph: nodes, edges, legend, toolbar.
 
 function currentBitState(label) {
   if (!PARSED) return null;
@@ -420,32 +419,13 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
   function timedPhaseFor(e) {
     if (timedViewIdx == null) return null;
     if (e.priority) {
-      const base = llgDisplayLabel(e.from), target = llgDisplayLabel(e.to);
-      const baseSt = currentBitState(base), targetSt = currentBitState(target);
-      if (!baseSt || !targetSt) return null;
-      if (baseSt.state && !targetSt.state) {
-        // Pickup in progress: base asserted, timed output hasn't caught up yet.
-        const tBaseOn = lastTransitionTo(base, timedViewIdx, true);
-        if (tBaseOn == null) return null; // was already asserted at record start — no start point to animate from
-        const tBaseOffAfter = nextTransitionTo(base, tBaseOn, false);
-        const tTargetOnAfter = nextTransitionTo(target, tBaseOn, true);
-        if (tTargetOnAfter == null) return null; // never actually completes in this record
-        if (tBaseOffAfter != null && tBaseOffAfter < tTargetOnAfter) return null; // reset before pickup completed — indeterminate, don't guess
-        const frac = Math.max(0, Math.min(1, (timedViewIdx - tBaseOn) / Math.max(1, tTargetOnAfter - tBaseOn)));
-        return { frac, kind: 'pickup', bgColor: 'var(--text-muted)', overlayColor: 'var(--red)' };
-      }
-      if (!baseSt.state && targetSt.state) {
-        // Dropout in progress: base has released, timed output hasn't dropped out yet.
-        const tBaseOff = lastTransitionTo(base, timedViewIdx, false);
-        if (tBaseOff == null) return null;
-        const tBaseOnAfter = nextTransitionTo(base, tBaseOff, true);
-        const tTargetOffAfter = nextTransitionTo(target, tBaseOff, false);
-        if (tTargetOffAfter == null) return null;
-        if (tBaseOnAfter != null && tBaseOnAfter < tTargetOffAfter) return null; // re-picked-up before dropout completed
-        const frac = Math.max(0, Math.min(1, (timedViewIdx - tBaseOff) / Math.max(1, tTargetOffAfter - tBaseOff)));
-        return { frac, kind: 'dropout', bgColor: 'var(--red)', overlayColor: 'var(--text-muted)' };
-      }
-      return null; // stable — both already agree, nothing to animate
+      // Delegates to the shared measuredTimerPhase() so this chart and the main-page trip tree
+      // compute identical progress; only the colour choice differs between the two renderers.
+      const ph = measuredTimerPhase(P, llgDisplayLabel(e.from), llgDisplayLabel(e.to), timedViewIdx);
+      if (!ph) return null;
+      return ph.kind === 'pickup'
+        ? Object.assign({}, ph, { bgColor: 'var(--text-muted)', overlayColor: 'var(--red)' })
+        : Object.assign({}, ph, { bgColor: 'var(--red)', overlayColor: 'var(--text-muted)' });
     }
     return svOwnDelayPhaseFor(e);
   }
@@ -830,6 +810,3 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
     </div>
   </div>`;
 }
-
-// Holds the currently-displayed chart's graph + params so the timeline can re-render it at any
-// time. Set by renderLocalLogicGraph.

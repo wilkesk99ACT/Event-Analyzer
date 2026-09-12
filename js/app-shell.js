@@ -1,4 +1,3 @@
-// Tab bar and main content router for the analysis screen.
 
 function renderTabs() {
   if (PARSED.format === 'form6') { renderForm6Tabs(); return; }
@@ -8,6 +7,7 @@ function renderTabs() {
     { id: 'currents', label: 'Currents', icon: '〰️' },
     { id: 'protection', label: 'Protection', icon: '🛡️' },
     { id: 'diagnostics', label: 'Diagnostics', icon: '🩺' },
+    { id: 'reclose', label: 'Reclosing', icon: '🔄' },
     { id: 'sv', label: 'SV Logic', icon: '🔗' },
     { id: 'freq', label: 'Frequency', icon: '📊' },
     { id: 'equations', label: 'Equations', icon: '📋' },
@@ -171,6 +171,11 @@ function renderContent() {
     ${buildConsistencyChecksCard(P, A)}
   </div>`;
 
+  // ── Reclosing ──
+  html += `<div class="tab-panel" id="panel-reclose">
+    ${buildRecloseTabHTML(P, A)}
+  </div>`;
+
   // ── SV Logic ──
   html += `<div class="tab-panel" id="panel-sv">
     <div class="tab-legend">
@@ -274,36 +279,3 @@ function renderContent() {
 
   document.getElementById('contentArea').innerHTML = html;
 }
-
-
-// ════════════════════════════════════════════════════════════════════════════
-// APP CONTROLLER
-// ════════════════════════════════════════════════════════════════════════════
-
-// ════════════════════════════════════════════════════════════════════════════
-// MULTI-FILE APP CONTROLLER
-// ════════════════════════════════════════════════════════════════════════════
-
-// ══════════════════════════════════════════════════════════════════════
-// EATON FORM 6 (ProView) — COMTRADE + settings.txt SUPPORT
-// ══════════════════════════════════════════════════════════════════════
-// Unlike SEL's self-contained CEV (waveforms + settings in one file), a Form 6 event is a
-// bundle of THREE files: a standard IEEE COMTRADE ASCII pair (.cfg + .dat) holding the
-// oscillography, plus a plain tab-delimited settings.txt holding the protection settings —
-// confirmed paired to this specific event (ProView itself refuses to open the .evt without a
-// matching settings.txt), not a generic "whenever exported" settings dump. The .evt itself is
-// a proprietary binary blob this tool cannot read beyond one plain-text summary line, and isn't
-// needed here — the COMTRADE+settings.txt pair is the analyzable record.
-//
-// NOTE ON SCOPE: this is a first pass. Two things are deliberately NOT implemented pending
-// more information:
-//  1. Inverse-time operate-time math for TCC curves — the numeric "Curve" index in settings.txt
-//     (e.g. TCC1GCurve=5) references a named Eaton/Cooper curve family, but no verified
-//     curve-number-to-formula table was available, so only pickup/measured/asserted is shown,
-//     no time-to-trip estimate.
-//  2. Active setting-group detection — settings.txt values are comma-separated per group
-//     (Normal, Alt1-5), and which one was active at event time isn't derivable from the wired
-//     COMTRADE digital channels in the files seen so far. Group 0 (Normal) is used by default
-//     and this assumption is surfaced in the UI rather than silently applied.
-
-// ── COMTRADE .cfg parser (IEEE C37.111 ASCII, 1991/1999 revisions) ──

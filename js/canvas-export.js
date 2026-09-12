@@ -1,5 +1,7 @@
-// Renders SVG/DOM logic-graph nodes onto a canvas, for PNG export.
 
+// Resolves a CSS value that might be a var(--x) reference (as used throughout this tool's
+// generated SVG) to its actual computed value — needed because canvas drawing calls (fillStyle,
+// strokeStyle, etc.) don't understand var() themselves.
 function resolveCssColor(v) {
   if (!v) return v;
   v = v.trim();
@@ -236,5 +238,3 @@ function exportNodeAsPNG(node, filename) {
     alert('Could not generate the image in this browser — try its built-in screenshot tool instead.');
   }
 }
-
-

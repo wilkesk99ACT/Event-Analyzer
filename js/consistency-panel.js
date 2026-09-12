@@ -1,5 +1,9 @@
-// Consistency-check cards: breaker close attempts, investigation panel, warning banners.
 
+// Build the SV/digital flags panel from whichever labels actually appear in the
+// resolved trip-cause chain (the same chain driving the sequence-diagram in the
+// banner) — usually SV/timer pairs, but generalizes to any element or the trip bit
+// itself, matching how SynchroWAVe shows exactly the points relevant to the trip.
+// Render one sequence-component consistency check (zero or negative) as an HTML block.
 function renderConsistencyCheckBlock(check, opts) {
   if (!check) {
     return `<div style="padding:12px;color:var(--text-muted);font-size:12px;">No usable current channel found for this comparison in this file.</div>`;
@@ -195,24 +199,3 @@ function buildConsistencyWarningBanner(P, A) {
     ${flaggedChecks.map(c => renderConsistencyCheckBlock(c, { compact: true })).join('')}
   </div>`;
 }
-
-// Shared definition of "bits relevant to this trip", used by both the SV/Trip Chain Flags
-// chart and the Event Timeline's trip-only filter so the two stay consistent: the resolved
-// cause chain itself, plus a small set of context bits (close command, Event Report trigger,
-// breaker status) when they're actually present in this file and change state somewhere in
-// the record.
-// Produces a clean, human-oriented description for an SV logic/timer variable, in priority
-// order:
-//  1. "Blinker" — a self-oscillating SV whose own equation is just "NOT <itself>T" (a classic
-//     free-running flasher used to blink a target LED) has no diagnostic content at all; every
-//     one of its toggles is just the oscillator running, not something that happened. Also
-//     caught by an explicit "BLINKER" in the site's own comment, since that's a stronger and
-//     more direct signal than the structural pattern when the two might disagree.
-//  2. The site's own equation comment, when present — written by whoever configured this
-//     relay, so it's taken as authoritative over anything this tool could infer.
-//  3. When there's no comment AND the equation is really just a thin wrapper around ONE
-//     underlying protection element (optionally with one simple supervisory AND, e.g.
-//     "59G1T AND 52A"), describe using THAT element's own name — "SV18T timer expired" becomes
-//     "Timer for <the element 59G1 actually is> expired" instead of a bare SV number that means
-//     nothing without opening the settings file.
-//  4. A bare fallback for anything else.

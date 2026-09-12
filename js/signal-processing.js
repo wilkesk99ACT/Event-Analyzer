@@ -1,8 +1,15 @@
-// RMS/phasor/sequence-component math and per-instant value lookups used by the charts and consistency checks.
 
 function computeRmsMagnitude(samples, windowSize, scale = 1) {
   const n = samples.length;
   const out = new Array(n).fill(0);
+  if (isFilteredQuarterCycle(windowSize)) {
+    for (let i = 0; i < n; i++) {
+      const cur = samples[i] || 0;
+      const prev = i > 0 ? (samples[i - 1] || 0) : 0;
+      out[i] = scale * Math.hypot(cur, prev);
+    }
+    return out;
+  }
   const sq = [];
   let sumSq = 0;
   for (let i = 0; i < n; i++) {
@@ -38,6 +45,20 @@ function computeRmsMagnitude(samples, windowSize, scale = 1) {
 function computeFundamentalPhasors(samples, N, scale = 1) {
   const n = samples.length;
   const re = new Array(n).fill(0), im = new Array(n).fill(0);
+  // Filtered quarter-cycle data (see isFilteredQuarterCycle): the phasor is available exactly,
+  // with no DFT window at all. The sign convention below matches the DFT branch that follows —
+  // re = |X|*cos(theta_n), im = |X|*sin(theta_n), |X| in RMS — so every derived quantity
+  // (positive/negative/zero sequence, phase-to-phase) inherits the fix unchanged.
+  // Convention checked on the pre-fault window of SEL-751 record 10824: a balanced ABC-rotation
+  // record yields V2/V1 = 0.2% and 3V0 ~ 1 V, and 3I0 derived from IA/IB/IC lands on 950.0 A
+  // against the relay's separately measured IG channel of 950.0 A.
+  if (isFilteredQuarterCycle(N)) {
+    for (let i = 0; i < n; i++) {
+      re[i] = scale * (samples[i] || 0);
+      im[i] = scale * (i > 0 ? (samples[i - 1] || 0) : 0);
+    }
+    return { re, im };
+  }
   const cosT = new Array(N), sinT = new Array(N);
   for (let k = 0; k < N; k++) {
     cosT[k] = Math.cos(2 * Math.PI * k / N);
@@ -674,14 +695,3 @@ function detectChannelUnit(P, baseNames, fallback) {
   }
   return fallback;
 }
-
-// Render a dark-themed, SynchroWAVe-style multi-trace SVG chart.
-// traces: [{label, color, values:number[]}]   (all same length)
-// opts: { msPerSample, yUnit, forceZeroBaseline, triggerIdx, tripIdx, height, width,
-//         margin{Left,Right,Top,Bottom}, numHGrid, numVGrid, compact }
-// IMPORTANT on sizing: SVG text/stroke sizes are defined in viewBox units, which scale
-// with the ratio of the rendered container width to the viewBox width. A chart built at
-// viewBox width 900 and then squeezed into a ~320px sidebar box would shrink all its text
-// by the same ~0.35 ratio, making 10px labels render at an illegible ~3.5px. So `width`
-// must be passed close to the actual rendered pixel width for any non-full-size usage
-// (e.g. the compact banner charts use a ~320-wide viewBox to match their ~320px box).

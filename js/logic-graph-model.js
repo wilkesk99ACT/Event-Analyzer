@@ -1,5 +1,24 @@
-// SELogic equation parsing/evaluation and the local logic-graph data model.
 
+// Shared definition of "bits relevant to this trip", used by both the SV/Trip Chain Flags
+// chart and the Event Timeline's trip-only filter so the two stay consistent: the resolved
+// cause chain itself, plus a small set of context bits (close command, Event Report trigger,
+// breaker status) when they're actually present in this file and change state somewhere in
+// the record.
+// Produces a clean, human-oriented description for an SV logic/timer variable, in priority
+// order:
+//  1. "Blinker" — a self-oscillating SV whose own equation is just "NOT <itself>T" (a classic
+//     free-running flasher used to blink a target LED) has no diagnostic content at all; every
+//     one of its toggles is just the oscillator running, not something that happened. Also
+//     caught by an explicit "BLINKER" in the site's own comment, since that's a stronger and
+//     more direct signal than the structural pattern when the two might disagree.
+//  2. The site's own equation comment, when present — written by whoever configured this
+//     relay, so it's taken as authoritative over anything this tool could infer.
+//  3. When there's no comment AND the equation is really just a thin wrapper around ONE
+//     underlying protection element (optionally with one simple supervisory AND, e.g.
+//     "59G1T AND 52A"), describe using THAT element's own name — "SV18T timer expired" becomes
+//     "Timer for <the element 59G1 actually is> expired" instead of a bare SV number that means
+//     nothing without opening the settings file.
+//  4. A bare fallback for anything else.
 function describeSVLogic(sv) {
   const eq = sv.equation.split('#')[0].trim();
   const comment = sv.equation.includes('#') ? sv.equation.split('#')[1].trim() : '';
@@ -649,7 +668,3 @@ function buildLocalLogicGraph(P, label, maxForwardCols, maxBackwardCols, scoped)
   const finalGraph = { center: label, backward, forward, edges: dedupedEdges, andGroupNodes, subGroupNodes };
   return finalGraph;
 }
-
-// A duplicated fan-out leaf carries a synthetic id like "52A\u0001dup3" so multiple copies stay
-// distinct nodes; everywhere a node's DISPLAY label or true-state is needed, this recovers the
-// original bit name. Harmless on ordinary ids (returns them unchanged).

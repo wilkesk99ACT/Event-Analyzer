@@ -1,5 +1,14 @@
-// SVG magnitude (current/voltage) chart renderer.
 
+// Render a dark-themed, SynchroWAVe-style multi-trace SVG chart.
+// traces: [{label, color, values:number[]}]   (all same length)
+// opts: { msPerSample, yUnit, forceZeroBaseline, triggerIdx, tripIdx, height, width,
+//         margin{Left,Right,Top,Bottom}, numHGrid, numVGrid, compact }
+// IMPORTANT on sizing: SVG text/stroke sizes are defined in viewBox units, which scale
+// with the ratio of the rendered container width to the viewBox width. A chart built at
+// viewBox width 900 and then squeezed into a ~320px sidebar box would shrink all its text
+// by the same ~0.35 ratio, making 10px labels render at an illegible ~3.5px. So `width`
+// must be passed close to the actual rendered pixel width for any non-full-size usage
+// (e.g. the compact banner charts use a ~320-wide viewBox to match their ~320px box).
 function renderMagnitudeChartSVG(traces, opts) {
   const n = traces[0]?.values.length || 0;
   if (!n) return `<div style="color:var(--text-muted);font-size:12px;padding:16px;">No waveform data available for this event.</div>`;
@@ -246,12 +255,3 @@ window.addEventListener('resize', () => {
     ZOOM_KINDS.forEach(k => rerenderZoomChart(k));
   }, 150);
 });
-
-// ══════════════════════════════════════════════════════════════════════
-// TIME-AXIS ZOOM/PAN — scroll to zoom, drag to pan, double-click to reset
-// ══════════════════════════════════════════════════════════════════════
-// CHART_ZOOM holds the current visible sample-index window per chart ('current'/'voltage'/
-// 'relevant'), or null for the full record. CHART_GEOM holds the pixel/margin/index geometry
-// from the MOST RECENT render of each chart, so the interaction handlers (registered once,
-// globally, below) can convert a mouse position back into a sample index without duplicating
-// layout constants. CHART_DRAG tracks an in-progress pan gesture.

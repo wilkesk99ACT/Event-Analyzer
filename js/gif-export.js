@@ -1,5 +1,10 @@
-// Animated GIF export of the logic graph, plus the hand-rolled GIF/LZW encoder.
 
+// Builds an animated GIF stepping through the event's DISTINCT digital states, holding each
+// long enough to read (≈900ms). Uses a tiny self-contained GIF encoder (gif89a, per-frame local
+// palette) so it works offline with no library — the diagram is already just SVG/divs we can
+// rasterize the same way the PNG export does. Frames are the set of digital-sample indices where
+// something actually changed (plus the initial state and the final/trip state), so the GIF only
+// has as many frames as there are meaningful states.
 async function downloadLogicChartGIF() {
   if (!LLG_CURRENT || !PARSED) return;
   const origLabel = 'GIF';
@@ -301,7 +306,3 @@ function downloadLogicChart() {
     document.body.removeChild(container);
   }
 }
-
-// Resolves a CSS value that might be a var(--x) reference (as used throughout this tool's
-// generated SVG) to its actual computed value — needed because canvas drawing calls (fillStyle,
-// strokeStyle, etc.) don't understand var() themselves.

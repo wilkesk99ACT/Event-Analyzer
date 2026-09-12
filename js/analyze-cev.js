@@ -1,4 +1,3 @@
-// Core trip-cause analysis engine. Walks the SELogic tree to explain why each protection bit asserted.
 
 function analyzeCEV(P, prevEvent) {
   // prevEvent: optional { parsed, analysis } from the chronologically prior event
@@ -57,8 +56,8 @@ function analyzeCEV(P, prevEvent) {
 
     A.voltages[term] = {};
     for (const [ph, key] of Object.entries(phases)) {
-      const pfRaw = computeRMS(preFault, key, MAGS);
-      const fRaw = computeRMS(faultData, key, MAGS);
+      const pfRaw = computeRMS(preFault, key, MAGS, P.eventInfo.samPerCycA);
+      const fRaw = computeRMS(faultData, key, MAGS, P.eventInfo.samPerCycA);
       const pf = toKvSec(pfRaw, ptr), f = toKvSec(fRaw, ptr);
       A.voltages[term][ph] = {
         preFault: pf,
@@ -97,6 +96,16 @@ function analyzeCEV(P, prevEvent) {
       bc: computePhaseDiffMagnitude(sB, sC, cyc, MAGS),
       ca: computePhaseDiffMagnitude(sC, sA, cyc, MAGS),
     };
+    // The 651R exposes a separate relay bit per phase (27YA1, 27YB1, 27YC1), so its rows compare
+    // one phase each. The 751 exposes ONE bit per level (27P1) that answers for all three, so its
+    // rows need the worst phase: the lowest for an undervoltage element, the highest for an
+    // overvoltage one. Same for the phase-to-phase trio.
+    const v = seriesV[term];
+    const worst = (keys, pick) => v[keys[0]].map((_, i) => pick(v[keys[0]][i] || 0, v[keys[1]][i] || 0, v[keys[2]][i] || 0));
+    v.minPhase = worst(['A', 'B', 'C'], Math.min);
+    v.maxPhase = worst(['A', 'B', 'C'], Math.max);
+    v.minPP = worst(['ab', 'bc', 'ca'], Math.min);
+    v.maxPP = worst(['ab', 'bc', 'ca'], Math.max);
   });
 
   // Everything evalOcRowAtIdx/evalVoltRowAtIdx (defined at top level, outside analyzeCEV) need
@@ -125,8 +134,8 @@ function analyzeCEV(P, prevEvent) {
   // Current analysis
   A.currents = {};
   for (const ch of ['IA', 'IB', 'IC', 'IG', 'IN']) {
-    const pfRMS = computeRMS(preFault, ch, MAGS);
-    const fRMS = computeRMS(faultData, ch, MAGS);
+    const pfRMS = computeRMS(preFault, ch, MAGS, P.eventInfo.samPerCycA);
+    const fRMS = computeRMS(faultData, ch, MAGS, P.eventInfo.samPerCycA);
     // Same primary/secondary correction as the protection table: when the channel is already
     // primary-referred, the raw figure IS the primary amps and the secondary figure is the one
     // that has to be derived (previously both were computed as if the channel were secondary,
@@ -158,9 +167,9 @@ function analyzeCEV(P, prevEvent) {
   });
 
   // Inverse-time families — 51P, 51G1, 51G2, 51Q, 51N1, 51N2.
-  const timeLabel = { '51P': 'Phase', '51G1': 'Ground Lvl1', '51G2': 'Ground Lvl2', '51Q': 'Neg-Seq', '51N1': 'Neutral Lvl1', '51N2': 'Neutral Lvl2' };
-  const timeSeriesKey = { '51P': 'maxPhaseI', '51G1': 'groundI', '51G2': 'groundI', '51Q': 'negSeqI', '51N1': 'neutralI', '51N2': 'neutralI' };
-  ['51P', '51G1', '51G2', '51Q', '51N1', '51N2'].forEach(fam => {
+  const timeLabel = { '51P': 'Phase', '51P1': 'Phase Lvl1', '51P2': 'Phase Lvl2', '51G1': 'Ground Lvl1', '51G2': 'Ground Lvl2', '51Q': 'Neg-Seq', '51N1': 'Neutral Lvl1', '51N2': 'Neutral Lvl2' };
+  const timeSeriesKey = { '51P': 'maxPhaseI', '51P1': 'maxPhaseI', '51P2': 'maxPhaseI', '51G1': 'groundI', '51G2': 'groundI', '51Q': 'negSeqI', '51N1': 'neutralI', '51N2': 'neutralI' };
+  ['51P', '51P1', '51P2', '51G1', '51G2', '51Q', '51N1', '51N2'].forEach(fam => {
     const p = OC[`${fam}JP`];
     if (p) addOCRow(fam, `${timeLabel[fam]} Time OC (${OC[`${fam}JC`] || 'U1'})`, p, OC[`${fam}JTD`] || 1, 'td', timeSeriesKey[fam], OC[`${fam}JC`] || 'U1', OC[`${fam}JTD`] || 1, OC[`${fam}TC`], '51');
   });
@@ -203,6 +212,33 @@ function analyzeCEV(P, prevEvent) {
       if (!pickup) return;
       A.voltageRows.push({ element: elName, type: 'OV', typeLabel, term: T, pickup, kind });
     });
+  });
+
+  // SEL-751 rows. Named exactly as the relay's own bits (27P1, 59G1, 59Q1 …) so a row lines up
+  // with what the digital word and the flags chart call the same element. Each is skipped unless
+  // this file actually configures it, so 651R files add nothing here.
+  [
+    ['27P1P', 'UV', 'minPhase', '27P1', 'Undervoltage Lvl1 (lowest phase)'],
+    ['27P2P', 'UV', 'minPhase', '27P2', 'Undervoltage Lvl2 (lowest phase)'],
+    ['27P3P', 'UV', 'minPhase', '27P3', 'Undervoltage Lvl3 (lowest phase)'],
+    ['27P4P', 'UV', 'minPhase', '27P4', 'Undervoltage Lvl4 (lowest phase)'],
+    ['59P1P', 'OV', 'maxPhase', '59P1', 'Overvoltage Lvl1 (highest phase)'],
+    ['59P2P', 'OV', 'maxPhase', '59P2', 'Overvoltage Lvl2 (highest phase)'],
+    ['59P3P', 'OV', 'maxPhase', '59P3', 'Overvoltage Lvl3 (highest phase)'],
+    ['59P4P', 'OV', 'maxPhase', '59P4', 'Overvoltage Lvl4 (highest phase)'],
+    ['27PP1P', 'UV', 'minPP', '27PP1', 'Undervoltage Lvl1 (lowest phase-to-phase)'],
+    ['27PP2P', 'UV', 'minPP', '27PP2', 'Undervoltage Lvl2 (lowest phase-to-phase)'],
+    ['59PP1P', 'OV', 'maxPP', '59PP1', 'Overvoltage Lvl1 (highest phase-to-phase)'],
+    ['59PP2P', 'OV', 'maxPP', '59PP2', 'Overvoltage Lvl2 (highest phase-to-phase)'],
+    ['59G1P', 'OV', 'zero', '59G1', 'Residual/Zero-Seq OV (3V0)'],
+    ['59G2P', 'OV', 'zero', '59G2', 'Residual/Zero-Seq OV (3V0) Lvl2'],
+    ['59Q1P', 'OV', 'neg', '59Q1', 'Neg-Seq OV (V2)'],
+    ['59Q2P', 'OV', 'neg', '59Q2', 'Neg-Seq OV (V2) Lvl2'],
+    ['59V1P', 'OV', 'pos', '59V1', 'Pos-Seq OV (V1)'],
+  ].forEach(([settingKey, type, kind, elName, typeLabel]) => {
+    const pickup = VE[settingKey];
+    if (!pickup) return;
+    A.voltageRows.push({ element: elName, type, typeLabel, term: 'Y', pickup, kind });
   });
 
   A.voltageStatus = A.voltageRows.map(row => evalVoltRowAtIdx(A, row, defaultProtIdx));
@@ -301,6 +337,7 @@ function analyzeCEV(P, prevEvent) {
     return { label: sv.label, comment, ast: parseEq(tokenizeEq(eq)), equationText: eq, pickupDelay: sv.pickupDelay };
   }
 
+  const recordedDigitalLabels = new Set((P.digitalLabels || []).filter(l => l && l !== '*'));
   function bakeFullLogicTree(node, isAsserted, visited, depth) {
     if (!node || depth > 14) return { op: 'VAR', name: node ? '(too deep)' : '?', value: false };
     switch (node.op) {
@@ -320,11 +357,31 @@ function analyzeCEV(P, prevEvent) {
               // differently for up to that whole delay — so show it as a distinct node rather
               // than silently treating the two as the same point (which hid the timer entirely).
               if (isTimedRef && info.pickupDelay > 0) {
-                return { op: 'TIMERNODE', label: info.label + 'T', pickupDelay: info.pickupDelay, value: !!isAsserted(node.name), child: bareSvNode, refName: node.name };
+                return { op: 'TIMERNODE', label: info.label + 'T', pickupDelay: info.pickupDelay,
+                         value: !!isAsserted(node.name), child: bareSvNode, refName: node.name,
+                         // Same measure-don't-assume treatment the element timers get — the gap
+                         // observed in this record beats any reading of the setting's units.
+                         measuredMs: measuredTimerMs(P, info.label, node.name),
+                         settingLabel: info.label + 'PU', settingValue: info.pickupDelay };
               }
               return Object.assign({}, bareSvNode, { value: !!isAsserted(node.name), refName: node.name });
             }
           }
+        }
+        // Same idea as the SVxx -> SVxxT timer hop above, for a PROTECTION ELEMENT's timed
+        // output (27PP1T, 51PT, …). It has no SELogic equation, so the equation walk would stop
+        // here and the raw pickup that started the timer — and the delay itself — would never
+        // appear on the diagram. Only expand when the input bit is actually recorded in this
+        // file, since this tree colours every node by its true/false state and a bit the record
+        // never captured would otherwise render as a confident "false".
+        const elemInput = timedBitInputLabel(node.name, P);
+        if (elemInput && !/^SV\d+$/.test(elemInput) && recordedDigitalLabels.has(elemInput)) {
+          const inputNode = { op: 'VAR', name: elemInput, label: elemInput, value: !!isAsserted(elemInput) };
+          return { op: 'TIMERNODE', label: node.name, refName: node.name, value: !!isAsserted(node.name),
+                   measuredMs: measuredTimerMs(P, elemInput, node.name),
+                   settingLabel: node.name.slice(0, -1) + 'D',
+                   settingValue: getSettingNum(P, [node.name.slice(0, -1) + 'D']),
+                   child: inputNode };
         }
         return { op: 'VAR', name: node.name, value: !!isAsserted(node.name) };
       }
@@ -1018,7 +1075,7 @@ function analyzeCEV(P, prevEvent) {
         causeChain.push({ label: ne, desc: 'Status/logic input de-asserted (NOT condition)', delay: 0 });
       }
       for (const step of resolved.svPath) {
-        const delayMs = step.pickupDelay > 0 ? (step.pickupDelay / freq * 1000).toFixed(0) : 0;
+        const delayMs = step.pickupDelay > 0 ? svDelayMs(P, step.pickupDelay, freq).ms.toFixed(0) : 0;
         causeChain.push({
           label: step.label,
           desc: step.comment || step.equation.split('#')[0].trim().substring(0, 60),
@@ -1980,14 +2037,10 @@ function analyzeCEV(P, prevEvent) {
   }
   A._buildTreeForBit = buildTreeForBit;
 
+  // ── Automatic reclosing outlook ──
+  // Runs last: it reads A.tripCause (to anchor on the trip instant) and the parsed 79 scheme,
+  // and never feeds anything back into the trip analysis above.
+  try { A.reclose = analyzeReclose(P, A); } catch (e) { A.reclose = null; console.warn('reclose analysis failed', e); }
+
   return A;
 }
-
-
-// ════════════════════════════════════════════════════════════════════════════
-// UI RENDERING
-// ════════════════════════════════════════════════════════════════════════════
-
-let PARSED = null;
-let ANALYSIS = null;
-

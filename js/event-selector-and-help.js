@@ -1,4 +1,3 @@
-// Multi-event selector and the in-app Help modal.
 
 function renderEventSelector() {
   const sel = document.getElementById('eventSelector');
@@ -74,11 +73,41 @@ function selectEvent(idx) {
     `${devInfo || PARSED.fileName} — Event #${PARSED.eventInfo.refNum} — ${PARSED.eventInfo.eventType}`;
   document.getElementById('topBarTimestamp').textContent = formatTimestamp(ts);
   const ratios = PARSED.format === 'form6' ? ['Form6-TS COMTRADE'] : [`CTR=${PARSED.settings.CTR || '?'}`];
+  let vPriText = '', vPriTitle = '';
   if (PARSED.format !== 'form6') {
     if (PARSED.settings.PTRY) ratios.push(`PTR=${PARSED.settings.PTRY}`);
     if (PARSED.settings.VNOM) ratios.push(`VNOM=${PARSED.settings.VNOM}V`);
+    // Expected phase-to-neutral primary voltage: VNOM (nominal secondary) x PTR — but VNOM
+    // is NOT reliably phase-to-neutral. Some SEL files set it to the nominal phase-to-PHASE
+    // secondary voltage instead (see the V_CANDIDATES / vRatio note in calibrateAnalogBasis,
+    // which already has to solve exactly this ambiguity to calibrate magnitude scale). Naively
+    // reporting VNOM x PTR as if it were always phase-to-neutral overstates it by sqrt(3) (73%)
+    // on any file where the convention is actually phase-to-phase — confirmed on a real 751
+    // PRIM_VAL=YES file where VNOM x PTR = 22,864 V but the file's own primary-referred VA/VB/VC
+    // samples average ~13,200 V (22,864 / sqrt(3) = 13,201 V — a match, not a coincidence).
+    // calibrateAnalogBasis() resolves this per-file, from the actual samples, and records it on
+    // PARSED.vnomIsPhaseToPhase (true/false/null-if-undetermined); use that instead of assuming.
+    const ptrForVnom = PARSED.settings.PTRY || PARSED.settings.PTRZ;
+    if (PARSED.settings.VNOM && ptrForVnom) {
+      const llFactor = PARSED.vnomIsPhaseToPhase === true ? Math.sqrt(3) : 1;
+      const vPri = (PARSED.settings.VNOM * ptrForVnom) / llFactor;
+      const vPriStr = vPri >= 1000 ? `${(vPri / 1000).toFixed(2)} kV` : `${vPri.toFixed(1)} V`;
+      const inferredFromSibling = !!PARSED.vnomInferredFromSibling;
+      const unresolved = PARSED.vnomIsPhaseToPhase == null;
+      vPriText = `Expected V(L-N) primary ≈ ${vPriStr}${unresolved ? ' *' : inferredFromSibling ? ' †' : ''}`;
+      vPriTitle = inferredFromSibling
+        ? `Expected phase-to-neutral primary voltage ≈ ${PARSED.vnomIsPhaseToPhase ? '(VNOM ÷ sqrt(3)) × PTR' : 'VNOM × PTR'} = ${vPri.toFixed(1)} V (${vPriStr}). † This file's own pre-fault voltage samples could not confirm the VNOM L-L/L-N convention (e.g. bus was still de-energized or mid-recovery through most of the pre-fault window), so it was inferred from event ${PARSED.vnomInferredFromSibling} — the same relay, same CTR/PTR/VNOM settings. Cross-check against the measured voltage in the Voltages tab if this event's own energization looks incomplete.`
+        : PARSED.vnomIsPhaseToPhase === true
+        ? `Expected phase-to-neutral primary voltage ≈ (VNOM ÷ sqrt(3)) × PTR = (${PARSED.settings.VNOM} ÷ 1.732) × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). This file's VNOM is nominal phase-to-PHASE secondary voltage (detected from its own VA/VB/VC samples vs VNOM × PTR), so the sqrt(3) is divided back out.`
+        : unresolved
+          ? `Expected phase-to-neutral primary voltage ≈ VNOM × PTR = ${PARSED.settings.VNOM} × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). * Could not confirm from this file's own voltage samples whether VNOM is phase-to-neutral or phase-to-phase — assuming the more common phase-to-neutral convention. Treat this figure with caution and cross-check against the measured pre-fault voltage in the Voltages tab.`
+          : `Expected phase-to-neutral primary voltage ≈ VNOM × PTR = ${PARSED.settings.VNOM} × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). Confirmed from this file's own voltage samples that VNOM is already phase-to-neutral.`;
+    }
   }
   document.getElementById('topBarRatios').textContent = ratios.join(' | ');
+  const topBarVPriEl = document.getElementById('topBarVPri');
+  topBarVPriEl.textContent = vPriText;
+  topBarVPriEl.title = vPriTitle;
 
   // Update event selector active state
   document.querySelectorAll('.evt-btn').forEach((btn, i) => {
@@ -138,4 +167,3 @@ function setHelpTab(tab) {
 // null = default (trip moment). Set via setLogicChartViewIdx below.
 let LLG_VIEW_SAMPLE_IDX = null;
 function setLogicChartViewIdx(idx) { LLG_VIEW_SAMPLE_IDX = idx; }
-

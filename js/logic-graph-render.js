@@ -1,5 +1,7 @@
-// Logic-graph layout helpers (timer animation windows) and the SV flags chart.
 
+// A duplicated fan-out leaf carries a synthetic id like "52A\u0001dup3" so multiple copies stay
+// distinct nodes; everywhere a node's DISPLAY label or true-state is needed, this recovers the
+// original bit name. Harmless on ordinary ids (returns them unchanged).
 function llgDisplayLabel(nodeId) {
   const i = nodeId.indexOf('\u0001');
   return i === -1 ? nodeId : nodeId.slice(0, i);
@@ -164,10 +166,38 @@ function getTripRelevantLabels(P, A) {
   return set;
 }
 
+// The labels the ANALYSIS puts on the flags chart on its own: the resolved trip-cause chain plus
+// the small "relevant to this trip" set. Split out from buildSVFlagsChart so the bit picker can
+// mark these as "already shown" instead of letting a click on one look like it did nothing.
+function svflagsBaseLabels(P, A) {
+  const cause = A?.tripCause;
+  if (!cause || !cause.causeChain?.length) return [];
+  const seen = new Set();
+  const labels = cause.causeChain.map(c => c.label).filter(l => { if (seen.has(l)) return false; seen.add(l); return true; });
+  [cause.immediateCause, cause.causeChain[cause.causeChain.length - 1]?.label].filter(Boolean)
+    .forEach(l => { if (!labels.includes(l)) labels.push(l); });
+  getTripRelevantLabels(P, A).forEach(l => { if (!labels.includes(l)) labels.push(l); });
+  // For every timed bit on the chart, also show the raw input that started its timer (27PP1T ->
+  // 27PP1, SV07T -> SV07). The gap between the two IS the timer, and reading it off the chart is
+  // the whole point of plotting a timed bit — showing only the timed form hides both when the
+  // condition arose and how long the relay waited. Inserted directly ahead of its timed output;
+  // the chronological row sort then puts them in the order they actually happened.
+  // Only bits this file records are added, so this never introduces a permanently-blank row.
+  const recorded = new Set((P.digitalLabels || []).filter(l => l && l !== '*'));
+  for (let i = 0; i < labels.length; i++) {
+    const input = timedBitInputLabel(labels[i], P);
+    if (input && recorded.has(input) && !labels.includes(input)) labels.splice(i++, 0, input);
+  }
+  return labels;
+}
+
 function buildSVFlagsChart(P, A, compact) {
   const data = P.analogData || [];
   const cause = A?.tripCause;
-  if (!data.length || !cause || !cause.causeChain?.length) return '';
+  // A pinned bit is reason enough to draw the chart even when no trip cause resolved — that case
+  // (an ER-only record, or logic this build can't resolve) is exactly when manually plotting a
+  // few bits is the only way to see the sequence at all.
+  if (!data.length || (!(cause && cause.causeChain?.length) && !EXTRA_FLAG_BITS.length)) return '';
 
   const samplesPerCycle = P.eventInfo.samPerCycA || 32;
   const msPerSample = 1000 / ((P.eventInfo.freq || 60) * samplesPerCycle);
@@ -177,21 +207,19 @@ function buildSVFlagsChart(P, A, compact) {
   // no length cap. The bit directly responsible for the trip (immediateCause, e.g. "SV14T")
   // and the final trip/ER label (e.g. "TRIP3P" or "ER") are guaranteed to be present even if
   // the chain summary didn't already include them under that exact name.
-  const seen = new Set();
-  let labels = cause.causeChain
-    .map(c => c.label)
-    .filter(l => { if (seen.has(l)) return false; seen.add(l); return true; });
-  const mustInclude = [cause.immediateCause, cause.causeChain[cause.causeChain.length - 1]?.label].filter(Boolean);
-  mustInclude.forEach(l => { if (!labels.includes(l)) labels.push(l); });
+  // The analysis's own set (resolved chain + the "relevant to this trip" bits, the same set the
+  // Event Timeline's filter uses so the two features agree on what counts) ...
+  let labels = svflagsBaseLabels(P, A);
 
-  // Beyond the resolved logic chain itself, always surface a small set of bits that give
-  // essential context for THIS trip even when they aren't literally part of the equation that
-  // produced it — same "relevant to this trip" set the Event Timeline's filter uses, so the
-  // two features agree on what counts.
-  getTripRelevantLabels(P, A).forEach(l => { if (!labels.includes(l)) labels.push(l); });
+  // ... then whatever the operator pinned via the picker, appended and flagged so they are drawn
+  // in a distinct colour. Keeping them visually separate matters: the chart is read as "what the
+  // relay's logic did", and a hand-added bit is an operator's hypothesis sitting next to it, not
+  // part of the resolved cause.
+  const pinnedSet = new Set();
+  EXTRA_FLAG_BITS.forEach(l => { if (!labels.includes(l)) { labels.push(l); pinnedSet.add(l); } });
 
   const rows = labels
-    .map(label => ({ label, intervals: computeAssertIntervals(P, label, totalMs, msPerSample) }))
+    .map(label => ({ label, pinned: pinnedSet.has(label), intervals: computeAssertIntervals(P, label, totalMs, msPerSample) }))
     // Chronological, top to bottom: whichever bit asserts earliest in the record is drawn
     // first, matching how an operator would actually narrate the sequence of events. A bit
     // already asserted at t=0 sorts first (interval start 0); one that never actually asserts
@@ -209,6 +237,8 @@ function buildSVFlagsChart(P, A, compact) {
     const m = l.match(/^SV(\d+)T$/);
     return !(m && labels.includes(`SV${m[1]}`));
   });
+  const pinnedNote = pinnedSet.size
+    ? `<span class="sv-legend-item svflags-legend-note">Rows in amber were added manually and are not part of the resolved trip cause.</span>` : '';
   const legendHTML = `<div class="sv-legend">${legendLabels.map(l => {
     const svM = l.match(/^SV(\d+)T?$/);
     const sv = svM ? (P.svSettings || []).find(s => s.num === parseInt(svM[1])) : null;
@@ -223,9 +253,9 @@ function buildSVFlagsChart(P, A, compact) {
     }
     const eq = sv ? `<span class="sv-legend-eq">[${linkifyEquationBits(sv.equation.split('#')[0].trim(), P)}]</span> ` : '';
     return `<span class="sv-legend-item">${tt(l, P)}: ${eq}${short}</span>`;
-  }).join('')}</div>`;
+  }).join('')}${pinnedNote}</div>`;
 
-  const tripTransition = cause.tripTransition;
+  const tripTransition = cause?.tripTransition;
   // Use analogSampleIdx here too (not tripTransition.timeMs) so the TRIP marker lands
   // at the exact same x position as it does in the magnitude charts above.
   const tripMs = (tripTransition?.analogSampleIdx != null) ? tripTransition.analogSampleIdx * msPerSample : null;
@@ -247,12 +277,11 @@ function buildSVFlagsChart(P, A, compact) {
       marginTop: 12, marginBottom: 24,
       rowH: 30, numVGrid: 8, fontSize: 12, totalMs, startMs, endMs, triggerMs, tripMs, cursorMs, markAMs, markBMs, compact: true, bg: 'var(--card)',
     }, P);
-    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">SV / Trip Chain Flags${zoomHintHTML('svflags')}</div><div class="chart-svg-slot" id="chartSlot-svflags">${svg}</div>${legendHTML}</div>`;
+    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">SV / Trip Chain Flags${zoomHintHTML('svflags')}</div><div class="chart-svg-slot" id="chartSlot-svflags">${svg}</div>${svflagsPickerHTML(P, A)}${legendHTML}</div>`;
   }
 
   const svg = renderBooleanFlagsSVG(rows, { totalMs, triggerMs, tripMs, marginLeft: 110 }, P);
-  return `<div class="card blue-accent"><div class="card-header">🔗 SV / Trip Chain Flags</div>${svg}${legendHTML}
-    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Boolean state of each element in the resolved trip-cause chain, reconstructed from digital transitions across the full record.</div>
+  return `<div class="card blue-accent"><div class="card-header">🔗 SV / Trip Chain Flags</div>${svg}${svflagsPickerHTML(P, A)}${legendHTML}
+    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Boolean state of each element in the resolved trip-cause chain, reconstructed from digital transitions across the full record. Use <b>+ Add bit</b> to plot any other bit in the record alongside it.</div>
   </div>`;
 }
-

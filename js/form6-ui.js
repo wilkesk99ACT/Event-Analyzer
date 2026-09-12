@@ -1,5 +1,7 @@
-// Form 6-specific banner/tabs/content rendering.
 
+// ── Form6 rendering — deliberately separate from the SEL renderBanner/renderTabs/renderContent
+// (those are deeply CEV-specific) rather than shoehorned in. PARSED.format === 'form6' branches
+// into these from the three main render entry points. ──
 function renderForm6Banner() {
   const P = PARSED, A = ANALYSIS;
   const el = document.getElementById('tripBanner');
@@ -122,5 +124,3 @@ function renderForm6Content() {
 
   document.getElementById('contentArea').innerHTML = html;
 }
-
-

@@ -1,4 +1,3 @@
-// Tooltip text and equation-to-bit linkifying helpers for the bit/element explanations shown throughout the UI.
 
 // ════════════════════════════════════════════════════════════════════════════
 // TOOLTIP DICTIONARY — SEL Relay Word Bits, ANSI Codes, Protection Elements
@@ -158,6 +157,164 @@ const PHASE_SUBJECT = { // for use as a sentence subject, e.g. "Phase A current 
   N: 'Neutral current', Q: 'Negative-sequence current', P: 'The highest phase current', V: 'Voltage',
 };
 
+// ══════════════════════════════════════════════════════════════════════
+// TIMED BIT -> ITS INPUT BIT
+// ══════════════════════════════════════════════════════════════════════
+// A timed output (27PP1T, 51PT, SV07T) and the raw pickup that starts its timer (27PP1, 51P,
+// SV07) are two different points in time, often by a hundred milliseconds or more, and the gap
+// between them IS the timer. Showing only the timed form hides both when the condition first
+// arose and how long the relay waited — which is usually the question being asked of a record.
+//
+// The relationship is firmware, not SELogic, so it appears in no equation and has to be
+// reconstructed from the bit name. Two families:
+//   SVnnT  -> SVnn                (settings-defined SELogic variable + its timer)
+//   <ANSI>T -> <ANSI> or <ANSI>P  (protection element pickup -> coordinated timed output)
+// The second is name-guessing, so it is deliberately conservative:
+//   * ANSI element numbers always begin with a digit (27, 50, 51, 59, 67, 81…), which ordinary
+//     named contacts/inputs/outputs (TRIP, ULTRIP, GNDSW, IN101, TR) essentially never do — that
+//     is what stops this firing on every label that merely ends in "T".
+//   * The candidate must be a bit this file actually RECORDS. Both spellings exist in the wild
+//     (27PP1T -> 27PP1, but 50P1T -> 50P1P), and checking the file's own digital label list
+//     resolves which one this relay uses instead of guessing per family.
+// Returns null when nothing resolves — callers then simply show the timed bit alone, as before.
+function timedBitInputLabel(label, P) {
+  if (!label || !P) return null;
+  const svm = label.match(/^SV(\d+)T$/);
+  if (svm) {
+    const base = `SV${svm[1]}`;
+    return (P.svSettings || []).some(sv => sv.num === parseInt(svm[1])) ? base : null;
+  }
+  if (label.length <= 2 || !label.endsWith('T')) return null;
+  const stem = label.slice(0, -1);
+  if (!/^\d/.test(stem)) return null;
+  const recorded = new Set((P.digitalLabels || []).filter(l => l && l !== '*'));
+  for (const cand of [stem, stem + 'P']) {
+    if (recorded.has(cand) && cand !== label) return cand;
+  }
+  return null;
+}
+
+// How long the timer actually ran in THIS record: the gap between the input bit's last assert
+// and the timed bit's assert. Measured from the digital columns, so it needs no assumption about
+// whether a given relay family expresses its delay setting in cycles or in seconds — a real
+// ambiguity across SEL families that has produced unit errors elsewhere. Returns null when
+// either bit never asserts, or the timed output leads its own input (nothing sensible to report).
+function measuredTimerMs(P, inputLabel, timedLabel) {
+  const trans = P?.digitalTransitions || [];
+  if (!trans.length) return null;
+  const spc = P.eventInfo?.samPerCycA || 32;
+  const msPerSample = 1000 / ((P.eventInfo?.freq || 60) * spc);
+  let lastInputIdx = null, timedIdx = null;
+  for (const t of trans) {
+    for (const c of t.changes) {
+      if (c.label === inputLabel && c.asserted && timedIdx == null) lastInputIdx = t.analogSampleIdx;
+      if (c.label === timedLabel && c.asserted && timedIdx == null) timedIdx = t.analogSampleIdx;
+    }
+  }
+  if (lastInputIdx == null || timedIdx == null || timedIdx < lastInputIdx) return null;
+  return (timedIdx - lastInputIdx) * msPerSample;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// SELOGIC TIMER UNITS — cycles or seconds, decided per file from evidence
+// ══════════════════════════════════════════════════════════════════════
+// SVnnPU/SVnnDO are expressed in CYCLES on some SEL families and in SECONDS on others, and
+// nothing in the file declares which. Assuming cycles everywhere is a 60x error where it's
+// wrong: on SEL-751 record 10824, SV07PU = 0.16 rendered as "0.16 cyc = 3 ms" for a timer whose
+// SV07 -> SV07T gap measures 162.5 ms in the very same record — i.e. 0.16 SECONDS.
+//
+// Rather than hardcode a family table (which would be wrong for the next firmware revision that
+// changes it), infer per file: for every SV whose bare and timed forms both assert in this
+// record, compare the measured gap against both readings of its setting and keep whichever is
+// closer, then take the majority verdict. Returns null when the record contains no SV timer
+// that actually ran, in which case callers keep the historical cycles assumption and say so.
+function svTimerUnit(P) {
+  if (!P) return null;
+  if (P._svTimerUnit !== undefined) return P._svTimerUnit;
+  const freq = P.eventInfo?.freq || 60;
+  let sec = 0, cyc = 0;
+  for (const sv of (P.svSettings || [])) {
+    if (!(sv.pickupDelay > 0)) continue;
+    const measured = measuredTimerMs(P, sv.label, sv.label + 'T');
+    if (measured == null || measured <= 0) continue;
+    const asSec = sv.pickupDelay * 1000, asCyc = sv.pickupDelay / freq * 1000;
+    // Compare in log space so the verdict doesn't depend on the timer's absolute size.
+    if (Math.abs(Math.log(measured / asSec)) < Math.abs(Math.log(measured / asCyc))) sec++; else cyc++;
+  }
+  P._svTimerUnit = (sec === 0 && cyc === 0) ? null : (sec > cyc ? 'seconds' : 'cycles');
+  return P._svTimerUnit;
+}
+// Convert an SV timer setting to milliseconds using this file's inferred units. `assumed` is
+// true when no evidence was available and the historical cycles reading was used, so callers can
+// caveat the number instead of stating it as fact.
+function svDelayMs(P, value, freq) {
+  freq = freq || P?.eventInfo?.freq || 60;
+  const unit = svTimerUnit(P);
+  if (unit === 'seconds') return { ms: value * 1000, unit: 'seconds', assumed: false };
+  return { ms: value / freq * 1000, unit: 'cycles', assumed: unit == null };
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// TIMER PROGRESS AT A GIVEN INSTANT
+// ══════════════════════════════════════════════════════════════════════
+// How far through its delay a base -> timed-output pair is, as of `viewDigIdx`. Measured from
+// the record's own transitions (never from a delay setting), so it works identically for SVs and
+// for hardware protection elements — including elements whose delay setting isn't parsed, or
+// whose setting units are ambiguous across SEL families.
+//
+// Returns { frac, kind, elapsedSamples, totalSamples } while the timer is genuinely running, or
+// null when it isn't — stable, never completes in this record, or resets partway (which is
+// indeterminate, and guessing at it would invent a countdown that never happened).
+// Shared by the local logic graph and the main-page trip tree so the two can never disagree.
+function measuredTimerPhase(P, base, target, viewDigIdx) {
+  if (!P || viewDigIdx == null || !base || !target) return null;
+  const trans = P.digitalTransitions || [];
+  const lastTo = (label, atIdx, want) => {
+    let found = null;
+    for (const t of trans) {
+      if (t.digitalSampleIdx > atIdx) break;
+      const c = t.changes.find(ch => ch.label === label);
+      if (c && c.asserted === want) found = t.digitalSampleIdx;
+    }
+    return found;
+  };
+  const nextTo = (label, afterIdx, want) => {
+    for (const t of trans) {
+      if (t.digitalSampleIdx <= afterIdx) continue;
+      const c = t.changes.find(ch => ch.label === label);
+      if (c && c.asserted === want) return t.digitalSampleIdx;
+    }
+    return null;
+  };
+  const baseSt = currentBitState(base), targetSt = currentBitState(target);
+  if (!baseSt || !targetSt) return null;
+  const run = (want) => {
+    // want=true  -> pickup  (base asserted, timed output hasn't caught up)
+    // want=false -> dropout (base released, timed output hasn't dropped out)
+    const tStart = lastTo(base, viewDigIdx, want);
+    if (tStart == null) return null;            // already in this state at record start — no origin to measure from
+    const tBaseReverts = nextTo(base, tStart, !want);
+    const tEnd = nextTo(target, tStart, want);
+    if (tEnd == null) return null;              // never actually completes in this record
+    if (tBaseReverts != null && tBaseReverts < tEnd) return null; // reset before completing
+    const total = Math.max(1, tEnd - tStart);
+    return { frac: Math.max(0, Math.min(1, (viewDigIdx - tStart) / total)),
+             kind: want ? 'pickup' : 'dropout',
+             elapsedSamples: Math.max(0, Math.min(total, viewDigIdx - tStart)), totalSamples: total };
+  };
+  if (baseSt.state && !targetSt.state) return run(true);
+  if (!baseSt.state && targetSt.state) return run(false);
+  return null; // stable — both already agree
+}
+
+// The instant the logic diagrams are currently being read at, as a DIGITAL sample index: the
+// scrubber/cursor position when one is set, otherwise the trip moment.
+function logicViewDigitalIdx() {
+  return (typeof LLG_VIEW_SAMPLE_IDX !== 'undefined' && LLG_VIEW_SAMPLE_IDX != null)
+    ? LLG_VIEW_SAMPLE_IDX
+    : (ANALYSIS?.tripCause?.tripTransition?.digitalSampleIdx ?? null);
+}
+
 // Best-effort lookup of a definite-time delay setting for a given element base (e.g. "50A1"),
 // trying the handful of naming conventions SEL uses across relay families. Returns null (and
 // the explanation falls back to qualitative wording) if nothing matches — this is inherently
@@ -183,7 +340,7 @@ function explainElementBit(label, P, freq) {
     if (sv) {
       const comment = sv.equation.includes('#') ? sv.equation.split('#')[1].trim() : '';
       const eq = sv.equation.split('#')[0].trim();
-      const puMs = (sv.pickupDelay / freq * 1000).toFixed(0);
+      const puMs = svDelayMs(P, sv.pickupDelay, freq).ms.toFixed(0);
       const what = comment ? `${comment} (site-programmed logic ${sv.label})` : `Site-programmed logic variable ${sv.label}`;
       if (sm[2] === 'T') return {
         short: `${what} — timed output`,
@@ -375,9 +532,11 @@ function getSVTooltip(label, parsed) {
       const comment = sv.equation.includes('#') ? sv.equation.split('#')[1].trim() : '';
       const eqShort = sv.equation.split('#')[0].trim();
       if (isT) {
-        return `${sv.label} timed output (pickup: ${sv.pickupDelay} cycles = ${(sv.pickupDelay/60*1000).toFixed(0)}ms)${comment ? ' — ' + comment : ''}\nEquation: ${eqShort}`;
+        const d = svDelayMs(parsed, sv.pickupDelay, freq);
+        return `${sv.label} timed output (pickup: ${sv.pickupDelay} ${d.unit}${d.assumed ? ', assumed' : ''} = ${d.ms.toFixed(0)}ms)${comment ? ' — ' + comment : ''}\nEquation: ${eqShort}`;
       }
-      return `${comment || eqShort}${comment ? '\nEquation: ' + eqShort : ''}\nPU: ${sv.pickupDelay} cyc | DO: ${sv.dropoutDelay} cyc`;
+      const du = svDelayMs(parsed, sv.pickupDelay, freq).unit;
+      return `${comment || eqShort}${comment ? '\nEquation: ' + eqShort : ''}\nPU: ${sv.pickupDelay} ${du} | DO: ${sv.dropoutDelay} ${du}`;
     }
   }
   return TOOLTIPS[label] || genericBitExplain(label, parsed, freq) || null;
@@ -441,8 +600,3 @@ function linkifyBitMentions(text, parsed) {
   }).join('');
   return linkedHead + eqSuffix;
 }
-
-// ════════════════════════════════════════════════════════════════════════════
-// CEV PARSER
-// ════════════════════════════════════════════════════════════════════════════
-

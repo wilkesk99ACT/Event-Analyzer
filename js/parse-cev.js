@@ -1,4 +1,7 @@
-// SEL .CEV file parser: digital/analog records, hex bit decoding, analog basis calibration.
+
+// ════════════════════════════════════════════════════════════════════════════
+// CEV PARSER
+// ════════════════════════════════════════════════════════════════════════════
 
 function parseCEV(text, fileName) {
   const lines = text.replace(/\r/g, '').split('\n');
@@ -26,11 +29,18 @@ function parseCEV(text, fileName) {
     // SEL-751 format: has extra header fields, timestamp at line 3 (0-indexed: 2), event summary at line 5 (0-indexed: 5)
     R.format = 'sel751';
     R.fid = lines[0]?.replace(/"/g, '').split(',')[0] || '';
-    R.device = lines[1]?.replace(/"/g, '').split(',')[0] || '';
+    const line1Parts = lines[1]?.replace(/"/g, '').split(',') || [];
+    R.device = line1Parts[0] || '';
+    // SER_NUM (4th field on the FID line) identifies the physical relay. Used to reconcile
+    // the VNOM L-L/L-N convention across multiple events from the same device — see
+    // reconcileVnomAcrossEvents() — since that convention is fixed by the relay's PT wiring
+    // and cannot differ between two records from the same unit with the same CTR/PTR/VNOM.
+    R.serialNumber = line1Parts[3] || '';
   } else {
     R.format = 'sel651r';
     R.fid = line0.split(',')[0] || '';
     R.device = line1.split(',')[0] || '';
+    R.serialNumber = '';
   }
 
   // ── Find timestamp line (MONTH,DAY,YEAR...) ──
@@ -51,7 +61,16 @@ function parseCEV(text, fileName) {
   if (evtHeaderIdx >= 0 && evtHeaderIdx + 1 < lines.length) {
     const hdr = lines[evtHeaderIdx].replace(/"/g, '').split(',').map(h => h.trim());
     const vals = lines[evtHeaderIdx + 1].replace(/"/g, '').split(',').map(v => v.trim());
-    const get = (key) => { const idx = hdr.indexOf(key); return idx >= 0 ? vals[idx] : null; };
+    // SEL-751 event-summary headers put a unit suffix on every measurement column — "IA(A)",
+    // "IG(A)", "VA(V)" — while other formats use the bare name. Matching only the bare name
+    // silently returned null for all of them, which left calibrateAnalogBasis() with no
+    // fault-current reference at all and no way to notice the file was mis-scaled.
+    const findIdx = (key) => {
+      const direct = hdr.indexOf(key);
+      if (direct >= 0) return direct;
+      return hdr.findIndex(h => h.replace(/\s*\([^)]*\)\s*$/, '').trim() === key);
+    };
+    const get = (key) => { const idx = findIdx(key); return idx >= 0 ? vals[idx] : null; };
 
     R.eventInfo = {
       refNum: get('REF_NUM') || get('REC_NUM') || '',
@@ -272,6 +291,12 @@ function parseCEV(text, fileName) {
   if (!R.settings.VNOM) R.settings.VNOM = mf(/VNOM\s*:=\s*([\d.]+)/);
   R.settings.RID = m(/RID\s*:=([^\r\n]+)/);
   R.settings.TID = m(/TID\s*:=([^\r\n]+)/);
+  // The Event Report trigger equation. Every record in a CEV set exists because ONE of this
+  // equation's terms asserted, and on a device whose ER list includes supervision bits
+  // (SV10T, 52A3P, …) that term is frequently NOT a trip — which is exactly the case that
+  // makes a reader ask "why is there an event here at all?". Anchored on a non-word char so
+  // it cannot match the tail of LDAR/SER/PRE.
+  R.settings.EReq = m(/(?:^|[^A-Z0-9_])ER\s*:=([^\r\n]+)/m);
 
   R.settings.VYRCF = [mf(/V1YRCF\s*:=\s*([\d.]+)/)||1, mf(/V2YRCF\s*:=\s*([\d.]+)/)||1, mf(/V3YRCF\s*:=\s*([\d.]+)/)||1];
   R.settings.VZRCF = [mf(/V1ZRCF\s*:=\s*([\d.]+)/)||1, mf(/V2ZRCF\s*:=\s*([\d.]+)/)||1, mf(/V3ZRCF\s*:=\s*([\d.]+)/)||1];
@@ -329,6 +354,11 @@ function parseCEV(text, fileName) {
   const dtHit = matchEquation(['79DTL3P', '79DTL']);
   R.dtlEquation = dtHit ? dtHit.value : '';
 
+  // Full ANSI 79 scheme — the two equations above are what the trip-cause tracer needs; the
+  // Reclosing tab needs the whole picture (shot count, open intervals, reset timers, and
+  // every supervision equation), so it's parsed once here and hung off the parsed record.
+  R.reclose = parseRecloseScheme(S, text);
+
   // ER (Event Report trigger) — a SELOGIC equation distinct from TR/TR3P. Engineers program
   // this to capture diagnostic snapshots (e.g. a protection element pickup) WITHOUT tripping
   // the breaker — e.g. "ER := R_TRIG 51G1 OR R_TRIG 50P1". When a record's EVENT field reads
@@ -370,6 +400,24 @@ function parseCEV(text, fileName) {
     R.overcurrentElements[`${fam}TC`] = m(new RegExp(`${fam}TC\\s*:=\\s*(.+)`));
   });
 
+  // SEL-751 names its inverse-time elements by LEVEL — 51P1P / 51P1C / 51P1TD — where the
+  // SEL-651R this parser was first built against uses the "J curve" form, 51PJP / 51PJC /
+  // 51PJTD. Same element, different convention, and looking only for the J form meant every
+  // SEL-751 file produced an EMPTY inverse-time table: on 35KV CLEARSKY record 10722, a
+  // phase-to-ground fault, both 51P1 (7.50 A sec) and 51G1 (1.00 A sec) were configured and
+  // neither appeared anywhere in the Protection tab. Filled in under the same J-form keys the
+  // row builder already reads, and only where the J form didn't already match, so 651R files
+  // are untouched.
+  ['51P1', '51P2', '51G1', '51G2', '51N1', '51N2', '51Q'].forEach(fam => {
+    if (R.overcurrentElements[`${fam}JP`] != null) return;
+    const jp = mf(new RegExp(`(?:^|[^A-Z0-9])${fam}P\\s*:=\\s*([\\d.]+)`, 'm'));
+    if (jp == null) return;
+    R.overcurrentElements[`${fam}JP`] = jp;
+    R.overcurrentElements[`${fam}JC`] = m(new RegExp(`(?:^|[^A-Z0-9])${fam}C\\s*:=\\s*(\\S+)`, 'm'));
+    R.overcurrentElements[`${fam}JTD`] = mf(new RegExp(`(?:^|[^A-Z0-9])${fam}TD\\s*:=\\s*([\\d.]+)`, 'm'));
+    if (!R.overcurrentElements[`${fam}TC`]) R.overcurrentElements[`${fam}TC`] = m(new RegExp(`(?:^|[^A-Z0-9])${fam}TC\\s*:=\\s*(.+)`, 'm'));
+  });
+
   // Voltage element pickups — Y and Z terminal, phase levels 1-4, phase-to-phase, and the
   // sequence family (zero/neg/pos-seq overvoltage: 59#N1/N2, 59#Q1, 59#V1).
   const vPairs = [];
@@ -377,8 +425,17 @@ function parseCEV(text, fileName) {
     for (let lvl = 1; lvl <= 4; lvl++) vPairs.push(`27${t}P${lvl}P`, `59${t}P${lvl}P`);
     vPairs.push(`27${t}PP1P`, `59${t}PP1P`, `59${t}N1P`, `59${t}N2P`, `59${t}Q1P`, `59${t}V1P`);
   });
+  // SEL-751 voltage elements carry NO Y/Z terminal letter (27P1P, 59P1P, 27PP1P) and name the
+  // residual/zero-sequence overvoltage element 59G — where the 651R uses 59YN. Neither form was
+  // recognised, so the whole voltage table came out empty on every SEL-751 file. That is the
+  // direct cause of "59G1 asserted but nothing listed for it" on record 10722.
+  //
+  // The left-boundary guard is what keeps the two conventions apart: without it the bare key
+  // "59P1P" would happily match inside a 651R's "59YP1P" and cross-wire the two namings.
+  for (let lvl = 1; lvl <= 4; lvl++) vPairs.push(`27P${lvl}P`, `59P${lvl}P`);
+  vPairs.push('27PP1P', '27PP2P', '59PP1P', '59PP2P', '59G1P', '59G2P', '59Q1P', '59Q2P', '59V1P');
   vPairs.forEach(k => {
-    const re = new RegExp(k.replace(/([()])/g,'\\$1') + '\\s*:=\\s*([\\d.]+|OFF)');
+    const re = new RegExp('(?:^|[^A-Z0-9])' + k.replace(/([()])/g,'\\$1') + '\\s*:=\\s*([\\d.]+|OFF)', 'm');
     const vm = S.match(re);
     R.voltageElements[k] = vm && vm[1] !== 'OFF' ? parseFloat(vm[1]) : null;
   });
@@ -469,13 +526,13 @@ function analogDataIsPrimary(P) {
 // Snap an observed ratio to the nearest candidate in log space, but refuse to snap at all if
 // nothing is within ~25% — a wild ratio means the reference isn't what we assumed it was, and
 // falling back to "uncalibrated" is safer than confidently applying a fabricated scale.
-function snapToCandidate(ratio, candidates) {
+function snapToCandidate(ratio, candidates, tol = 1.25) {
   let best = null, bestErr = Infinity;
   for (const c of candidates) {
     const err = Math.abs(Math.log(ratio / c.v));
     if (err < bestErr) { bestErr = err; best = c; }
   }
-  return (best && bestErr <= Math.log(1.25)) ? best : null;
+  return (best && bestErr <= Math.log(tol)) ? best : null;
 }
 
 function medianOf(a) {
@@ -485,12 +542,88 @@ function medianOf(a) {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
+// ── Calibration reference 3: the relay's own element bits ────────────────────
+// The strongest reference in the file, and the one that was sitting unused. Every voltage
+// element bit the record carries (27YA1, 59YB3, …) is the relay's own verdict on whether a
+// measured phase was above or below a pickup this file also states. Recompute that decision
+// from the samples under a candidate magnitude scale and compare: the scale that reproduces
+// the relay's bits is the right one, and a scale that contradicts them is provably wrong no
+// matter how plausible the ratio arithmetic looked.
+//
+// This is worth having even when another reference already answered, because the failure mode
+// it catches is silent — a wrong scale produces a perfectly reasonable-looking voltage that
+// happens to disagree with the relay by sqrt(2). On STATION A 19565 the tool reported the bus
+// at 77% of nominal (an undervoltage) while the record's own 59Y*3 overvoltage bits were
+// asserted throughout. Nothing else in the analysis noticed.
+//
+// Samples within 2% of a pickup are skipped: element hysteresis and the relay's own filtering
+// make the boolean genuinely ambiguous right at the threshold, and scoring those would add
+// noise in exactly the region where the comparison is least informative.
+function elementBitCrossCheck(R, scale) {
+  const data = R.analogData || [];
+  const labels = R.digitalLabels || [];
+  if (!data.length || !labels.length) return null;
+  const N = R.eventInfo?.samPerCycA || 32;
+  const isPrimary = analogDataIsPrimary(R);
+  const voltIsKV = detectChannelUnit(R, ['VA', 'VAY', 'VB', 'VBY'], '').toUpperCase() === 'KV';
+  const TERMS = {
+    Y: { A: 'VAY', B: 'VBY', C: 'VCY', ptr: R.settings?.PTRY || 1 },
+    Z: { A: 'VAZ', B: 'VBZ', C: 'VCZ', ptr: R.settings?.PTRZ || R.settings?.PTRY || 1 },
+  };
+  const toSec = (raw, ptr) => {
+    const primaryKV = isPrimary ? (voltIsKV ? raw : raw / 1000) : (raw * ptr) / 1000;
+    return primaryKV * 1000 / ptr;
+  };
+  const series = {};
+  for (const T of Object.keys(TERMS)) {
+    for (const ph of ['A', 'B', 'C']) {
+      const s = data.map(r => r[TERMS[T][ph]] || 0);
+      series[T + ph] = s.some(v => Math.abs(v) > 1e-9) ? computeRmsMagnitude(s, N, scale) : null;
+    }
+  }
+  const step = Math.max(N, Math.floor(data.length / 12));
+  const pts = [];
+  for (let i = N; i < data.length; i += step) pts.push(i);
+  if (!pts.length) return null;
+
+  let agree = 0, total = 0;
+  for (const T of Object.keys(TERMS)) {
+    for (let lvl = 1; lvl <= 4; lvl++) {
+      for (const kind of ['27', '59']) {
+        const pickup = getSettingNum(R, [`${kind}${T}P${lvl}P`]);
+        if (pickup == null || !(pickup > 0)) continue;
+        for (const ph of ['A', 'B', 'C']) {
+          const bit = `${kind}${T}${ph}${lvl}`;
+          if (!labels.includes(bit)) continue;
+          const sr = series[T + ph];
+          if (!sr) continue;
+          for (const i of pts) {
+            const secV = toSec(sr[i] || 0, TERMS[T].ptr);
+            if (Math.abs(secV - pickup) < pickup * 0.02) continue;
+            const expect = kind === '27' ? secV < pickup : secV > pickup;
+            const actual = bitStateAtAnalogIdx(R, bit, i).state;
+            total++;
+            if (expect === actual) agree++;
+          }
+        }
+      }
+    }
+  }
+  return total ? { agree, total, rate: agree / total } : null;
+}
+
 function calibrateAnalogBasis(R) {
   // magScale multiplies every computed RMS/phasor magnitude to turn it into the true RMS
   // phasor magnitude in the channel's own units. 1.0 = no correction (raw instantaneous data).
   R.magScale = 1;
   R.basisCalibration = { magScale: 1, source: 'none', confidence: 'uncalibrated', detail:
     'No in-file reference (event-summary fault currents or VNOM x PTR) was available to calibrate magnitude scaling; magnitudes are shown as a conventional RMS of the samples.' };
+  // Whether this file's VNOM setting is nominal phase-to-PHASE or phase-to-NEUTRAL secondary
+  // voltage (see the V_CANDIDATES note below) — null until/unless the voltage reference below
+  // resolves it. Set here (not just alongside R.magScale) so it still defaults sanely on any
+  // early return in this function, and consulted anywhere VNOM x PTR is used to state an
+  // expected PRIMARY voltage (e.g. the top-bar "Expected V(L-N) primary" figure).
+  R.vnomIsPhaseToPhase = null;
 
   const data = R.analogData || [];
   if (!data.length) return;
@@ -500,12 +633,31 @@ function calibrateAnalogBasis(R) {
   const isPrimary = analogDataIsPrimary(R);
   const voltIsKV = detectChannelUnit(R, ['VA', 'VAY', 'VB', 'VBY'], '').toUpperCase() === 'KV';
 
+  // The relay's event-summary fault currents are all sampled at ONE instant — the fault — not
+  // at each channel's individual maximum. Comparing each channel against its own peak over the
+  // whole record therefore compares two different moments: on SEL-751 record 10824 that made
+  // IA read 244 A (its own late peak) against a summary value of 126.6 A, a spurious 0.52
+  // ratio that dragged the median away from the truth. Locating the common instant first —
+  // the sample where phase current is greatest — makes all four channels agree to 0.3%.
+  const magSeries = {};
+  const seriesFor = (key) => {
+    if (!(key in magSeries)) {
+      const arr = data.map(r => r[key] || 0);
+      magSeries[key] = arr.some(v => Math.abs(v) > 1e-9) ? computeRmsMagnitude(arr, N) : null;
+    }
+    return magSeries[key];
+  };
+  let faultIdx = 0, faultPeak = -1;
+  for (let i = 0; i < data.length; i++) {
+    let m = 0;
+    for (const ch of ['IA', 'IB', 'IC']) { const sr = seriesFor(ch); if (sr && sr[i] > m) m = sr[i]; }
+    if (m > faultPeak) { faultPeak = m; faultIdx = i; }
+  }
   const peakMag = (key) => {
-    const s = data.map(r => r[key] || 0);
-    if (!s.some(v => Math.abs(v) > 1e-9)) return null;
-    const m = computeRmsMagnitude(s, N);
-    const p = Math.max(...m);
-    return p > 0 ? p : null;
+    const sr = seriesFor(key);
+    if (!sr) return null;
+    const v = sr[faultIdx];
+    return v > 0 ? v : null;
   };
 
   // ── Reference 1: the relay's own fault currents ──────────────────────────────
@@ -527,11 +679,51 @@ function calibrateAnalogBasis(R) {
   let vRatio = null;
   if (R.settings?.VNOM > 0) {
     const vRefChannelUnits = isPrimary ? (R.settings.VNOM * PTR) / (voltIsKV ? 1000 : 1) : R.settings.VNOM;
+    // Median over the PRE-FAULT window only. Taking it over the whole record silently assumes
+    // voltage sits near nominal for most of the file, which is false for any record that keeps
+    // capturing after the breaker opens. On SEL-751 record 10824 the bus is dead for more than
+    // half the capture, so the whole-record median was exactly 0 — the reference evaluated to
+    // zero, vRatio came out null, and the file fell through to "uncalibrated" with no warning.
+    // Two corrections to the window, both learned from records where the trigger sits at the
+    // very start of the capture:
+    //
+    //   * The sliding-RMS needs a full cycle of history behind it, so the first N samples of
+    //     the series are a filter ramp, not a measurement. Including them drags the median low.
+    //   * `pfEnd = triggerSampleIndex` is only a pre-fault window if the trigger is actually
+    //     some distance in. On a record triggered at sample 15 of 960, "slice(0, 15)" is 15
+    //     ramp samples and nothing else — on STATION A 19565 that produced a reference 6% low,
+    //     which is enough to miss the sqrt(2) candidate's 10% window entirely and drop the whole
+    //     file to "uncalibrated" with magScale 1. Every voltage in the file then read 1/sqrt(2)
+    //     of its true value: 77% of nominal for a bus the relay's own 108% element was picked
+    //     up on. A too-short pre-fault window is no window at all — use the whole record, which
+    //     is the correct reference precisely in this case (breaker already open, source-side
+    //     voltage steady from end to end).
+    const trigIdx = R.triggerSampleIndex;
+    const lo = Math.min(N, Math.max(0, data.length - 1));
+    const hi = (trigIdx != null && trigIdx >= lo + N) ? trigIdx : data.length;
     const meds = [];
     for (const ch of ['VAY', 'VBY', 'VCY', 'VA', 'VB', 'VC']) {
       const s = data.map(r => r[ch] || 0);
       if (!s.some(v => Math.abs(v) > 1e-9)) continue;
-      const m = medianOf(computeRmsMagnitude(s, N));
+      const win = computeRmsMagnitude(s, N).slice(lo, hi).filter(v => v > 0);
+      if (win.length < Math.max(4, N / 2)) continue;
+      // The whole-record fallback above assumes voltage sits near nominal for MOST of the
+      // record, which breaks the other way on a short capture that trips early and stays open
+      // for the remainder: e.g. a trigger at sample 2 of 720 leaves ~715 samples in this window,
+      // of which only the first ~20-30 are actually energized before the bus decays to ~0 for
+      // the rest — 90%+ of the window is post-trip dead bus. A plain median over that window is
+      // itself ~0, not "nominal", producing a nonsense vRatio (seen as high as 3800x on a real
+      // CASH SOLAR "59 Trip" file) that should have snapped to a sane candidate. Restricting to
+      // samples within 10% of THIS channel's own peak within the window isolates the settled
+      // energized level (whichever portion of the window that is) from a decayed/dead tail or
+      // lead, without assuming which end of the window is which. A looser threshold (tried at
+      // 50%) still pulls in a wide swath of the post-trip RC-decay ramp — which decays at a
+      // different rate on each phase — so the three per-channel medians disagreed by up to 40%;
+      // tight to the peak (~90%+) is what actually converges all three channels on the same
+      // settled value.
+      const chMax = Math.max(...win);
+      const dominant = win.filter(v => v >= chMax * 0.9);
+      const m = medianOf(dominant.length ? dominant : win);
       if (m > 0) meds.push(m);
     }
     const obsV = medianOf(meds);
@@ -543,25 +735,118 @@ function calibrateAnalogBasis(R) {
     { v: Math.SQRT2, scale: Math.SQRT2, name: 'RMS-scaled filtered data (x sqrt(2))' },
   ];
 
-  const iHit = iRatios.length ? snapToCandidate(medianOf(iRatios), CANDIDATES) : null;
-  const vHit = vRatio ? snapToCandidate(vRatio, CANDIDATES) : null;
+  // The VOLTAGE reference carries a second ambiguity the current reference does not: VNOM may
+  // be the nominal phase-to-PHASE secondary voltage while the channels are phase-to-neutral, or
+  // vice versa, which puts a stray sqrt(3) in the ratio. On SEL-751 record 10824 VNOM = 120 is
+  // phase-to-phase (measured 487 V primary L-L / PTR 4 = 122 V secondary) while VA/VB/VC are
+  // phase-to-neutral at 281 V primary, giving an observed ratio of 1.707.
+  //
+  // That number is the whole reason this needs separate handling: sqrt(2) = 1.414 and
+  // sqrt(3) = 1.732 are only 22% apart, so the 25% snap window used for currents cannot tell
+  // them apart — 1.707 snapped to sqrt(2) and applied a 41% magnitude error to any file where
+  // the voltage reference was the only one available. Enumerating the sqrt(3) variants
+  // explicitly and tightening the window to 10% separates them cleanly (1.414 x 1.10 = 1.56
+  // vs 1.732 / 1.10 = 1.57, no overlap) and makes the connection convention an explicit,
+  // reported conclusion rather than a silent assumption.
+  const V_CANDIDATES = [
+    { v: 1, scale: 1, name: 'instantaneous samples, VNOM phase-to-neutral' },
+    { v: Math.SQRT2, scale: Math.SQRT2, name: 'RMS-scaled filtered data, VNOM phase-to-neutral' },
+    { v: Math.sqrt(3), scale: 1, name: 'instantaneous samples, VNOM phase-to-phase' },
+    { v: Math.SQRT2 * Math.sqrt(3), scale: Math.SQRT2, name: 'RMS-scaled filtered data, VNOM phase-to-phase' },
+  ];
 
-  const chosen = iHit || vHit;
+  const iHit = iRatios.length ? snapToCandidate(medianOf(iRatios), CANDIDATES) : null;
+  const vHit = vRatio ? snapToCandidate(vRatio, V_CANDIDATES, 1.10) : null;
+  // Record the VNOM L-L/L-N determination independently of which reference ends up chosen for
+  // magScale below (e.g. a file with clean event-summary fault currents will let iHit win the
+  // magScale decision even though vHit — computed from actual VA/VB/VC samples vs VNOM x PTR —
+  // is exactly what tells us whether VNOM is phase-to-phase or phase-to-neutral in this file).
+  if (vHit) R.vnomIsPhaseToPhase = /phase-to-phase/.test(vHit.name);
+
+  // Score both candidate scales against the record's own voltage element bits.
+  const bitScores = CANDIDATES.map(c => ({ cand: c, score: elementBitCrossCheck(R, c.scale) }))
+    .filter(x => x.score && x.score.total >= 6);
+  const bestBit = bitScores.length ? bitScores.slice().sort((a, b) => b.score.rate - a.score.rate)[0] : null;
+  const worstBit = bitScores.length > 1 ? bitScores.slice().sort((a, b) => a.score.rate - b.score.rate)[0] : null;
+  // "Decisive" means one candidate reproduces the relay's own decisions and the other clearly
+  // does not. Anything less and the bits are not separating the candidates — a record where
+  // every phase sits far from every pickup scores 100% either way and says nothing.
+  const bitDecisive = !!(bestBit && worstBit && bestBit.score.rate >= 0.9 && bestBit.score.rate - worstBit.score.rate >= 0.3);
+
+  let chosen = iHit || vHit;
+  let recovered = false;
+  if (!chosen && bitDecisive) { chosen = bestBit.cand; recovered = true; }
   if (!chosen) return;
 
+  // A ratio-derived scale that contradicts the relay's own bits is wrong. Say so loudly, and
+  // prefer the bits — they are the relay's published answer, not an inference from a nominal.
+  let overridden = false;
+  if (!recovered && bitDecisive && bestBit.cand.scale !== chosen.scale) {
+    chosen = bestBit.cand;
+    overridden = true;
+  }
+
   const agree = iHit && vHit && iHit.scale === vHit.scale;
+  const bitNote = bestBit
+    ? ` Cross-checked against ${bestBit.score.total} voltage-element bit comparisons in this record: x${bestBit.cand.scale === 1 ? '1' : 'sqrt(2)'} reproduces ${(bestBit.score.rate * 100).toFixed(0)}% of the relay's own pickup decisions${worstBit && worstBit !== bestBit ? `, versus ${(worstBit.score.rate * 100).toFixed(0)}% for x${worstBit.cand.scale === 1 ? '1' : 'sqrt(2)'}` : ''}.`
+    : '';
   R.magScale = chosen.scale;
   R.basisCalibration = {
     magScale: chosen.scale,
     isPrimary,
-    source: iHit && vHit ? 'event-summary fault currents + VNOM x PTR' : iHit ? 'event-summary fault currents' : 'VNOM x PTR',
-    confidence: agree ? 'high (two independent references agree)'
-              : (iHit && vHit) ? 'low (references disagree — current reference used)'
+    source: recovered ? 'relay voltage-element bits'
+      : overridden ? 'relay voltage-element bits (overrode ratio reference)'
+        : (iHit && vHit ? 'event-summary fault currents + VNOM x PTR' : iHit ? 'event-summary fault currents' : 'VNOM x PTR'),
+    confidence: overridden ? 'medium (ratio reference contradicted the relay’s own element bits — bits used)'
+      : recovered ? 'medium (recovered from the relay’s own element bits)'
+        : agree ? 'high (two independent references agree)'
+          : (iHit && vHit) ? 'low (references disagree — current reference used)'
+            : (bitDecisive && bestBit.cand.scale === chosen.scale) ? 'high (ratio reference confirmed by the relay’s own element bits)'
               : 'medium (single reference)',
     observedCurrentRatio: iRatios.length ? +medianOf(iRatios).toFixed(3) : null,
     observedVoltageRatio: vRatio ? +vRatio.toFixed(3) : null,
-    detail: `Analog channels read as ${isPrimary ? 'PRIMARY' : 'SECONDARY'}-referred; magnitudes ${chosen.scale === 1 ? 'need no scaling correction' : 'scaled by sqrt(2)'} (${chosen.name}).`,
+    elementBitAgreement: bestBit ? { scale: bestBit.cand.scale, rate: +bestBit.score.rate.toFixed(3), samples: bestBit.score.total } : null,
+    detail: `Analog channels read as ${isPrimary ? 'PRIMARY' : 'SECONDARY'}-referred; magnitudes ${chosen.scale === 1 ? 'need no scaling correction' : 'scaled by sqrt(2)'} (${chosen.name}).${bitNote}`,
   };
+}
+
+// The VNOM L-L/L-N convention (see calibrateAnalogBasis' V_CANDIDATES block) is fixed by how
+// a relay's PTs are wired — it is a property of the physical device + settings, not of any one
+// event. calibrateAnalogBasis() resolves it per-file from that file's own pre-fault voltage
+// samples, which fails when a record's pre-fault window happens to be mostly dead bus with
+// only a still-rising energization tail (seen on a real PV SEL-751 pair, events 11097/11098:
+// 11097's pre-fault window sat settled at ~13.4 kV the whole way through and resolved cleanly;
+// 11098, captured ~2m15s later, was de-energized for all but the last few samples before its
+// trigger, so the "restrict to top 10% of window peak" logic caught only the mid-ramp tail and
+// produced a ratio that snapped to neither candidate). When multiple events from the SAME
+// device (matched by serial number, falling back to device string, + identical CTR/PTR/VNOM)
+// are loaded together, borrow a confidently-resolved determination for any sibling whose own
+// window came back null, rather than leaving it an unexplained "*". Does not touch magScale —
+// only the VNOM L-L/L-N flag, which is what the top-bar "Expected V(L-N) primary" figure uses.
+function reconcileVnomAcrossEvents(results) {
+  const keyFor = (p) => [p.serialNumber || p.device || '', p.settings?.CTR, p.settings?.PTRY, p.settings?.VNOM].join('|');
+  const byKey = {};
+  for (const r of results) {
+    if (!r.parsed || r.parsed.format === 'form6') continue;
+    if (r.parsed.vnomIsPhaseToPhase === undefined) continue; // no VNOM-based figure applies to this file at all
+    const k = keyFor(r.parsed);
+    (byKey[k] = byKey[k] || []).push(r);
+  }
+  for (const k in byKey) {
+    const group = byKey[k];
+    if (group.length < 2) continue;
+    const resolved = group.find(r => r.parsed.vnomIsPhaseToPhase != null);
+    if (!resolved) continue;
+    for (const r of group) {
+      if (r.parsed.vnomIsPhaseToPhase == null) {
+        r.parsed.vnomIsPhaseToPhase = resolved.parsed.vnomIsPhaseToPhase;
+        r.parsed.vnomInferredFromSibling = resolved.parsed.eventInfo?.refNum || resolved.parsed.fileName || 'a sibling event';
+        if (r.parsed.basisCalibration) {
+          r.parsed.basisCalibration.confidence = `medium (VNOM convention inferred from sibling event ${r.parsed.vnomInferredFromSibling} on the same relay — this file's own pre-fault window did not resolve it)`;
+        }
+      }
+    }
+  }
 }
 
 
@@ -577,8 +862,13 @@ function calcU1Time(multiple, td) {
 // `scale` is the per-file magnitude calibration from calibrateAnalogBasis() (P.magScale):
 // 1.0 for true instantaneous samples, sqrt(2) for RMS-scaled filtered data. Defaulting it to
 // 1 keeps every uncalibrated/other-format caller behaving exactly as before.
-function computeRMS(arr, key, scale = 1) {
+function computeRMS(arr, key, scale = 1, samplesPerCycle = null) {
   if (!arr.length) return 0;
-  return scale * Math.sqrt(arr.reduce((s, r) => s + r[key] * r[key], 0) / arr.length);
+  // On filtered quarter-cycle data a mean-of-squares returns |X|/sqrt(2) for the same reason
+  // the point-by-point sliding RMS did (see isFilteredQuarterCycle), so the sqrt(2) has to go
+  // back in. There is no exact pairwise substitute here because this is a window AVERAGE by
+  // design — but over a window where the magnitude is roughly steady, which is exactly what the
+  // pre-fault and fault summary windows are, the correction is exact.
+  const filt = isFilteredQuarterCycle(samplesPerCycle) ? Math.SQRT2 : 1;
+  return scale * filt * Math.sqrt(arr.reduce((s, r) => s + r[key] * r[key], 0) / arr.length);
 }
-

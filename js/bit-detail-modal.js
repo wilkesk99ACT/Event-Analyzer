@@ -1,4 +1,4 @@
-// Bit-detail modal: click-through explanation of a single logic bit.
+
 
 function showBitDetail(label) {
   const modal = document.getElementById('bitModal');
@@ -149,5 +149,3 @@ function resetApp() {
   document.getElementById('eventSelector').style.display = 'none';
   document.getElementById('fileInput').value = '';
 }
-
-// File input handling
