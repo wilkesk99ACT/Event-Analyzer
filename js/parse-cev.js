@@ -827,7 +827,7 @@ function reconcileVnomAcrossEvents(results) {
   const keyFor = (p) => [p.serialNumber || p.device || '', p.settings?.CTR, p.settings?.PTRY, p.settings?.VNOM].join('|');
   const byKey = {};
   for (const r of results) {
-    if (!r.parsed || r.parsed.format === 'form6') continue;
+    if (!r.parsed || r.parsed.format === 'form6' || r.parsed.format === 'sel851') continue;
     if (r.parsed.vnomIsPhaseToPhase === undefined) continue; // no VNOM-based figure applies to this file at all
     const k = keyFor(r.parsed);
     (byKey[k] = byKey[k] || []).push(r);

@@ -1,6 +1,7 @@
 
 function renderTabs() {
   if (PARSED.format === 'form6') { renderForm6Tabs(); return; }
+  if (PARSED.format === 'sel851') { renderSel851Tabs(); return; }
   const tabs = [
     { id: 'timeline', label: 'Event Timeline', icon: '📍' },
     { id: 'voltages', label: 'Voltages', icon: '🔌' },
@@ -30,6 +31,7 @@ function renderTabs() {
 
 function renderContent() {
   if (PARSED.format === 'form6') { renderForm6Content(); return; }
+  if (PARSED.format === 'sel851') { renderSel851Content(); return; }
   const A = ANALYSIS;
   const P = PARSED;
   const CTR = P.settings.CTR || 1;

@@ -72,9 +72,22 @@ function selectEvent(idx) {
   document.getElementById('topBarMeta').textContent =
     `${devInfo || PARSED.fileName} — Event #${PARSED.eventInfo.refNum} — ${PARSED.eventInfo.eventType}`;
   document.getElementById('topBarTimestamp').textContent = formatTimestamp(ts);
-  const ratios = PARSED.format === 'form6' ? ['Form6-TS COMTRADE'] : [`CTR=${PARSED.settings.CTR || '?'}`];
+  const ratios =
+    PARSED.format === 'form6'  ? ['Form6-TS COMTRADE'] :
+    PARSED.format === 'sel851' ? [
+      `CTR=${PARSED.ratios.CTP ?? '?'}`,
+      `PTR=${PARSED.ratios.PTP ?? '?'}`,
+      `VNOM=${PARSED.ratios.VNomKv ?? '?'}kV`,
+    ] : [`CTR=${PARSED.settings.CTR || '?'}`];
   let vPriText = '', vPriTitle = '';
-  if (PARSED.format !== 'form6') {
+  // The 851 states its nominal system voltage directly as Sys.VNom, so the phase-to-neutral
+  // figure needs none of the L-L/L-N inference the CEV path has to do.
+  if (PARSED.format === 'sel851' && PARSED.ratios.VNomKv) {
+    const vLn = (PARSED.ratios.VNomKv * 1000) / Math.sqrt(3);
+    vPriText = `Nominal V(L-N) primary = ${(vLn / 1000).toFixed(2)} kV`;
+    vPriTitle = `Sys.VNom is ${PARSED.ratios.VNomKv} kV phase-to-phase, so phase-to-neutral is ${vLn.toFixed(0)} V. This relay states its nominal voltage directly, so no inference is needed.`;
+  }
+  if (PARSED.format !== 'form6' && PARSED.format !== 'sel851') {
     if (PARSED.settings.PTRY) ratios.push(`PTR=${PARSED.settings.PTRY}`);
     if (PARSED.settings.VNOM) ratios.push(`VNOM=${PARSED.settings.VNOM}V`);
     // Expected phase-to-neutral primary voltage: VNOM (nominal secondary) x PTR — but VNOM

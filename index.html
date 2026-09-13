@@ -15,20 +15,20 @@
   <div class="drop-overlay-inner">
     <div class="drop-overlay-icon">📂</div>
     <div class="drop-overlay-text">Drop anywhere to load</div>
-    <div class="drop-overlay-sub">.CEV file(s), or a Form6 .cfg/.dat/settings.txt bundle, will be analyzed automatically</div>
+    <div class="drop-overlay-sub">The tool reads the file and starts the analysis automatically</div>
   </div>
 </div>
 
 <!-- Upload Screen -->
 <div id="upload-screen">
   <h1>⚡ CEV <span>Trip Analyzer</span></h1>
-  <p class="subtitle">Upload SEL .CEV files or an Eaton Form 6 COMTRADE bundle to decode trip causes.</p>
+  <p class="subtitle">Load a relay event record. The tool shows why the relay tripped, and whether that trip agrees with the relay settings.</p>
   <div class="drop-zone" id="dropZone">
     <div class="drop-icon">📁</div>
     <div class="drop-label">Drop files here or click to browse</div>
-    <div class="drop-hint">Supports SEL .CEV files (and .evzip bundles) and Eaton Form 6 COMTRADE files (.cfg + .dat + settings.txt).</div>
+    <div class="drop-hint">Reads SEL .CEV files, SEL-851 .evzip archives, and Eaton Form 6 COMTRADE files (.cfg + .dat + settings.txt).</div>
   </div>
-  <input type="file" id="fileInput" accept=".cev,.CEV,.txt,.evzip,.EVZIP,.zip,.ZIP,.cfg,.CFG,.dat,.DAT" style="display:none" multiple>
+  <input type="file" id="fileInput" accept=".cev,.CEV,.txt,.evzip,.EVZIP,.zip,.ZIP,.cfg,.CFG,.dat,.DAT,.hdr,.HDR" style="display:none" multiple>
   <div id="errorMsg" class="error-msg" style="display:none"></div>
 </div>
 
@@ -298,6 +298,9 @@
 <script src="js/app-shell.js"></script>
 <script src="js/parse-form6.js"></script>
 <script src="js/form6-ui.js"></script>
+<script src="js/parse-sel851.js"></script>
+<script src="js/analyze-sel851.js"></script>
+<script src="js/sel851-ui.js"></script>
 <script src="js/file-loading.js"></script>
 <script src="js/event-selector-and-help.js"></script>
 <script src="js/logic-graph-svg.js"></script>

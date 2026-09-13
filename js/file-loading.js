@@ -12,15 +12,19 @@ function formatTimestamp(ts) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// .evzip / .zip SUPPORT — read a zip archive of .CEV files with zero external
-// dependencies, using only browser-native APIs. SEL's Event Manager and similar tools
-// often bundle a multi-shot event (e.g. a recloser sequence, or several relays'
-// records of the same fault) into a single .evzip, which is just a standard ZIP
-// containing plain .CEV files. Rather than pull in a JS zip library — an extra
-// dependency for a single-file distributable tool, and a possible corporate-proxy
-// headache since it'd need to load from a CDN — this parses the ZIP central
-// directory by hand and inflates entries with the browser's built-in
-// DecompressionStream, so the tool stays a single self-contained HTML file.
+// .evzip / .zip SUPPORT — read a zip archive with zero external dependencies, using only
+// browser-native APIs. SEL bundles an event into a single .evzip, which is just a standard
+// ZIP. What is inside depends on the relay:
+//   * SEL-751, SEL-651R and similar  →  one or more plain-text .CEV files
+//   * SEL-851                        →  a COMTRADE set: .cfg + binary .dat + .hdr
+// Rather than pull in a JS zip library — an extra dependency for a distributable tool, and a
+// possible corporate-proxy headache since it'd need to load from a CDN — this parses the ZIP
+// central directory by hand and inflates entries with the browser's built-in
+// DecompressionStream, so the tool stays self-contained.
+//
+// Entries are returned as RAW BYTES. An SEL-851 .dat is BINARY32 sample data; decoding it as
+// UTF-8 replaces every invalid byte sequence with U+FFFD and destroys the record beyond
+// recovery. Callers that want text use entryText(), which decodes on demand.
 // ══════════════════════════════════════════════════════════════════════
 
 function readFileAsText(file) {
@@ -94,9 +98,17 @@ async function unzipEntries(arrayBuffer) {
     } else {
       throw new Error(`Unsupported ZIP compression method (${entry.method}) for ${entry.name}`);
     }
-    out.push({ name: entry.name, text: new TextDecoder('utf-8').decode(outBytes) });
+    out.push({ name: entry.name, bytes: outBytes });
   }
   return out;
+}
+
+// Decode a ZIP entry to text on demand. Latin-1 is used rather than UTF-8 because SEL writes
+// these files in a single-byte encoding and latin-1 never throws away a byte, so a stray
+// high-byte character cannot corrupt the rest of a settings or event file.
+function entryText(entry) {
+  if (entry._text === undefined) entry._text = new TextDecoder('latin1').decode(entry.bytes);
+  return entry._text;
 }
 
 // ── Form6 bundle helpers: classify .txt files (settings vs one-line fault summary vs
@@ -139,9 +151,11 @@ function processFiles(files) {
     // Analyze each event with context from the previous event
     for (let i = 0; i < results.length; i++) {
       const prevEvt = i > 0 ? results[i - 1] : null;
-      results[i].analysis = results[i].parsed.format === 'form6'
-        ? analyzeForm6(results[i].parsed)
-        : analyzeCEV(results[i].parsed, prevEvt);
+      const fmt = results[i].parsed.format;
+      results[i].analysis =
+        fmt === 'form6'  ? analyzeForm6(results[i].parsed) :
+        fmt === 'sel851' ? analyzeSel851(results[i].parsed) :
+                           analyzeCEV(results[i].parsed, prevEvt);
     }
 
     reconcileVnomAcrossEvents(results);
@@ -173,6 +187,23 @@ function processFiles(files) {
         const datFile = fileArray.find(f => f.name.replace(/\.dat$/i, '') === stem && /\.dat$/i.test(f.name));
         if (!datFile) { errors.push(`${cfgFile.name}: no matching .dat file found`); return; }
         const cfgText = await readFileAsText(cfgFile);
+
+        // Same bundle, two very different relays. The .cfg names the device on its first line
+        // and states the data file format near the end. An SEL-851 writes BINARY32; Eaton's
+        // ProView writes ASCII. Either marker alone is enough to route correctly, and a loose
+        // .hdr alongside settles it outright.
+        const hdrFile = fileArray.find(f => f.name.replace(/\.hdr$/i, '') === stem && /\.hdr$/i.test(f.name));
+        const isSel851 = !!hdrFile
+          || /^SEL-?8\d\d/i.test(cfgText.split(/\r?\n/)[0] || '')
+          || /\bBINARY(32)?\b/i.test(cfgText);
+        if (isSel851) {
+          const datBytes = new Uint8Array(await readFileAsArrayBuffer(datFile));
+          const hdrText = hdrFile ? await readFileAsText(hdrFile) : null;
+          const parsed = parseSel851Bundle(cfgText, datBytes, hdrText, cfgFile.name);
+          results.push({ parsed, fileName: cfgFile.name });
+          return;
+        }
+
         const datText = await readFileAsText(datFile);
         const txtFiles = fileArray.filter(f => /\.txt$/i.test(f.name));
         const txtWithContent = await Promise.all(txtFiles.map(async f => ({ name: f.name, text: await readFileAsText(f) })));
@@ -190,7 +221,7 @@ function processFiles(files) {
     }),
     // ── Existing SEL CEV / .evzip handling — unchanged, applied to everything that isn't a
     // .cfg/.dat/.txt already consumed above as part of a Form6 bundle. ──
-    ...otherFiles.filter(f => !/\.(dat|txt)$/i.test(f.name) || cfgFiles.length === 0).map(async file => {
+    ...otherFiles.filter(f => !/\.(dat|txt|hdr)$/i.test(f.name) || cfgFiles.length === 0).map(async file => {
     const isArchive = /\.(evzip|zip)$/i.test(file.name);
     try {
       if (isArchive) {
@@ -200,14 +231,33 @@ function processFiles(files) {
         // exactly as if the user had dropped each .CEV individually.
         const buf = await readFileAsArrayBuffer(file);
         const entries = await unzipEntries(buf);
+
+        // An .evzip from an SEL-851 holds a COMTRADE set, not CEV. Check for that first: a
+        // .cfg present alongside a matching .dat is unambiguous, and the .dat must never be
+        // handed to the CEV parser, which would read binary sample data as text.
+        const sel851Bundles = findSel851Bundle(entries);
+        if (sel851Bundles) {
+          for (const b of sel851Bundles) {
+            try {
+              const parsed = parseSel851Bundle(entryText(b.cfg), b.dat.bytes, b.hdr ? entryText(b.hdr) : null, b.cfg.name);
+              results.push({ parsed, fileName: b.cfg.name });
+            } catch (err) {
+              errors.push(`${file.name} → ${b.cfg.name}: ${err.message}`);
+              console.error(`Error processing SEL-851 bundle ${b.cfg.name}:`, err);
+            }
+          }
+          return;
+        }
+
         const cevEntries = entries.filter(e => /\.(cev|txt)$/i.test(e.name));
         if (cevEntries.length === 0) {
-          errors.push(`${file.name}: archive contained no .CEV files`);
+          const listed = entries.map(e => e.name).join(', ') || 'nothing';
+          errors.push(`${file.name}: this archive holds no event record this tool can read. It contains ${listed}. A .CEV file, or a COMTRADE .cfg with a matching .dat, is needed.`);
           return;
         }
         for (const entry of cevEntries) {
           try {
-            const parsed = parseCEV(entry.text, entry.name);
+            const parsed = parseCEV(entryText(entry), entry.name);
             results.push({ parsed, fileName: entry.name });
           } catch (err) {
             errors.push(`${file.name} → ${entry.name}: ${err.message}`);

@@ -1,6 +1,7 @@
 
 function renderBanner() {
   if (PARSED.format === 'form6') { renderForm6Banner(); return; }
+  if (PARSED.format === 'sel851') { renderSel851Banner(); return; }
   const el = document.getElementById('tripBanner');
   const cause = ANALYSIS.tripCause;
   EXTRA_FLAG_BITS = [];
