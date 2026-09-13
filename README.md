@@ -1,11 +1,23 @@
-# CEV Trip Analyzer
+# Event Analyzer
 
 ## What It Is
 
-The CEV Trip Analyzer is an internally developed diagnostic tool that reads SEL relay event
-(CEV) files and works out a likely, evidence-backed explanation for why a protective device
-operated. It runs entirely in a web browser, requires no installation, no server, and no data
-leaves the browser at any point.
+The Event Analyzer is an internally developed diagnostic tool that reads relay event records
+and works out a likely, evidence-backed explanation for why a protective device operated. It
+runs entirely in a web browser. It needs no installation and no server, and no data leaves the
+browser at any point.
+
+### Formats it reads
+
+| Relay | What to load | What you get |
+|---|---|---|
+| SEL-751, SEL-651R and other CEV relays | `.CEV` file, or an `.evzip` archive of them | Full analysis: trip cause, SELogic diagram, diagnostics |
+| **SEL-851** | **`.evzip` archive (`.cfg` + `.dat` + `.hdr`)** | **Full analysis, plus a reasonableness verdict** |
+| Eaton Form 6 / ProView | `.cfg` + `.dat` + `settings.txt` | Waveforms, digital channels, pickup comparison |
+
+The SEL-851 does not write CEV. It is configured with SEL Grid Configurator rather than
+AcSELerator QuickSet, and exports a binary COMTRADE set inside an `.evzip`. Load the whole
+`.evzip`; the tool finds the three files inside it.
 
 It is a diagnostic aid, not a final authority — its output is a starting point grounded in the
 relay's own recorded data and configured logic, meant to be checked against the diagram and
@@ -94,6 +106,40 @@ Scroll anywhere inside a chart's plotted area to zoom in or out — this applies
 once zoomed. Click or drag anywhere to place the measurement cursor, which shows exact values
 on every chart at that instant. Double-click any chart to reset its zoom.
 
+**What is the verdict on an SEL-851 event?**
+The 851 writes its complete settings into the event record, so the tool can do something it
+cannot do for other formats: check the trip against the relay's own settings and say whether
+the two agree. The verdict is one of three results.
+
+- **Trip agrees with settings.** The element that tripped was enabled, the measured value was
+  past its pickup, and the delay matched the setting.
+- **Review needed.** The trip holds up, but one or more details do not match what the tool
+  expected.
+- **Disagreement found.** Something in the record contradicts the settings. The tool names what
+  disagrees and what could cause it.
+
+Each check compares two things in the file that must agree. Where the record cannot settle a
+question, the tool says so instead of guessing. A missing verdict is an honest result.
+
+**What can the 851 checks find?**
+
+| Check | What it compares |
+|---|---|
+| Measurement basis | Pre-event voltage against `Sys.VNom` and `VTP.Rat` |
+| Element pickup | Measured value at timeout against `PUVal` |
+| Element delay | Time from pickup to timeout against `PUDly`, or against the curve |
+| Pickup held | Whether the value stayed past pickup for the whole timing window |
+| Enable and torque control | Whether an element operated while set off or supervised off |
+| Trip equation | Which branch of `Trip_01.Init` read 1 at the trip |
+| Loss of potential | Whether `60LOP.PU` tracks the measured voltage |
+| Breaker | Time from trip to `Bkr_01.52A_Sta` dropout |
+| Fault origin | Peak current against the relay's own phase overcurrent pickups |
+
+The last one matters at a distributed generation site. A fault on the protected feeder raises
+current through the relay's CTs. A disturbance elsewhere on the system lowers voltage without
+raising current. This separates a site that caused an event from a site that only responded to
+one.
+
 **How is this different from just opening the file in QuickSet or SynchroWAVe?**
 QuickSet shows how the relay is configured; SynchroWAVe shows what was recorded. Neither
 automatically connects the two for a specific event. This tool does that connection
@@ -120,4 +166,34 @@ for the event in front of you, which otherwise has to be done manually, equation
 - **📋 Equations** — the raw SELogic text, for verifying the tool's resolution directly against
   the relay's own settings.
 
+### SEL-851 tabs
+
+- **⚖️ Verdict** — the answer. Whether the trip agrees with the settings, what started it, every
+  finding, the trip equation term by term, and the measurement basis every number rests on.
+- **🛡️ Elements** — every element in the trip equation, with its setting beside the value
+  measured from this record's own waveforms, and a chart of the operating quantity against its
+  pickup.
+- **📍 Event Timeline** — every change of state among the named relay bits, in order.
+- **🔌 Voltages** — phase-to-phase, phase-to-neutral, sequence voltage, and frequency.
+- **〰️ Currents** — phase, ground and sequence current, plus the fault origin comparison.
+- **⚙️ Settings** — the complete relay settings from the `.hdr` file, and the record details.
+
 An in-app **Help** button (top right of the tool) contains this same reference material.
+
+---
+
+## Tests
+
+`test/test-sel851.mjs` runs the SEL-851 parser and analysis against a real `.evzip` and prints
+the full result. `test/test-regression.mjs` runs the edge cases and unit checks: binary ZIP
+entry handling, an archive with no `.hdr`, a truncated `.dat`, the Boolean evaluator, trip
+equation branch splitting, the inverse-time curve constants, and COMTRADE date order.
+
+```
+node test/test-sel851.mjs path/to/event.evzip
+node test/test-regression.mjs path/to/event.evzip
+CEV_DIR=/path/to/cev/corpus node test/test-regression.mjs path/to/event.evzip
+```
+
+Set `CEV_DIR` to a folder of real `.CEV` files to include the CEV regression section. Without
+it that section is skipped, and the SEL-851 checks still run.
