@@ -10,7 +10,8 @@ vm.runInContext(`
   function formatTimestamp(ts){return ts.month+'/'+ts.day+'/'+ts.year;}
 `, ctx);
 for (const f of ['signal-processing.js','file-loading.js','parse-cev.js','analyze-cev.js',
-                 'analyze-reclose.js','parse-sel851.js','analyze-sel851.js']) {
+                 'logic-graph-model.js','tooltips.js',
+                 'analyze-reclose.js','analyze-custom-close.js','parse-sel851.js','analyze-sel851.js']) {
   vm.runInContext(fs.readFileSync(R+f,'utf8'), ctx, { filename: f });
 }
 

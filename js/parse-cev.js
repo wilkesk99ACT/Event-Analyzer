@@ -8,7 +8,7 @@ function parseCEV(text, fileName) {
   const R = {
     fid: '', device: '', timestamp: {}, eventInfo: {},
     analogChannels: [], analogData: [], digitalLabels: [],
-    settings: {}, svSettings: [], voltageElements: {},
+    settings: {}, svSettings: [], latchSettings: [], voltageElements: {},
     freqElements: {}, overcurrentElements: {},
     tripEquation: '', tripEquationName: '', tripEquationX: '', faultEquation: '', recloseEquation: '', dtlEquation: '', erEquation: '', erEquationName: '',
     digitalTransitions: [], raw: text, fileName: fileName || '',
@@ -459,6 +459,36 @@ function parseCEV(text, fileName) {
       dropoutDelay: parseFloat(svM[3]),
       equation: eq,
     });
+  }
+
+  // ── Latch bits (LT01..LT32) ──
+  // A latch is a two-equation element: SETnn drives it true, RSTnn drives it false, and it holds
+  // its state across a power cycle. That makes latches the usual home for "mode" switches a site
+  // sets once and leaves alone — automatic restoration enabled, hot line tag applied, fault
+  // lockout latched in. A close equation that reads LT02 is therefore not asking "did somebody
+  // just press something"; it is asking "is this mode switched on". Telling those two apart is
+  // what lets the custom-close analysis decide whether a close path needs a person or not, so
+  // both equations are parsed here and kept with the latch they belong to.
+  {
+    const eqOf = (prefix, n) => {
+      const x = S.match(new RegExp('(?:^|[^A-Z0-9_])' + prefix + n + '\\s*:=([^\\r\\n]+)', 'm'));
+      return x ? x[1].trim() : null;
+    };
+    for (let i = 1; i <= 32; i++) {
+      const n = String(i).padStart(2, '0');
+      const setEq = eqOf('SET', n);
+      const rstEq = eqOf('RST', n);
+      if (setEq == null && rstEq == null) continue;
+      // "SET04 := 0" is a latch the site has deliberately left unused. Keep it — a close path
+      // gated on a latch that can never be set is itself a finding, not a blank.
+      R.latchSettings.push({
+        num: i,
+        label: `LT${n}`,
+        setEquation: setEq,
+        resetEquation: rstEq,
+        comment: (setEq && setEq.includes('#')) ? setEq.split('#').slice(1).join('#').trim() : '',
+      });
+    }
   }
 
   // ── Store debug info ──

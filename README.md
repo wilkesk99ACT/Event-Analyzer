@@ -140,6 +140,26 @@ current through the relay's CTs. A disturbance elsewhere on the system lowers vo
 raising current. This separates a site that caused an event from a site that only responded to
 one.
 
+**The 79 element is off. Does that mean the device will not come back by itself?**
+Not necessarily, and the tool no longer assumes it does. Many DER interconnection reclosers have
+`E79 := N` and an automatic return written by hand in SELogic instead — usually an IEEE 1547
+enter-service window: a long timer on an SV that watches the utility-side voltage and frequency,
+armed by a latch bit. The Reclosing tab reads the close equation (`CL3P` / `CL`) and walks each
+term down through the SVs that feed it. It then sorts every way in:
+
+| Path | What it means |
+|---|---|
+| **Automatic** | No operator action is necessary. A timer and measured conditions run it. |
+| **Operator** | A pushbutton press or a close command from a port is necessary. |
+| **External** | A contact input or a communications bit starts it. What drives that signal is outside this file, so the tool says so instead of guessing. |
+
+A latch bit (`LT`) is read as a mode switch, not as an operator action. `LT02` armed means the
+automatic mode is on. It does not mean a person is at the recloser.
+
+**Does the tool say the device will close?**
+No. It reports what the close logic permits, and the state of each condition at the last sample
+of the record. The close falls minutes after the record ends, so the record cannot show it.
+
 **How is this different from just opening the file in QuickSet or SynchroWAVe?**
 QuickSet shows how the relay is configured; SynchroWAVe shows what was recorded. Neither
 automatically connects the two for a specific event. This tool does that connection
@@ -162,6 +182,11 @@ for the event in front of you, which otherwise has to be done manually, equation
 - **🔗 SV Logic** — every internal SV used in the trip equation (and every other active SV),
   with pickup/dropout delays and the underlying equation, plus a legend explaining the
   in-trip/not-in-trip coloring.
+- **🔄 Reclosing** — whether the device comes back by itself, and how. The ANSI 79 sequence when
+  the element is enabled, and — new — a **Close Logic Outside the 79 Element** card when the
+  close equation holds a path the 79 block does not: the path that starts the close, its delay,
+  the mode switches that arm it, and every condition the close waits on, each shown with its
+  state at the last sample of the record.
 - **📊 Frequency** — frequency protection elements' pickups vs. measured values.
 - **📋 Equations** — the raw SELogic text, for verifying the tool's resolution directly against
   the relay's own settings.
@@ -193,6 +218,15 @@ equation branch splitting, the inverse-time curve constants, and COMTRADE date o
 node test/test-sel851.mjs path/to/event.evzip
 node test/test-regression.mjs path/to/event.evzip
 CEV_DIR=/path/to/cev/corpus node test/test-regression.mjs path/to/event.evzip
+```
+
+`test/test-custom-close.mjs` covers the close logic that sits outside the 79 element: that an
+SELogic enter-service timer on a device with `E79 := N` is found, that a pushbutton or SCADA
+path is not called automatic, that a latch bit is read as a mode switch, and that a device with
+a normal enabled 79 scheme is left alone. It needs no `.evzip`.
+
+```
+node test/test-custom-close.mjs /path/to/cev/corpus
 ```
 
 Set `CEV_DIR` to a folder of real `.CEV` files to include the CEV regression section. Without

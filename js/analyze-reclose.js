@@ -242,9 +242,19 @@ function analyzeReclose(P, A) {
   };
   const anyRecloseBits = !!(bits.LO || bits.CY || bits.RS || bits.SHOT.some(Boolean));
 
+  // Closing is not only the 79 element's job. A DER recloser very often has E79 := N and an
+  // automatic return built by hand in SELogic instead, and a verdict written from the 79 block
+  // alone would call that device "will never auto-close" while it quietly closes itself five
+  // minutes later. The custom-close analysis runs first so every verdict below can consult it.
+  const custom = (typeof analyzeCustomClose === 'function')
+    ? (() => { try { return analyzeCustomClose(P, A); } catch (e) { console.warn('custom close analysis failed', e); return null; } })()
+    : null;
+  if (A && custom) A.customClose = custom;
+
   const out = {
-    scheme: sch, bits, anyRecloseBits,
-    available: !!(sch.present || anyRecloseBits),
+    scheme: sch, bits, anyRecloseBits, custom,
+    available: !!(sch.present || anyRecloseBits || (custom && custom.present)),
+    hasCustomAutoClose: !!(custom && custom.custom),
     gates: [], plan: [], observed: [], lockoutPaths: [], notes: [],
     verdict: null,
   };
@@ -393,6 +403,9 @@ function analyzeReclose(P, A) {
     pass: enabled === true,
     summary: enabled === false
       ? `E79 := ${sch.E79raw} — automatic reclosing is switched OFF on this device.`
+        + (out.hasCustomAutoClose
+          ? ` The device can still close by itself. Custom SELogic does it, not the 79 element. See "Close Logic Outside the 79 Element" below.`
+          : (custom && custom.present ? ` The close equation ${custom.closeName} is the only way this device closes. See "Close Logic Outside the 79 Element" below.` : ''))
       : (enabled === true
         ? (out.shotsCappedByOI
           ? `E79 := ${sch.E79raw} allows ${declaredShots} attempts, but only ${contiguousOIs} open interval${contiguousOIs === 1 ? ' is' : 's are'} actually set (79OI${contiguousOIs + 1} := OFF). This is a ${contiguousOIs}-shot scheme: reaching shot ${contiguousOIs + 1} has no interval to time and goes to lockout.`
@@ -964,7 +977,19 @@ function formatDuration(sec) {
 function buildRecloseVerdict(out, gr, sch, P, A) {
   const V = (kind, tone, headline, detail, extra) => Object.assign({ kind, tone, headline, detail }, extra || {});
 
+  // E79 := N used to end the analysis here with "the recloser stays open until somebody closes
+  // it". On a DER interconnection recloser that sentence is routinely false: the 79 element is
+  // off precisely BECAUSE the site wrote its own enter-service logic in SELogic, and that logic
+  // closes the device without anyone touching it. So the switched-off element is now only the
+  // start of the answer — the close equation gets the last word.
   if (out.enabled === false) {
+    const cc = out.custom;
+    if (cc && cc.custom && cc.verdict) {
+      return V('custom-auto', cc.verdict.tone || 'warn', cc.verdict.headline, cc.verdict.detail, { custom: true });
+    }
+    if (cc && cc.present && cc.verdict) {
+      return V('disabled', cc.verdict.tone || 'bad', cc.verdict.headline, cc.verdict.detail, { custom: true });
+    }
     return V('disabled', 'bad', 'Will NOT auto-close — reclosing is disabled',
       `The reclosing element is switched off on this device (E79 := ${sch.E79raw}). No automatic close will be attempted after this trip, or after any trip. The recloser stays open until somebody closes it — front-panel pushbutton, SCADA, or a field visit.`);
   }
@@ -1110,6 +1135,12 @@ function buildRecloseVerdict(out, gr, sch, P, A) {
   if (out.enabled === true) {
     return V('armed', 'ok', 'Will auto-close',
       `${whenText} ${remainText} No close-supervision permissive stands in the way.`);
+  }
+  // No usable 79 block. If the close equation still shows a way in, report that instead of a
+  // blank "could not be determined" — the reader's question is "does it come back", and the
+  // close logic answers it even when the 79 settings are absent.
+  if (out.custom && out.custom.present && out.custom.verdict) {
+    return V(out.custom.verdict.kind, out.custom.verdict.tone, out.custom.verdict.headline, out.custom.verdict.detail, { custom: true });
   }
   return V('unknown', 'unknown', 'Reclose behaviour could not be determined',
     'This file does not carry enough of the reclosing settings block to say what the recloser will do next.');
@@ -1281,7 +1312,9 @@ function buildRecloseTabHTML(P, A) {
 
   const glance = [];
   if (RC.enabled === true && RC.shots) glance.push(['Shots configured', `${RC.shots}`]);
-  if (RC.enabled === false) glance.push(['Reclosing', 'Disabled (E79 off)']);
+  if (RC.enabled === false) glance.push(['ANSI 79 element', 'Off (E79 := ' + (RC.scheme?.E79raw ?? 'N') + ')']);
+  if (RC.hasCustomAutoClose) glance.push(['Custom auto-close', RC.custom.autoPathName + (RC.custom.autoDelay ? ' after ' + ccFormatMs(RC.custom.autoDelay.ms) + (RC.custom.autoDelay.assumed ? '*' : '') : '')]);
+  else if (RC.enabled === false && RC.custom && RC.custom.present) glance.push(['Automatic close', 'None found — operator close only']);
   if (RC.shotKnown) glance.push(['Shot at trip', `SH${RC.shotAtTrip}`]);
   if (RC.enabled === true) glance.push([RC.planIsLive ? 'Attempts remaining' : 'Attempts this event', RC.planIsLive ? `${RC.attemptsRemaining}` : '0']);
   if (RC.stallBlocksSchedule) glance.push(['Open-interval timer', 'STALLED — not counting']);
@@ -1316,7 +1349,13 @@ function buildRecloseTabHTML(P, A) {
     <table class="data-table"><tbody>${buildRecloseGateRows(RC, P)}</tbody></table>
   </div>` : '';
 
-  return verdictCard + buildRecloseSequenceCard() + gateCard + buildReclosePlanTable(RC, P) + buildRecloseEndCard(RC, P)
+  // The 79 state diagram explains a sequence this device does not run when E79 is off, so it is
+  // left out in that case. The custom close card takes its place directly under the verdict,
+  // because on those devices it holds the answer the reader came for.
+  const customCard = (typeof buildCustomCloseCard === 'function') ? buildCustomCloseCard(P, A) : '';
+  const sequenceCard = RC.enabled === false ? '' : buildRecloseSequenceCard();
+
+  return verdictCard + customCard + sequenceCard + gateCard + buildReclosePlanTable(RC, P) + buildRecloseEndCard(RC, P)
     + buildRecloseObservedCard(RC, P) + buildRecloseSchemeCard(RC, P);
 }
 
