@@ -152,6 +152,16 @@ term down through the SVs that feed it. It then sorts every way in:
 | **Automatic** | No operator action is necessary. A timer and measured conditions run it. |
 | **Operator** | A pushbutton press or a close command from a port is necessary. |
 | **External** | A contact input or a communications bit starts it. What drives that signal is outside this file, so the tool says so instead of guessing. |
+| **Seal-in** | The branch holds a variable up once it is already true. It cannot start a close, so it is shown and then set aside. |
+
+The close equation is expanded into its OR branches first, because the operator path and the
+automatic path often share one chain — `(PB11_PUL OR F_TRIG SV12T) AND LT02 OR SV11T` is three
+separate ways in, and only the third is automatic. Judging the chain as a whole would call the
+whole thing operator-run. `CL3P`, `CL`, `CLA`, `CLB` and `CLC` are all read, so a control that
+pulses two switches in turn is covered as well as a three-pole recloser.
+
+Analog comparisons (`VAY >= 6840.00`) are shown as the site wrote them and are not evaluated
+against the record, because the setting and the record are not in the same units.
 
 A latch bit (`LT`) is read as a mode switch, not as an operator action. `LT02` armed means the
 automatic mode is on. It does not mean a person is at the recloser.
