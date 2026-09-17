@@ -120,6 +120,29 @@ function parseRecloseScheme(S, fullText) {
     }
   });
 
+  // ── Every equation that can issue a close ──
+  // CL3P / CL is the three-pole close on a standard recloser, and the eqSpecs table above
+  // already has it. It is not the only spelling. A relay driving an independent-pole recloser
+  // writes CLA / CLB / CLC, and so does a control operating a two-stage switch, where "A" and
+  // "B" are not phases at all but two series devices pulsed one after the other. Looking only
+  // for CL3P on those sites finds nothing and reports the device as unable to close, which is
+  // the same false statement that reading only the 79 block produced.
+  R.closeEquations = [];
+  R.unlatchEquations = [];
+  ['CL3P', 'CL', 'CLA', 'CLB', 'CLC'].forEach(n => {
+    const hit = grabLine([n]);
+    if (!hit) return;
+    // CL3P and CL are the same equation under two names. Take the first spelling found.
+    if ((n === 'CL3P' || n === 'CL') && R.closeEquations.some(e => e.name === 'CL3P' || e.name === 'CL')) return;
+    R.closeEquations.push({ name: hit.name, eq: hit.value });
+  });
+  ['ULCL3P', 'ULCL', 'ULCLA', 'ULCLB', 'ULCLC'].forEach(n => {
+    const hit = grabLine([n]);
+    if (!hit) return;
+    if ((n === 'ULCL3P' || n === 'ULCL') && R.unlatchEquations.some(e => e.name === 'ULCL3P' || e.name === 'ULCL')) return;
+    R.unlatchEquations.push({ name: hit.name, eq: hit.value });
+  });
+
   R.present = R.settingsFound;
   return R;
 }
