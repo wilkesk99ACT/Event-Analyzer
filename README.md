@@ -191,8 +191,8 @@ call that a breaker mechanism failure. The CF record that follows a failed close
 and linked to the record that started the close.
 
 **The recloser is open. Would a close command work right now?**
-Load a record that ends with the breaker open — a TRIG report taken on demand is the usual
-one — and read the Close Readiness card at the top of the Diagnostics tab. The tool takes the
+Load a record that ends with the breaker open — a report taken on demand with the TRIG
+command (event type "Trigger") is the usual one — and read the Close Readiness card at the top of the Diagnostics tab. The tool takes the
 state of every bit at the last sample as the present conditions, sends one close command into
 the relay's own logic, and steps it forward a quarter cycle at a time: SV timers, latches,
 output contacts, CL / ULCL and the CLOSE latch, CFD, the trip equation and ER. It does this for
@@ -207,6 +207,12 @@ Each command gets one of these answers:
 | Would not close unless *input* comes on | The close waits on a contact input or remote bit from another device. The tool also runs the case where it arrives |
 | Would be rejected | CL or CLOSE would not assert. The terms that stop it are named |
 | Would fail | CLOSE latches, but the close contact is held off by the relay's own logic |
+
+The close contact is found from the output equations. An output that names CLOSE is a close
+contact. So is an output that reaches CLOSE only through SVs, when the site's comments on it or
+on its SVs say CLOSE (`OUT401 := SV10T OR SV11T OR SV22T`, with SV10 "TAVRIDA PERMISSIVE
+CLOSE"). An output labelled as a start or initiate signal ("CLOSE TO START RVC SEQUENCE") is
+read as the signal to the controller, not as the close contact.
 
 The card also lists what else could stop the close: an output a latch holds on (so the device
 it drives sees no new signal), the CFD window against a permissive window, whether the command
