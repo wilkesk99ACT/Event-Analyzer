@@ -105,6 +105,22 @@ else {
   check(s7.simOut === s7.realOut, 'close outputs on the same interval as the real record', `sim ${s7.simOut}, real ${s7.realOut}`);
 }
 
+console.log('\n[9] Real TRIG record on an open recloser (STAMEY 11290)');
+const f4 = find('STAMEY');
+if (!f4) console.log('  skipped — STAMEY record not found');
+else {
+  ctx.T4 = fs.readFileSync(path.join(dir, f4), 'latin1');
+  const r9 = vm.runInContext(`(() => { const P = parseCEV(T4, 'd.CEV'); const R = analyzeCloseReadiness(P, {}); const c = R.commands[0];
+    return { type: P.eventInfo.eventType, outcome: c.outcome, head: c.verdict.headline, detail: c.verdict.detail, notes: R.notes,
+      roles: c.trace.outputs.map(o => o.name + ':' + o.role).join(','), whatIf: c.whatIf }; })()`, ctx);
+  check(/^Trigger$/i.test(r9.type), 'event type is Trigger', r9.type);
+  check(r9.roles === 'OUT401:close,OUT402:close,OUT403:close,OUT404:aux', 'OUT401-403 are close contacts through SVs, OUT404 is the RVC start', r9.roles);
+  check(r9.outcome === 'waits-external' && /IN314/.test(r9.head), 'remote close waits on IN314', r9.head);
+  check(/OUT404[^.]*would operate/.test(r9.detail), 'OUT404 start signal named');
+  check(r9.whatIf && r9.whatIf.energizes && !r9.whatIf.trips, 'what-if: IN314 arrives → close, no trip');
+  check(!r9.notes.some(n => /SV21/.test(n)), 'blinker timer not reported as an assumption');
+}
+
 console.log('\n[8] Breaker closed');
 const r8 = vm.runInContext(`analyzeCloseReadiness({ ...P2, digitalTransitions: [], initialDigitalState: (P2.initialDigitalState || []).concat(['52A']) }, {})`, ctx);
 check(r8 === null, 'no readiness answer');

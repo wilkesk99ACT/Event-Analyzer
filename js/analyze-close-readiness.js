@@ -107,7 +107,8 @@ function rsCompile(P) {
   const cfdRaw = ctSetting(P, 'CFD3P') || ctSetting(P, 'CFD');
   return {
     clName, ulName, closeBit, cfBit, bkrBit, tripBit,
-    bkrInput: /^IN\d{3}$/.test(bkrSrc) ? bkrSrc : null,
+    // "52A := IN301 OR IN303 OR IN305" (one input per pole): all of them close together.
+    bkrInputs: (bkrSrc.match(/\bIN\d{3}\b/g) || []).filter(n => !new RegExp('NOT\\s+' + n).test(bkrSrc)),
     cl: clName ? c(ctSetting(P, clName)) : null,
     ul: ulName ? c(ctSetting(P, ulName)) : null,
     tr: P.tripEquation ? c(P.tripEquation) : null,
@@ -116,7 +117,7 @@ function rsCompile(P) {
     cfd: cfdRaw != null ? parseFloat(cfdRaw) : null,
     svs: (P.svSettings || []).map(sv => ({ label: sv.label, tLabel: sv.label + 'T', pu: sv.pickupDelay || 0, dro: sv.dropoutDelay || 0, ...c(sv.equation), comment: ctComment(sv.equation) })),
     lts: (P.latchSettings || []).map(lt => ({ label: lt.label, set: c(lt.setEquation), rst: c(lt.resetEquation) })),
-    outs: ctSettingEquations(P, /^OUT\d{3}$/).filter(o => o.eq && !/^[01]$/.test(o.eq.split('#')[0].trim())).map(o => ({ label: o.name, ...c(o.eq) })),
+    outs: ctSettingEquations(P, /^OUT\d{3}$/).filter(o => o.eq && !/^[01]$/.test(o.eq.split('#')[0].trim())).map(o => ({ label: o.name, raw: o.eq, ...c(o.eq) })),
   };
 }
 
@@ -186,7 +187,8 @@ function rsSimulate(P, K, base, command, opts) {
   for (const sv of K.svs) {
     const inOn = !!S.get(sv.label), outOn = !!S.get(sv.tLabel);
     tm.set(sv.label, { on: inOn ? (sv.pu > 0 ? 0 : Infinity) : 0, off: !inOn && outOn ? 0 : Infinity });
-    if (inOn && !outOn && sv.pu > 0 && recorded.has(sv.tLabel)) notes.push(`${sv.label} is on and ${sv.tLabel} is not yet on. The record does not show how long ${sv.label} has been on, so its ${sv.pu} pickup delay is counted from now.`);
+    const blinker = sv.ast && llgCollectLeaves(sv.ast).some(l => l.name === sv.tLabel);
+    if (inOn && !outOn && sv.pu > 0 && recorded.has(sv.tLabel) && !blinker) notes.push(`${sv.label} is on and ${sv.tLabel} is not yet on. The record does not show how long ${sv.label} has been on, so its ${sv.pu} pickup delay is counted from now.`);
   }
 
   const trans = [];
@@ -203,7 +205,8 @@ function rsSimulate(P, K, base, command, opts) {
   const res = { clRose: null, closeRose: null, closeFell: null, cf: null, er: null, erTerm: null, bkrClosed: null, tripAt: null, tripBranch: null, closeOutAt: null, steps: 0 };
   let bkrCloseDue = null;
   let stopAt = maxSteps;
-  const closeOuts = new Set(K.outs.filter(o => o.ast && llgCollectLeaves(o.ast).some(l => l.name === K.closeBit && !/\bNOT\b/.test(l.mod || ''))).map(o => o.label));
+  const closeOuts = new Set(K.outs.filter(o => o.ast && ctDependsOn(P, o.text, [K.closeBit])
+    && ctOutputRole(P, { name: o.label, eq: o.raw }, ctDirectlyNames(o.text, [K.closeBit])) === 'close').map(o => o.label));
 
   for (let step = 1; step <= stopAt; step++) {
     const before = new Map(S);
@@ -216,7 +219,7 @@ function rsSimulate(P, K, base, command, opts) {
     // Breaker closing, if the close output energized.
     if (bkrCloseDue != null && step >= bkrCloseDue && !S.get(K.bkrBit)) {
       S.set(K.bkrBit, true); if (recorded.has('52B')) S.set('52B', false);
-      if (K.bkrInput) S.set(K.bkrInput, true);
+      for (const n of K.bkrInputs) S.set(n, true);
       res.bkrClosed = step;
       stopAt = Math.min(stopAt, step + Math.ceil(RS_POST_CLOSE_MS / dt));
     }
@@ -474,8 +477,10 @@ function rsCommandVerdict(cmd, K, P, trace) {
     }
     case 'waits-external': {
       const ext = (cmd.outBlockers || []).map(b => b.name).join(', ');
+      const started = trace ? trace.auxOutputs.filter(x => x.everOn && !x.onAtStart) : [];
+      const startTxt = started.length ? ` ${started.map(x => `${x.name}${x.comment ? ` ("${x.comment}")` : ''} would operate at +${ctFmtMs(x.firstOnMs)}`).join('; ')}, so the device it drives gets its start signal.` : '';
       return V('waits-external', 'warn', `${L} would not close unless ${ext} comes on`,
-        `${K.closeBit} would latch, but the close contact would wait on ${ext}. ${(cmd.outBlockers || []).map(phrase).join('; ')}. That signal comes from outside this relay, so the record cannot say whether it would arrive. If it does not arrive within CFD (${ctFmtMs(cmd.cfdMs)}), the relay declares ${K.cfBit}.`);
+        `${K.closeBit} would latch, but the close contact would wait on ${ext}.${startTxt} ${(cmd.outBlockers || []).map(phrase).join('; ')}. That signal comes from outside this relay, so the record cannot say whether it would arrive. If it does not arrive within CFD (${ctFmtMs(cmd.cfdMs)}), the relay declares ${K.cfBit}.`);
     }
     default:
       return V('output-blocked', 'bad', `${L} would fail — the close output would not operate`,

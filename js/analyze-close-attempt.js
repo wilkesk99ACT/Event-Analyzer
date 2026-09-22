@@ -81,7 +81,7 @@ function ctSettingEquations(P, re) {
     // Several settings can share a line ("OUT101FS:= Y       OUT101  := HALARM ..."). Each
     // value runs to the next "NAME :=" on the same line, or to the end of the line.
     const heads = [];
-    const hr = /(?:^|\s)([A-Z][A-Z0-9_]*)\s*:=/g;
+    const hr = /(?:^|\s)([A-Z0-9][A-Z0-9_]*)\s*:=/g;
     let h;
     while ((h = hr.exec(line)) !== null) heads.push({ name: h[1], start: h.index, valStart: h.index + h[0].length });
     heads.forEach((hd, i) => {
@@ -310,6 +310,25 @@ function ctDirectlyNames(eq, targets) {
   return !!a.node && llgCollectLeaves(a.node).some(l => targets.includes(l.name) && !/\bNOT\b/.test(l.mod || ''));
 }
 
+// Which outputs carry the close to the breaker, and which only follow it (an "RVC start"
+// contact, a lamp)? An output that names CLOSE is a close contact unless the site labelled it as
+// a start/initiate signal. An output that reaches CLOSE only through SVs is a close contact when
+// the site's own words — on the output or on the SVs it names — say CLOSE, and not START.
+// STAMEY: OUT401 := SV10T OR SV11T OR SV22T ("TAVRIDA PERMISSIVE CLOSE", "TAVRIDA MANUAL CLOSE",
+// "CLOSE PHASE A") is the close contact; OUT404 := SV07T OR LT07 ("CLOSE TO START RVC SEQUENCE")
+// only starts the controller.
+function ctOutputRole(P, o, direct) {
+  const startish = /\b(START|INITIATE|INIT|SEQUENCE|SEQ)\b/i;
+  const own = ctComment(o.eq);
+  if (startish.test(own)) return 'aux';
+  if (direct) return 'close';
+  if (/\bCLOSE\b/i.test(own)) return 'close';
+  const a = ctAst(o.eq);
+  const words = (a.node ? llgCollectLeaves(a.node) : []).map(l => { const sv = ctSv(P, l.name); return sv ? ctComment(sv.equation) : ''; });
+  if (words.some(w => /\bCLOSE\b/i.test(w) && !startish.test(w))) return 'close';
+  return 'aux';
+}
+
 // Is this bit on at any of these instants?
 function ctEverOn(P, name, pts) { return pts.some(i => bitStateAtAnalogIdx(P, name, i).state); }
 function ctFirstOn(P, name, i0, i1) {
@@ -406,7 +425,7 @@ function analyzeCloseAttempt(P, A, prevEvent) {
     const everOn = firstOn != null;
     const item = {
       name: o.name, eq: o.eq.split('#')[0].trim(), comment: ctComment(o.eq),
-      role: direct ? 'close' : 'aux', recorded: rec,
+      role: ctOutputRole(P, o, direct), recorded: rec,
       onAtStart, onAtEnd, everOn, firstOnMs: firstOn != null ? (firstOn - startIdx) * msps : null,
     };
 
