@@ -170,6 +170,26 @@ automatic mode is on. It does not mean a person is at the recloser.
 No. It reports what the close logic permits, and the state of each condition at the last sample
 of the record. The close falls minutes after the record ends, so the record cannot show it.
 
+**A close command went out and the breaker did not close. What does the tool check?**
+The Close Attempt card in the Diagnostics tab follows the close from the command to the
+contact. A CLOSE bit that is on does not mean the breaker was told to close. On many sites the
+close contact is gated, for example `OUT102 := CLOSE AND (SV10T OR SV11T OR CC)`, and `SV10T`
+waits on a permissive input from another controller. The card shows:
+
+| Item | What it shows |
+|---|---|
+| Close request | When CLOSE came on, what started it (CC, a pushbutton, the 79 element, an SV path), and how it ended (52A, CF, dropped, or still on) |
+| Close outputs | Every `OUTnnn` that depends on CLOSE, and whether each one operated |
+| Why it did not operate | The output equation walked down to the terms that never came on, sorted into the path the relay waited on, a path that needs an operator, and a path a mode latch switched off |
+| Held-on outputs | An output a latch holds on. If it was already on when the close started, the device it drives saw no new signal |
+| Close failure time | CFD against the measured CLOSE → CF time, across records when the CF record follows the close record |
+| Event report coverage | Which close commands make an event report, and any SV labelled as an event trigger that is not in ER |
+| Clock | Whether the relay clock was synchronized |
+
+When the close output never operated, the tool says so and names the blocker. It does not
+call that a breaker mechanism failure. The CF record that follows a failed close is traced too,
+and linked to the record that started the close.
+
 **How is this different from just opening the file in QuickSet or SynchroWAVe?**
 QuickSet shows how the relay is configured; SynchroWAVe shows what was recorded. Neither
 automatically connects the two for a specific event. This tool does that connection
@@ -187,7 +207,8 @@ for the event in front of you, which otherwise has to be done manually, equation
 - **〰️ Currents** — the same pre/fault comparison for every current channel.
 - **🛡️ Protection** — every overcurrent element's pickup, measured value, and multiple-of-pickup
   for this event.
-- **🩺 Diagnostics** — physical consistency checks cross-referencing sequence voltage against
+- **🩺 Diagnostics** — the Close Attempt card (see the FAQ above) whenever the record holds a
+  close request or a close failure, then physical consistency checks cross-referencing sequence voltage against
   sequence current, surfacing likely CT wiring, grounding-transformer, or open-phase issues.
 - **🔗 SV Logic** — every internal SV used in the trip equation (and every other active SV),
   with pickup/dropout delays and the underlying equation, plus a legend explaining the
@@ -237,6 +258,16 @@ a normal enabled 79 scheme is left alone. It needs no `.evzip`.
 
 ```
 node test/test-custom-close.mjs /path/to/cev/corpus
+```
+
+`test/test-close-attempt.mjs` covers the close attempt trace: that a gated close contact is
+found and its missing permissive named, that the gate's alternatives are ranked, that a
+one-interval CC pulse is not taken as the close path, that a latch-held output is flagged, that
+the CF record is linked to the close record, and that ER coverage and timer units are read
+correctly. The file-driven checks need the PGR SOUTHWICK 10427/10428 records.
+
+```
+node test/test-close-attempt.mjs /path/to/cev/corpus
 ```
 
 Set `CEV_DIR` to a folder of real `.CEV` files to include the CEV regression section. Without

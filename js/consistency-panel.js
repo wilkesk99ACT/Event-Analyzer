@@ -98,7 +98,12 @@ function buildConsistencyChecksCard(P, A) {
 // — happened right after.
 function buildCloseAttemptCard(P, A) {
   const ca = A?.closeAttempt;
-  if (!ca) return '';
+  const trace = A?.closeTrace;
+  const haveTrace = !!(trace && typeof buildCloseTraceCard === 'function');
+  // No CLOSE rising edge here (a carried-in close, or a CF record), or the close output never
+  // operated: the trace card says everything the breaker-confirmation card would, and more.
+  if (!ca) return haveTrace ? buildCloseTraceCard(P, A) : '';
+  if (haveTrace && trace.verdict && trace.verdict.kind === 'blocked') return buildCloseTraceCard(P, A);
 
   let verdict, verdictColor;
   if (!ca.bkrConfirmed) {
@@ -152,6 +157,7 @@ function buildCloseAttemptCard(P, A) {
     <table class="data-table"><tbody>
       ${rows.map(([k, v]) => `<tr><td style="font-weight:600;color:var(--text);white-space:nowrap;">${k}</td><td>${v}</td></tr>`).join('')}
     </tbody></table>
+    ${haveTrace ? `<div style="margin-top:14px;">${buildCloseTraceSections(P, A)}</div>` : ''}
     <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">
       "Closed into an existing fault" means a protection element picked up while the contacts were still traveling (before the breaker confirmed closed) — a prestrike/arcing signature consistent with a fault already present on the line, not a breaker malfunction. "Re-tripped shortly after" means the pickup came only after full closure was confirmed — consistent with a fault or inrush that appeared once the circuit was actually energized. A "current spike" row with elevated 2nd-harmonic content points toward transformer magnetizing inrush rather than a real fault — the same basis transformer differential relays use to restrain from tripping on it.
     </div>

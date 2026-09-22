@@ -1564,6 +1564,13 @@ function analyzeCEV(P, prevEvent) {
   // This runs independently of whatever A.tripCause resolved to (or whether it resolved at
   // all) — a close attempt is worth reading on its own terms.
   {
+    // Close-path trace: which output carries the close, whether it operated, and what held it
+    // off. Computed first so the flags below can say whether the breaker was ever told to close.
+    A.closeTrace = (typeof analyzeCloseAttempt === 'function')
+      ? (() => { try { return analyzeCloseAttempt(P, A, prevEvent); } catch (e) { console.warn('close trace failed', e); return null; } })()
+      : null;
+    const ctv = A.closeTrace && A.closeTrace.verdict;
+
     const dLabels = P.digitalLabels || [];
     const closeLabel = ['CLOSE', 'CL'].find(l => dLabels.includes(l));
     const remoteCloseLabel = dLabels.includes('CC') ? 'CC' : null;
@@ -1627,7 +1634,9 @@ function analyzeCEV(P, prevEvent) {
       // ── Breaker never confirmed closed at all — genuine close failure ──
       if (bkrCloseLabel && !bkrConfirmTransition) {
         const recordEndMs = (analogData.length - 1 - closeIdx) * msPerSampleC;
-        if (recordEndMs > 10 * (1000 / freq)) {
+        if (ctv && ctv.kind === 'blocked') {
+          A.investigationFlags.push({ severity: 'high', title: ctv.headline, detail: ctv.detail + ' See the Close Attempt card in the Diagnostics tab.' });
+        } else if (recordEndMs > 10 * (1000 / freq)) {
           A.investigationFlags.push({
             severity: 'high',
             title: 'Close Command Issued — Breaker Never Confirmed Closed',
@@ -1699,6 +1708,25 @@ function analyzeCEV(P, prevEvent) {
         }
       }
     }
+  }
+
+  // A close request carried in from an earlier record — the usual shape of the CF record that
+  // follows a failed close by CFD. The close-attempt block above only reads a CLOSE that rises
+  // inside this record, so without this the CF record says nothing about the close at all.
+  if (A.closeTrace && A.closeTrace.carried && A.closeTrace.verdict) {
+    const v = A.closeTrace.verdict;
+    A.investigationFlags.push({
+      severity: v.tone === 'bad' ? 'high' : 'medium',
+      title: A.closeTrace.endReason === 'cf' ? `Close Failure — ${v.headline.replace(/^Close blocked — /, '')}` : v.headline,
+      detail: v.detail + ' See the Close Attempt card in the Diagnostics tab.',
+    });
+  }
+  // Name close-family ER triggers for what they are. "CC" alone reads as a status term.
+  if (A.tripCause && A.tripCause.isEventReport && A.closeTrace) {
+    const ic = A.tripCause.immediateCause;
+    const names = { CC: 'Remote Close Command (CC)', CC3: 'Remote Close Command (CC3)', CF: 'Close Failure (CF)', CF3P: 'Close Failure (CF3P)', CL: 'Close Logic (CL)', CLOSE: 'Close Command (CLOSE)' };
+    if (names[ic]) A.tripCause.causeText = names[ic];
+    A.tripCause.isCloseAttempt = true;
   }
 
   if (A.tripCause && !A.tripCause.isEventReport) {

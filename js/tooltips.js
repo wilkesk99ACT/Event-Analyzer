@@ -215,6 +215,25 @@ function measuredTimerMs(P, inputLabel, timedLabel) {
   return (timedIdx - lastInputIdx) * msPerSample;
 }
 
+// How long a timed output stayed up after its input fell. `complete` is false when the output
+// was still up at the end of the record, so `ms` is only a lower bound. Returns null when the
+// input never fell while the output was up.
+function measuredDropoutMs(P, inputLabel, timedLabel) {
+  const trans = P?.digitalTransitions || [];
+  if (!trans.length || !(P.digitalLabels || []).includes(timedLabel)) return null;
+  const spc = P.eventInfo?.samPerCycA || 32;
+  const msPerSample = 1000 / ((P.eventInfo?.freq || 60) * spc);
+  const lastIdx = Math.max(0, (P.analogData || []).length - 1);
+  for (const t of trans) {
+    if (!t.changes.some(c => c.label === inputLabel && !c.asserted)) continue;
+    const f = t.analogSampleIdx;
+    if (!bitStateAtAnalogIdx(P, timedLabel, f).state) continue;
+    const g = trans.find(u => u.analogSampleIdx > f && u.changes.some(c => c.label === timedLabel && !c.asserted));
+    return g ? { ms: (g.analogSampleIdx - f) * msPerSample, complete: true } : { ms: (lastIdx - f) * msPerSample, complete: false };
+  }
+  return null;
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // SELOGIC TIMER UNITS — cycles or seconds, decided per file from evidence
 // ══════════════════════════════════════════════════════════════════════
@@ -240,6 +259,22 @@ function svTimerUnit(P) {
     const asSec = sv.pickupDelay * 1000, asCyc = sv.pickupDelay / freq * 1000;
     // Compare in log space so the verdict doesn't depend on the timer's absolute size.
     if (Math.abs(Math.log(measured / asSec)) < Math.abs(Math.log(measured / asCyc))) sec++; else cyc++;
+  }
+  // Dropout evidence. Many records never run a pickup timer (every PU is 0) but do run a
+  // dropout: the input falls and the timed output stays up. PGR SOUTHWICK 10427 has
+  // SV09DO = 30 and SV09T still on 955 ms after SV09 fell — impossible if 30 were cycles
+  // (500 ms). A measured dropout votes like a measured pickup; a dropout still running at the
+  // end of the record is a lower bound, so it can only rule out the shorter reading.
+  for (const sv of (P.svSettings || [])) {
+    if (!(sv.dropoutDelay > 0)) continue;
+    const d = measuredDropoutMs(P, sv.label, sv.label + 'T');
+    if (!d) continue;
+    const asSec = sv.dropoutDelay * 1000, asCyc = sv.dropoutDelay / freq * 1000;
+    if (d.complete) {
+      if (Math.abs(Math.log(d.ms / asSec)) < Math.abs(Math.log(d.ms / asCyc))) sec++; else cyc++;
+    } else if (d.ms > asCyc * 1.5) {
+      sec++;
+    }
   }
   P._svTimerUnit = (sec === 0 && cyc === 0) ? null : (sec > cyc ? 'seconds' : 'cycles');
   return P._svTimerUnit;

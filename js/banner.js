@@ -154,7 +154,7 @@ function renderBanner() {
         <div class="trip-banner-header">
           <div class="trip-banner-icon">${cause.isEventReport ? '📋' : '⚡'}</div>
           <div>
-            <div class="trip-banner-label">${cause.isEventReport ? 'Event Report Triggered — No Trip' : 'Root Cause Identified'}</div>
+            <div class="trip-banner-label">${cause.isEventReport ? (cause.isCloseAttempt ? 'Close Attempt — No Trip' : 'Event Report Triggered — No Trip') : 'Root Cause Identified'}</div>
             <div class="trip-banner-cause">${cause.causeText}</div>
           </div>
         </div>

@@ -761,7 +761,7 @@ function analyzeReclose(P, A) {
   if (!out.hasTrip) {
     obs.push({ k: 'Trip in this record', v: `none — ${out.tripLabel || 'the trip bit'} never asserts. The 79 states below are carried in from a previous record, not produced by this one.` });
     if (out.recordTrigger && out.recordTrigger.term) {
-      obs.push({ k: 'Record triggered by', v: `${rcGloss(P, out.recordTrigger.term)} — a term of the ER equation, ${out.recordTrigger.msAfterStart != null ? `asserting ${out.recordTrigger.msAfterStart.toFixed(0)} ms into the record` : 'asserted in this record'}. Not a trip and not a close.` });
+      obs.push({ k: 'Record triggered by', v: `${rcGloss(P, out.recordTrigger.term)} — a term of the ER equation, ${out.recordTrigger.msAfterStart != null ? `asserting ${out.recordTrigger.msAfterStart.toFixed(0)} ms into the record` : 'asserted in this record'}. That makes it ${rcTriggerKindText(out.recordTrigger.term).replace(/^a /, 'a ')}` });
     }
   }
   if (out.shotAtTrip != null) obs.push({ k: `Shot counter ${atTripLabel}`, v: `SH${out.shotAtTrip}${out.shotAtTrip === 0 ? ' — in reset, no reclose attempts used yet' : ` — ${out.shotAtTrip} reclose attempt${out.shotAtTrip === 1 ? '' : 's'} already used`}` });
@@ -932,6 +932,17 @@ function rcIdentifyRecordTrigger(P, hasTrip) {
   };
 }
 
+// What kind of ER term started the record. A close command or a close failure is not a
+// "supervision/status term" — calling CC that sent readers looking for a status change when
+// the record was a close attempt.
+function rcTriggerKindText(term) {
+  if (/^CC\d?$/.test(term || '')) return 'a close command from a communications port, not a trip. This record is a close attempt; see the Close Attempt card in the Diagnostics tab.';
+  if (/^CF(3P)?$/.test(term || '')) return 'a close failure: a close request timed out with no breaker-closed confirmation. See the Close Attempt card in the Diagnostics tab.';
+  if (/^(CL|CLOSE)(3P)?$/.test(term || '')) return 'the close logic, not a trip. This record is a close attempt; see the Close Attempt card in the Diagnostics tab.';
+  if (/^OC\d?$/.test(term || '')) return 'an open command from a communications port.';
+  return 'a supervision/status term, not a trip and not a close.';
+}
+
 // The site's own words for an SV, when they wrote any — "SV06T" means nothing to a reader,
 // "SV06T (OPEN TAVRIDA)" means everything. Falls back to the bare name.
 function rcGloss(P, name) {
@@ -1028,7 +1039,7 @@ function buildRecloseVerdict(out, gr, sch, P, A) {
   if (out.hasTrip === false) {
     const trg = out.recordTrigger;
     const why = trg && trg.term
-      ? ` This record was triggered by ${rcGloss(P, trg.term)} out of the ER equation${trg.msAfterStart != null ? `, ${trg.msAfterStart.toFixed(0)} ms in` : ''} — a supervision/status term, not a trip and not a close.`
+      ? ` This record was triggered by ${rcGloss(P, trg.term)} out of the ER equation${trg.msAfterStart != null ? `, ${trg.msAfterStart.toFixed(0)} ms in` : ''} — ${rcTriggerKindText(trg.term)}`
       : '';
     const closeNote = out.bits.CLOSE && !out.closedInRecord
       ? ` ${out.bits.CLOSE} never asserts anywhere in this record, so no close was issued or attempted here.`
