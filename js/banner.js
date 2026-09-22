@@ -73,7 +73,10 @@ function renderBanner() {
   // Only surface the debug panel when it's actually needed — i.e. when cause resolution
   // came up empty and there's genuinely something worth digging into. When a cause (trip or
   // event report) was found, this diagnostic noise just clutters the banner for no reason.
-  el.innerHTML = cause ? '' : debugHTML;
+  // A TRIG record is taken on demand and normally has no transitions at all. That is not a
+  // parsing problem, so the debug panel stays hidden for it.
+  const isTrigSnapshot = /^\s*TRIG\s*$/i.test(String((PARSED.eventInfo && PARSED.eventInfo.eventType) || ''));
+  el.innerHTML = (cause || isTrigSnapshot) ? '' : debugHTML;
 
   // Mini waveform charts shown in the banner's right-hand column, regardless of whether
   // the digital-logic cause was resolved — the waveform is often still informative (e.g.
@@ -91,6 +94,7 @@ function renderBanner() {
     ${buildSVFlagsChart(PARSED, ANALYSIS, true)}
   </div>`;
 
+  const isTrigRecord = /^\s*TRIG\s*$/i.test(String((PARSED.eventInfo && PARSED.eventInfo.eventType) || ''));
   if (!cause) {
     el.classList.remove('event-report');
     el.innerHTML += `
@@ -100,12 +104,15 @@ function renderBanner() {
           <div class="trip-banner-header">
             <div class="trip-banner-icon">❓</div>
             <div>
-              <div class="trip-banner-label">Trip Cause</div>
-              <div class="trip-banner-cause">Unable to determine from digital data</div>
+              <div class="trip-banner-label">${isTrigRecord ? 'Manual Trigger (TRIG) — No Trip' : 'Trip Cause'}</div>
+              <div class="trip-banner-cause">${isTrigRecord ? 'Snapshot of present conditions' : 'Unable to determine from digital data'}</div>
             </div>
           </div>
-          <p style="color:var(--text-dim);font-size:13px;">The digital word did not show a trip transition in this event record. The protection elements and SV logic tabs contain the underlying element states for this record.</p>
+          <p style="color:var(--text-dim);font-size:13px;">${isTrigRecord
+            ? 'This record was taken on demand (TRIG). It shows the relay state at that moment, not a protection operation.'
+            : 'The digital word did not show a trip transition in this event record. The protection elements and SV logic tabs contain the underlying element states for this record.'}</p>
           ${buildRecloseBannerBlock(PARSED, ANALYSIS)}
+        ${typeof buildCloseReadinessBannerBlock === 'function' ? buildCloseReadinessBannerBlock(PARSED, ANALYSIS) : ''}
         </div>
         ${chartsHTML}
       </div>
@@ -169,6 +176,7 @@ function renderBanner() {
           ${renderChartedBitChipHTML(PARSED, ANALYSIS)}
         </div>
         ${buildRecloseBannerBlock(PARSED, ANALYSIS)}
+        ${typeof buildCloseReadinessBannerBlock === 'function' ? buildCloseReadinessBannerBlock(PARSED, ANALYSIS) : ''}
         ${buildConsistencyWarningBanner(PARSED, ANALYSIS)}
         ${buildInvestigationPanel(PARSED, ANALYSIS)}
       </div>

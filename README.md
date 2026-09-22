@@ -190,6 +190,35 @@ When the close output never operated, the tool says so and names the blocker. It
 call that a breaker mechanism failure. The CF record that follows a failed close is traced too,
 and linked to the record that started the close.
 
+**The recloser is open. Would a close command work right now?**
+Load a record that ends with the breaker open — a TRIG report taken on demand is the usual
+one — and read the Close Readiness card at the top of the Diagnostics tab. The tool takes the
+state of every bit at the last sample as the present conditions, sends one close command into
+the relay's own logic, and steps it forward a quarter cycle at a time: SV timers, latches,
+output contacts, CL / ULCL and the CLOSE latch, CFD, the trip equation and ER. It does this for
+each command the close equation accepts (CC, pushbuttons, remote bits, local bits).
+
+Each command gets one of these answers:
+
+| Answer | Meaning |
+|---|---|
+| Would energize the close output | CLOSE latches, the close contact operates, and no trip follows under present conditions |
+| Would close, then trip | The close goes out, and the trip equation asserts once 52A is on. The element that drives it is named |
+| Would not close unless *input* comes on | The close waits on a contact input or remote bit from another device. The tool also runs the case where it arrives |
+| Would be rejected | CL or CLOSE would not assert. The terms that stop it are named |
+| Would fail | CLOSE latches, but the close contact is held off by the relay's own logic |
+
+The card also lists what else could stop the close: an output a latch holds on (so the device
+it drives sees no new signal), the CFD window against a permissive window, whether the command
+would leave an event report, an unsynchronized clock, battery and capacitor status bits, and
+the parts the relay cannot see (close circuit, mechanism, 52A contact).
+
+Inputs, remote bits and measured elements are held at their present state. That matters most
+for voltage: when a close is predicted to trip on undervoltage with a dead bus, the answer
+depends on which side of the recloser the VTs are on, and the card says so. A timer that was
+already running is counted from zero. The processing order was checked against two real
+closes (PGR SOUTHWICK 10427, CLEARSKY ABG) interval by interval.
+
 **How is this different from just opening the file in QuickSet or SynchroWAVe?**
 QuickSet shows how the relay is configured; SynchroWAVe shows what was recorded. Neither
 automatically connects the two for a specific event. This tool does that connection
@@ -207,7 +236,8 @@ for the event in front of you, which otherwise has to be done manually, equation
 - **〰️ Currents** — the same pre/fault comparison for every current channel.
 - **🛡️ Protection** — every overcurrent element's pickup, measured value, and multiple-of-pickup
   for this event.
-- **🩺 Diagnostics** — the Close Attempt card (see the FAQ above) whenever the record holds a
+- **🩺 Diagnostics** — the Close Readiness card when the record ends with the breaker open,
+  the Close Attempt card (see the FAQ above) whenever the record holds a
   close request or a close failure, then physical consistency checks cross-referencing sequence voltage against
   sequence current, surfacing likely CT wiring, grounding-transformer, or open-phase issues.
 - **🔗 SV Logic** — every internal SV used in the trip equation (and every other active SV),
@@ -268,6 +298,14 @@ correctly. The file-driven checks need the PGR SOUTHWICK 10427/10428 records.
 
 ```
 node test/test-close-attempt.mjs /path/to/cev/corpus
+```
+
+`test/test-close-readiness.mjs` checks the close simulator against two recorded closes interval
+by interval, and checks the readiness answers for an open recloser that waits on an outside
+permissive, a close into a trip, and a closed breaker.
+
+```
+node test/test-close-readiness.mjs /path/to/cev/corpus
 ```
 
 Set `CEV_DIR` to a folder of real `.CEV` files to include the CEV regression section. Without

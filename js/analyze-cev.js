@@ -1570,6 +1570,11 @@ function analyzeCEV(P, prevEvent) {
       ? (() => { try { return analyzeCloseAttempt(P, A, prevEvent); } catch (e) { console.warn('close trace failed', e); return null; } })()
       : null;
     const ctv = A.closeTrace && A.closeTrace.verdict;
+    // Breaker open at the end of the record and no close in progress: would a close sent now
+    // succeed? Runs the relay's close logic forward from the last sample.
+    A.closeReadiness = (typeof analyzeCloseReadiness === 'function')
+      ? (() => { try { return analyzeCloseReadiness(P, A); } catch (e) { console.warn('close readiness failed', e); return null; } })()
+      : null;
 
     const dLabels = P.digitalLabels || [];
     const closeLabel = ['CLOSE', 'CL'].find(l => dLabels.includes(l));
