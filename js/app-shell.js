@@ -169,6 +169,7 @@ function renderContent() {
 
   // ── Diagnostics ──
   html += `<div class="tab-panel" id="panel-diagnostics">
+    ${typeof buildCloseReadinessCard === 'function' ? buildCloseReadinessCard(P, A) : ''}
     ${buildCloseAttemptCard(P, A)}
     ${buildConsistencyChecksCard(P, A)}
   </div>`;

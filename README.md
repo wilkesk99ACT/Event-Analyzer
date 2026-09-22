@@ -170,6 +170,55 @@ automatic mode is on. It does not mean a person is at the recloser.
 No. It reports what the close logic permits, and the state of each condition at the last sample
 of the record. The close falls minutes after the record ends, so the record cannot show it.
 
+**A close command went out and the breaker did not close. What does the tool check?**
+The Close Attempt card in the Diagnostics tab follows the close from the command to the
+contact. A CLOSE bit that is on does not mean the breaker was told to close. On many sites the
+close contact is gated, for example `OUT102 := CLOSE AND (SV10T OR SV11T OR CC)`, and `SV10T`
+waits on a permissive input from another controller. The card shows:
+
+| Item | What it shows |
+|---|---|
+| Close request | When CLOSE came on, what started it (CC, a pushbutton, the 79 element, an SV path), and how it ended (52A, CF, dropped, or still on) |
+| Close outputs | Every `OUTnnn` that depends on CLOSE, and whether each one operated |
+| Why it did not operate | The output equation walked down to the terms that never came on, sorted into the path the relay waited on, a path that needs an operator, and a path a mode latch switched off |
+| Held-on outputs | An output a latch holds on. If it was already on when the close started, the device it drives saw no new signal |
+| Close failure time | CFD against the measured CLOSE → CF time, across records when the CF record follows the close record |
+| Event report coverage | Which close commands make an event report, and any SV labelled as an event trigger that is not in ER |
+| Clock | Whether the relay clock was synchronized |
+
+When the close output never operated, the tool says so and names the blocker. It does not
+call that a breaker mechanism failure. The CF record that follows a failed close is traced too,
+and linked to the record that started the close.
+
+**The recloser is open. Would a close command work right now?**
+Load a record that ends with the breaker open — a TRIG report taken on demand is the usual
+one — and read the Close Readiness card at the top of the Diagnostics tab. The tool takes the
+state of every bit at the last sample as the present conditions, sends one close command into
+the relay's own logic, and steps it forward a quarter cycle at a time: SV timers, latches,
+output contacts, CL / ULCL and the CLOSE latch, CFD, the trip equation and ER. It does this for
+each command the close equation accepts (CC, pushbuttons, remote bits, local bits).
+
+Each command gets one of these answers:
+
+| Answer | Meaning |
+|---|---|
+| Would energize the close output | CLOSE latches, the close contact operates, and no trip follows under present conditions |
+| Would close, then trip | The close goes out, and the trip equation asserts once 52A is on. The element that drives it is named |
+| Would not close unless *input* comes on | The close waits on a contact input or remote bit from another device. The tool also runs the case where it arrives |
+| Would be rejected | CL or CLOSE would not assert. The terms that stop it are named |
+| Would fail | CLOSE latches, but the close contact is held off by the relay's own logic |
+
+The card also lists what else could stop the close: an output a latch holds on (so the device
+it drives sees no new signal), the CFD window against a permissive window, whether the command
+would leave an event report, an unsynchronized clock, battery and capacitor status bits, and
+the parts the relay cannot see (close circuit, mechanism, 52A contact).
+
+Inputs, remote bits and measured elements are held at their present state. That matters most
+for voltage: when a close is predicted to trip on undervoltage with a dead bus, the answer
+depends on which side of the recloser the VTs are on, and the card says so. A timer that was
+already running is counted from zero. The processing order was checked against two real
+closes (PGR SOUTHWICK 10427, CLEARSKY ABG) interval by interval.
+
 **How is this different from just opening the file in QuickSet or SynchroWAVe?**
 QuickSet shows how the relay is configured; SynchroWAVe shows what was recorded. Neither
 automatically connects the two for a specific event. This tool does that connection
@@ -187,7 +236,9 @@ for the event in front of you, which otherwise has to be done manually, equation
 - **〰️ Currents** — the same pre/fault comparison for every current channel.
 - **🛡️ Protection** — every overcurrent element's pickup, measured value, and multiple-of-pickup
   for this event.
-- **🩺 Diagnostics** — physical consistency checks cross-referencing sequence voltage against
+- **🩺 Diagnostics** — the Close Readiness card when the record ends with the breaker open,
+  the Close Attempt card (see the FAQ above) whenever the record holds a
+  close request or a close failure, then physical consistency checks cross-referencing sequence voltage against
   sequence current, surfacing likely CT wiring, grounding-transformer, or open-phase issues.
 - **🔗 SV Logic** — every internal SV used in the trip equation (and every other active SV),
   with pickup/dropout delays and the underlying equation, plus a legend explaining the
@@ -237,6 +288,24 @@ a normal enabled 79 scheme is left alone. It needs no `.evzip`.
 
 ```
 node test/test-custom-close.mjs /path/to/cev/corpus
+```
+
+`test/test-close-attempt.mjs` covers the close attempt trace: that a gated close contact is
+found and its missing permissive named, that the gate's alternatives are ranked, that a
+one-interval CC pulse is not taken as the close path, that a latch-held output is flagged, that
+the CF record is linked to the close record, and that ER coverage and timer units are read
+correctly. The file-driven checks need the PGR SOUTHWICK 10427/10428 records.
+
+```
+node test/test-close-attempt.mjs /path/to/cev/corpus
+```
+
+`test/test-close-readiness.mjs` checks the close simulator against two recorded closes interval
+by interval, and checks the readiness answers for an open recloser that waits on an outside
+permissive, a close into a trip, and a closed breaker.
+
+```
+node test/test-close-readiness.mjs /path/to/cev/corpus
 ```
 
 Set `CEV_DIR` to a folder of real `.CEV` files to include the CEV regression section. Without

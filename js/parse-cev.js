@@ -195,6 +195,10 @@ function parseCEV(text, fileName) {
     for (let j = 0; j < parts.length; j++) {
       const clean = parts[j].replace(/"/g, '').trim();
       if (clean === '*') triggerIdx = R.analogData.length;
+      // SEL marks the trigger row with '>' and the event-summary row with '*'. The header time
+      // stamp is the '>' row. Kept separately so clock arithmetic can use it without changing
+      // what the rest of the tool calls the trigger sample.
+      if (clean === '>' && R.triggerArrowIdx == null) R.triggerArrowIdx = R.analogData.length;
       const m = hexRe.exec(clean);
       if (m && m[1].length > 40) {
         hexSamples.push({ sampleIdx: R.analogData.length, hex: m[1], lineNum: i + 1 });
