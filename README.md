@@ -190,6 +190,29 @@ When the close output never operated, the tool says so and names the blocker. It
 call that a breaker mechanism failure. The CF record that follows a failed close is traced too,
 and linked to the record that started the close.
 
+A record that ends before CFD, with CLOSE still on, does not show the outcome. The card says
+"Close in progress at end of record" and does not call it a failure. It also tells you where
+the outcome will show. When ER has no rising 52A term, a good close makes no event report, so
+no CF record after this one is the sign that the close went through. The card names the bits
+the SER records (52A, CLOSE, the close contact), so the SER can show which path closed it.
+
+**The relay close contact never operated, but the recloser closed. How?**
+Some sites have two ways to close. The relay has its own close contact, for example OUT102,
+which waits on a permissive input from an outside controller (an RVC). The relay also has a
+start output to that controller, for example `OUT301 := SV07T OR LT07` ("CLOSE TO START RVC
+SEQUENCE"). The controller can close the recloser on its own path. The relay then sees 52A come
+on, but its own close contact never operates, and the permissive input never comes on.
+
+The tool reads the start output this way:
+
+| Start output | What the tool says |
+|---|---|
+| Off, then on for this close | The outside device got a new start. The close can succeed without the relay close contact and without the permissive |
+| Already on, held by a latch | The outside device got no new start. The close is likely to fail. Reset the latch (for example PB04 or a trip resets LT07) |
+
+At PGR SOUTHWICK, record 10430 closed with IN402 never on, because the trip in 10429 reset
+LT07 and OUT301 gave the RVC a new start. Record 10427 failed with OUT301 already held on.
+
 **The recloser is open. Would a close command work right now?**
 Load a record that ends with the breaker open — a report taken on demand with the TRIG
 command (event type "Trigger") is the usual one — and read the Close Readiness card at the top of the Diagnostics tab. The tool takes the
@@ -205,6 +228,8 @@ Each command gets one of these answers:
 | Would energize the close output | CLOSE latches, the close contact operates, and no trip follows under present conditions |
 | Would close, then trip | The close goes out, and the trip equation asserts once 52A is on. The element that drives it is named |
 | Would not close unless *input* comes on | The close waits on a contact input or remote bit from another device. The tool also runs the case where it arrives |
+| Would start the outside device; the relay close contact waits on *input* | A start output to an outside controller gets a new start. That device can close the breaker without the input |
+| Would likely fail — *output* is already on | The start output is held on by a latch, so the outside device gets no new start |
 | Would be rejected | CL or CLOSE would not assert. The terms that stop it are named |
 | Would fail | CLOSE latches, but the close contact is held off by the relay's own logic |
 

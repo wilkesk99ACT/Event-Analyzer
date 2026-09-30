@@ -332,6 +332,40 @@ function rsBaseState(P, idx) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Outputs that follow the close through SV or latch logic but are not the close contact — a
+// start signal to an outside controller (an RVC, a recloser control), for example. That device
+// can close the breaker by a path this relay does not control, so a close contact that waits on
+// a permissive is not always the only way the breaker closes.
+//   started: off now, and the command would turn it on (a new start signal)
+//   held:    already on now, held by a latch — a new close would not change its state
+function rsAuxOutputs(P, K, base, synth) {
+  const res = { started: [], held: [] };
+  if (!K.closeBit || typeof ctSettingEquations !== 'function') return res;
+  const outs = ctSettingEquations(P, /^OUT\d{3}$/).filter(o => o.eq && !/^0$/.test(o.eq.split('#')[0].trim()));
+  const rose = new Map();
+  for (const t of (synth && synth.digitalTransitions) || []) for (const c of t.changes) if (c.asserted && !rose.has(c.label)) rose.set(c.label, t.analogSampleIdx);
+  const dt = 1000 / (((P.eventInfo && P.eventInfo.freq) || 60) * 4);
+  for (const o of outs) {
+    const direct = ctDirectlyNames(o.eq, [K.closeBit]);
+    if (!direct && !ctDependsOn(P, o.eq, [K.closeBit])) continue;
+    if (ctOutputRole(P, o, direct) !== 'aux') continue;
+    const eq = o.eq.split('#')[0].trim();
+    if (K.tripBit && ctDirectlyNames(eq, [K.tripBit])) continue;
+    const item = { name: o.name, eq, comment: ctComment(o.eq) };
+    if (base.get(o.name)) {
+      const a = ctAst(o.eq);
+      item.heldBy = (a.node ? llgCollectLeaves(a.node) : [])
+        .filter(l => !/\bNOT\b/.test(l.mod || '') && /^LT\d+$/.test(l.name) && base.get(l.name))
+        .map(l => { const lt = ctLatch(P, l.name); return { name: l.name, reset: lt ? String(lt.resetEquation || '').split('#')[0].trim() : null }; });
+      res.held.push(item);
+    } else if (rose.has(o.name)) {
+      item.atMs = rose.get(o.name) * dt;
+      res.started.push(item);
+    }
+  }
+  return res;
+}
+
 function analyzeCloseReadiness(P, A) {
   if (!P || !P.digitalLabels || !P.analogData || !P.analogData.length) return null;
   const K = rsCompile(P);
@@ -409,6 +443,7 @@ function analyzeCloseReadiness(P, A) {
         };
       } catch (e) { /* what-if is best effort */ }
     }
+    cmd.aux = rsAuxOutputs(P, K, base, sim.synth);
     cmd.verdict = rsCommandVerdict(cmd, K, P, trace);
     out.commands.push(cmd);
   }
@@ -423,7 +458,8 @@ function analyzeCloseReadiness(P, A) {
     }
     const gate = t.timers.find(tm => tm.dropoutMs && main.cfdMs && tm.dropoutMs > main.cfdMs && /permiss|control|window|rvc/i.test(tm.comment || ''));
     if (main.outcome === 'waits-external' && main.cfdMs) {
-      out.general.push({ sev: 'warn', text: `The external permissive must arrive within CFD (${ctFmtMs(main.cfdMs)}) of the command, or the relay declares ${K.cfBit}.${gate ? ` ${gate.label} ("${gate.comment}") holds its window for ${ctFmtMs(gate.dropoutMs)}, longer than CFD.` : ''}` });
+      const handoff = main.aux && main.aux.started.length;
+      out.general.push({ sev: 'warn', text: `${handoff ? `If the breaker closes only through the relay's own close contact, the` : 'The'} external permissive must arrive within CFD (${ctFmtMs(main.cfdMs)}) of the command, or the relay declares ${K.cfBit}.${gate ? ` ${gate.label} ("${gate.comment}") holds its window for ${ctFmtMs(gate.dropoutMs)}, longer than CFD.` : ''}${handoff ? ` If the outside device closes the breaker itself, the relay sees ${K.bkrBit} come on and ${K.closeBit} drops out without ${K.cfBit}.` : ''}` });
     }
     if (t.er) {
       out.general.push(main.res.er != null
@@ -446,6 +482,34 @@ function analyzeCloseReadiness(P, A) {
   return out;
 }
 
+// The close contact waits on an outside permissive, but the close also drives a start output to
+// an outside controller. Two cases:
+//   started — the command gives that device a new start. It may close the breaker on its own,
+//             so "would not close" is not a fair prediction.
+//   held    — the start output is already held on by a latch. The device sees no new start.
+//             At PGR SOUTHWICK this was the difference between a failed close (10427, OUT301
+//             held by LT07) and one that closed with IN402 never on (10430, OUT301 new).
+function rsHandoffText(cmd, K, ext, where) {
+  const aux = cmd.aux || { started: [], held: [] };
+  const nm = (x) => `${x.name}${x.comment ? ` ("${x.comment}")` : ''}`;
+  const own = where === 'cl' ? `the relay's own close logic (${K.clName})` : `the relay's own close contact`;
+  if (aux.held.length && !aux.started.length) {
+    const h = aux.held;
+    return {
+      kind: 'handoff-held', tone: 'bad',
+      headline: `would likely fail — ${h.map(x => x.name).join(', ')} is already on, so the outside device gets no new start, and ${where === 'cl' ? K.clName : 'the relay close contact'} waits on ${ext}`,
+      detail: `${h.map(x => `${nm(x)} is already on${x.heldBy && x.heldBy.length ? `, held by ${x.heldBy.map(l => `${l.name} (resets on ${l.reset || '—'})`).join(', ')}` : ''}`).join('; ')}. A new close does not change its state, so a device that starts on a change of state does not start. ${own[0].toUpperCase() + own.slice(1)} waits on ${ext}.`,
+    };
+  }
+  if (!aux.started.length) return null;
+  const s = aux.started;
+  return {
+    kind: 'handoff', tone: 'info',
+    headline: `would start the outside device through ${s.map(x => x.name).join(', ')}; ${where === 'cl' ? K.clName : 'the relay close contact'} waits on ${ext}`,
+    detail: `${s.map(x => `${nm(x)} would operate at +${ctFmtMs(x.atMs)}`).join('; ')}. That is a new start signal to the device it drives. If that device closes the breaker by its own path, the close does not need ${ext}. If the breaker closes only through ${own}, ${ext} must come on${cmd.cfdMs && where === 'out' ? ` within CFD (${ctFmtMs(cmd.cfdMs)})` : ''}. The settings alone cannot tell which.`,
+  };
+}
+
 function rsCommandVerdict(cmd, K, P, trace) {
   const V = (kind, tone, headline, detail) => ({ kind, tone, headline, detail });
   const phrase = (b) => ctBlockerPhrase(b, P);
@@ -456,6 +520,8 @@ function rsCommandVerdict(cmd, K, P, trace) {
         `${K.clName} := ${K.cl.text}.${cmd.ownRoute && cmd.ownRoute.length ? ` This command reaches ${K.clName} through ${cmd.ownRoute.map(n => rcGloss(P, n)).join(' → ')}.` : ''}${cmd.clBlockers && cmd.clBlockers.length ? ` With the present conditions: ${cmd.clBlockers.map(phrase).join('; ')}.` : ''} No close would be issued by this command.${cmd.clExternalAlt ? ` ${K.clName} can also come on through ${cmd.clExternalAlt.route.join(' → ') || 'another branch'} when ${cmd.clExternalAlt.names.join(', ')} comes on from outside the relay.` : ''}`);
     case 'cl-waits-external': {
       const ext = cmd.clBlockers.map(b => b.name).join(', ');
+      const ho = rsHandoffText(cmd, K, ext, 'cl');
+      if (ho) return V(ho.kind, ho.tone, `${L} ${ho.headline}`, `${cmd.ownRoute.length ? `This command reaches ${K.clName} through ${cmd.ownRoute.map(n => rcGloss(P, n)).join(' → ')}.` : ''} ${ho.detail} ${K.clName} waits on ${ext}: ${cmd.clBlockers.map(phrase).join('; ')}.`.trim());
       return V('cl-waits-external', 'warn', `${L} would not close unless ${ext} comes on`,
         `${cmd.ownRoute.length ? `This command reaches ${K.clName} through ${cmd.ownRoute.map(n => rcGloss(P, n)).join(' → ')}.` : `This command feeds ${K.clName} directly (${K.clName} := ${K.cl.text}).`} ${K.clName} would wait on ${ext}: ${cmd.clBlockers.map(phrase).join('; ')}. That signal comes from outside this relay, so the record cannot say whether it would arrive. Until it does, no close is issued.`);
     }
@@ -477,6 +543,8 @@ function rsCommandVerdict(cmd, K, P, trace) {
     }
     case 'waits-external': {
       const ext = (cmd.outBlockers || []).map(b => b.name).join(', ');
+      const ho = rsHandoffText(cmd, K, ext, 'out');
+      if (ho) return V(ho.kind, ho.tone, `${L} ${ho.headline}`, `${K.closeBit} would latch. ${ho.detail} ${(cmd.outBlockers || []).map(phrase).join('; ')}.`);
       const started = trace ? trace.auxOutputs.filter(x => x.everOn && !x.onAtStart) : [];
       const startTxt = started.length ? ` ${started.map(x => `${x.name}${x.comment ? ` ("${x.comment}")` : ''} would operate at +${ctFmtMs(x.firstOnMs)}`).join('; ')}, so the device it drives gets its start signal.` : '';
       return V('waits-external', 'warn', `${L} would not close unless ${ext} comes on`,

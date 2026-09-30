@@ -103,7 +103,7 @@ function buildCloseAttemptCard(P, A) {
   // No CLOSE rising edge here (a carried-in close, or a CF record), or the close output never
   // operated: the trace card says everything the breaker-confirmation card would, and more.
   if (!ca) return haveTrace ? buildCloseTraceCard(P, A) : '';
-  if (haveTrace && trace.verdict && trace.verdict.kind === 'blocked') return buildCloseTraceCard(P, A);
+  if (haveTrace && trace.verdict && (trace.verdict.kind === 'blocked' || trace.verdict.kind === 'pending')) return buildCloseTraceCard(P, A);
 
   let verdict, verdictColor;
   if (!ca.bkrConfirmed) {

@@ -471,6 +471,18 @@ function analyzeCloseAttempt(P, A, prevEvent) {
   }
   out.closeOutputs = out.outputs.filter(o => o.role === 'close');
   out.auxOutputs = out.outputs.filter(o => o.role === 'aux');
+  // Start outputs to an outside controller: a new start (off, then on) or none (already held on).
+  out.handoff = out.auxOutputs.filter(x => x.everOn && !x.onAtStart);
+  out.stuckAux = out.auxOutputs.filter(x => x.onAtStart && x.heldBy && x.heldBy.some(h => h.onAtStart));
+  // A close carried in from an earlier record: an aux output on at this record's start may have
+  // come on for this very close. Only the record where the close began can tell.
+  if (closeAtStart) {
+    const pt = prevEvent && prevEvent.analysis && prevEvent.analysis.closeTrace;
+    const prevStuck = new Set(pt && !pt.carried ? (pt.stuckAux || []).map(x => x.name) : []);
+    const prevNew = new Set(pt && !pt.carried ? (pt.handoff || []).map(x => x.name) : []);
+    out.stuckAux = out.stuckAux.filter(x => prevStuck.has(x.name));
+    out.handoff = out.auxOutputs.filter(x => prevNew.has(x.name));
+  }
 
   // Timers with a dropout window inside the chain of a close output: these are the "you have
   // N seconds to answer" windows an external device has to meet.
@@ -581,6 +593,26 @@ function ctBlockerPhrase(b, P) {
   return `${g} never came on${b.cls && b.cls.cls !== 'other' ? ` (${b.cls.what})` : ''}`;
 }
 
+// Where the outcome of a close that outlasts the record will show. ER often catches only CF,
+// so "no next record" can be the sign of a good close. The SER shows which path closed it.
+function ctWhereToConfirm(o, P, main, external) {
+  const bkr = o.bkrBit || '52A', cf = o.cfBit || 'CF';
+  const erTxt = o.er && !o.er.closedInER
+    ? `ER has no rising ${bkr} term, so a good close makes no event report here${o.er.cfInER ? `; only ${cf} does. No ${cf} record after this one means the close most likely went through` : ''}.`
+    : `Look at the next record from this relay: ${bkr} rising means it closed; ${cf} means it did not.`;
+  const ser = new Set();
+  for (let n = 1; n <= 4; n++) {
+    const v = ctSetting(P, 'SER' + n);
+    if (v) String(v).split('#')[0].split(/[\s,]+/).filter(Boolean).forEach(t => ser.add(t));
+  }
+  if (!ser.size) return erTxt;
+  const want = [bkr, o.closeBit, ...(o.closeOutputs || []).map(x => x.name), ...(o.handoff || []).map(x => x.name), ...external.map(b => b.name)];
+  const inSer = Array.from(new Set(want.filter(n => n && ser.has(n))));
+  const notSer = Array.from(new Set(want.filter(n => n && !ser.has(n) && ctRecorded(P, n))));
+  if (!inSer.length) return erTxt;
+  return `${erTxt} The SER records ${inSer.join(', ')}${notSer.length ? ` (not ${notSer.join(', ')})` : ''}. Read it for the time after this record: ${bkr} on with ${main.name} never on means the breaker closed through the outside device.`;
+}
+
 function ctBuildVerdict(o, P) {
   const V = (kind, tone, headline, detail) => ({ kind, tone, headline, detail });
   const closeOuts = o.closeOutputs;
@@ -590,7 +622,16 @@ function ctBuildVerdict(o, P) {
     : `${o.closeBit} asserted at t=${o.startMs.toFixed(0)} ms, started by ${o.source ? o.source.text : 'an unknown source'}.`;
 
   if (o.bkrClosedAlready) return V('already-closed', 'info', 'Close request with the breaker already closed', `${lead} ${o.bkrBit} was already on, so there was nothing to close.`);
-  if (o.bkrConfirmed) return V('closed', 'good', 'The breaker closed', `${lead} ${o.bkrBit} confirmed closed ${ctFmtMs(o.bkrConfirmMs)} later.`);
+  const nm = (x) => `${x.name}${x.comment ? ` ("${x.comment}")` : ''}`;
+  const handoff = o.handoff || [];
+  const handoffTxt = handoff.length
+    ? ` ${handoff.map(x => `${nm(x)} operated at +${ctFmtMs(x.firstOnMs)}`).join('; ')}: a new start signal to the device it drives. That device can close the breaker by a path this relay does not control.`
+    : '';
+  if (o.bkrConfirmed) {
+    const viaOwn = closeOuts.some(x => x.everOn);
+    return V('closed', 'good', 'The breaker closed', `${lead} ${o.bkrBit} confirmed closed ${ctFmtMs(o.bkrConfirmMs)} later.${!viaOwn && closeOuts.length && handoff.length
+      ? ` ${closeOuts.map(x => x.name).join(', ')} never operated.${handoffTxt} The breaker closed through that device, not through this relay's close contact.` : ''}`);
+  }
 
   const endTxt = o.endReason === 'cf' ? `The relay declared close failure (${o.cfBit})${o.cf && o.cf.measuredMs != null ? ` ${ctFmtMs(o.cf.measuredMs)} after the close started` : ''}.`
     : o.endReason === 'dropped' ? `${o.closeBit} dropped out at t=${o.endMs.toFixed(0)} ms without a close.`
@@ -608,6 +649,10 @@ function ctBuildVerdict(o, P) {
 
   // No close output operated. Name what it was waiting on.
   const main = closeOuts[0];
+  // The record ended while CLOSE was still on and before CFD. The outcome is later than the
+  // record, so this is not a failure — say what the relay was waiting on, and nothing more.
+  const cfdMs = o.cf && o.cf.settingMs;
+  const pending = o.endReason === 'record-end' && !(cfdMs && o.cf.heldMs != null && o.cf.heldMs >= cfdMs);
   const alt = (main.alternatives || [])[0];
   const blockers = alt ? alt.blockers : (main.rootBlockers || []);
   const external = blockers.filter(b => b.cls && b.cls.cls === 'external' && !b.negated);
@@ -616,12 +661,26 @@ function ctBuildVerdict(o, P) {
   const headline = external.length
     ? `Close blocked — ${main.name} never operated, waiting on ${external.map(b => b.name).join(', ')}`
     : `Close blocked — the relay never energized its close output (${main.name})`;
-  const stuck = o.auxOutputs.filter(x => x.onAtStart && x.heldBy && x.heldBy.some(h => h.onAtStart));
+  const stuck = o.stuckAux || [];
   const stuckTxt = stuck.length
-    ? ` ${stuck.map(x => `${x.name}${x.comment ? ` ("${x.comment}")` : ''} was already on when this close started, held by ${x.heldBy.map(h => h.name).join(', ')}`).join('; ')}. The device it drives saw no new signal for this close.`
+    ? ` ${stuck.map(x => `${nm(x)} was already on when this close started, held by ${x.heldBy.map(h => h.name).join(', ')}`).join('; ')}. The device it drives saw no new signal for this close.`
     : '';
-  return V('blocked', 'bad', headline,
-    `${lead} ${main.name} (${main.eq}) never operated${routeTxt}.${waitTxt} ${endTxt}${stuckTxt} The breaker was never told to close, so this is not a breaker mechanism problem.`);
+  if (pending) {
+    const extNames = external.map(b => b.name).join(', ');
+    return V('pending', 'warn',
+      `Close in progress at end of record — ${main.name} had not operated${external.length ? `, waiting on ${external.map(b => b.name).join(', ')}` : ''}${stuck.length
+        ? `; ${stuck.map(x => x.name).join(', ')} already held on (no new start)`
+        : handoff.length ? `; ${handoff.map(x => x.name).join(', ')} started the outside device` : ''}`,
+      `${lead} The record ends ${ctFmtMs(o.endMs - o.startMs)} after ${o.closeBit}${cfdMs ? `, before CFD (${ctFmtMs(cfdMs)})` : ''}, so the outcome is not in this record. Up to then, ${main.name} (${main.eq}) had not operated${routeTxt}.${waitTxt}${handoffTxt}${stuckTxt}${handoff.length && extNames
+        ? ` The breaker can still close through that device without ${main.name} or ${extNames}.` : ''} ${ctWhereToConfirm(o, P, main, external)}`);
+  }
+  const lead2 = stuck.length
+    ? `Close failed — ${stuck.map(x => x.name).join(', ')} was already held on (no new start to the outside device), and ${main.name} ${external.length ? `waited on ${external.map(b => b.name).join(', ')}` : 'never operated'}`
+    : headline;
+  return V('blocked', 'bad', lead2,
+    `${lead} ${main.name} (${main.eq}) never operated${routeTxt}.${waitTxt} ${endTxt}${stuckTxt}${handoffTxt}${handoff.length
+      ? ` That device had its start signal and the breaker still did not close, so look at that device and its close path too.`
+      : ' The breaker was never told to close, so this is not a breaker mechanism problem.'}`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -683,7 +742,7 @@ function buildCloseTraceSections(P, A) {
   // Why the close output did not operate
   for (const x of o.closeOutputs.filter(x => !x.everOn)) {
     html += `<div style="margin-top:14px;padding:10px 12px;border:1px solid #5c1414;border-radius:8px;background:var(--red-dim);">
-      <div style="font-size:12.5px;font-weight:700;color:var(--red);margin-bottom:6px;">Why ${ctEsc(x.name)} did not operate</div>`;
+      <div style="font-size:12.5px;font-weight:700;color:var(--red);margin-bottom:6px;">${o.verdict && o.verdict.kind === 'pending' ? `Why ${ctEsc(x.name)} had not operated by the end of the record` : `Why ${ctEsc(x.name)} did not operate`}</div>`;
     if (x.momentary && x.momentary.length) {
       html += `<div style="font-size:12px;margin-bottom:6px;">The equation reads true from the recorded bits for ${x.momentary.length} sample${x.momentary.length > 1 ? 's' : ''}${x.momentaryTerms && x.momentaryTerms.length ? `, while ${ctEsc(x.momentaryTerms.join(', '))} was on` : ''}. ${ctEsc(x.name)} did not operate at that instant. A term that is on for only one processing interval cannot close the breaker by itself.</div>`;
     }
