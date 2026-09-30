@@ -1641,6 +1641,9 @@ function analyzeCEV(P, prevEvent) {
         const recordEndMs = (analogData.length - 1 - closeIdx) * msPerSampleC;
         if (ctv && ctv.kind === 'blocked') {
           A.investigationFlags.push({ severity: 'high', title: ctv.headline, detail: ctv.detail + ' See the Close Attempt card in the Diagnostics tab.' });
+        } else if (ctv && ctv.kind === 'pending') {
+          // The record ended before CFD: the outcome is later than this record, not a failure.
+          A.investigationFlags.push({ severity: 'medium', title: ctv.headline, detail: ctv.detail + ' See the Close Attempt card in the Diagnostics tab.' });
         } else if (recordEndMs > 10 * (1000 / freq)) {
           A.investigationFlags.push({
             severity: 'high',
@@ -1722,7 +1725,7 @@ function analyzeCEV(P, prevEvent) {
     const v = A.closeTrace.verdict;
     A.investigationFlags.push({
       severity: v.tone === 'bad' ? 'high' : 'medium',
-      title: A.closeTrace.endReason === 'cf' ? `Close Failure — ${v.headline.replace(/^Close blocked — /, '')}` : v.headline,
+      title: A.closeTrace.endReason === 'cf' ? `Close Failure — ${v.headline.replace(/^Close (blocked|failed) — /, '')}` : v.headline,
       detail: v.detail + ' See the Close Attempt card in the Diagnostics tab.',
     });
   }

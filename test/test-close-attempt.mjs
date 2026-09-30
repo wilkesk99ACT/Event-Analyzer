@@ -77,7 +77,9 @@ if (!f1 || !f2) {
   check(t1 && t1.source.type === 'remote', 'close started by CC', t1 && t1.source.type);
   const o102 = t1 && t1.outputs.find(o => o.name === 'OUT102');
   check(o102 && o102.role === 'close' && !o102.everOn, 'OUT102 is the close contact and never operated');
-  check(t1 && t1.verdict.kind === 'blocked' && /IN402/.test(t1.verdict.headline), 'verdict names IN402', t1 && t1.verdict.headline);
+  // 10427 ends about 1 s after CC, long before CFD (20 s): the outcome is in 10428, not here.
+  check(t1 && t1.verdict.kind === 'pending' && /IN402/.test(t1.verdict.headline) && /OUT301/.test(t1.verdict.headline), 'in progress, names IN402 and the held OUT301', t1 && t1.verdict.headline);
+  check(t2 && t2.verdict.kind === 'blocked' && /OUT301/.test(t2.verdict.headline) && /IN402/.test(t2.verdict.headline), 'CF record: failed, OUT301 held and IN402 named', t2 && t2.verdict.headline);
   check(!/Breaker Never Confirmed Closed/.test(ctx.A1.investigationFlags.map(f => f.title).join('|')),
     'no "breaker mechanism" flag when the close output never operated');
 
