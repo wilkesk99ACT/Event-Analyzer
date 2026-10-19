@@ -80,7 +80,11 @@ function analyzeCEV(P, prevEvent) {
   const seriesMaxPhaseI = rmsIA.map((v, i) => Math.max(v, rmsIB[i], rmsIC[i]));
   const seriesGroundI = computeRmsMagnitude(analogData.map(r => r.IG), cyc, MAGS);
   const seriesNeutralI = computeRmsMagnitude(analogData.map(r => r.IN), cyc, MAGS);
-  const seriesNegSeqI = computeNegSeqMagnitude(analogData.map(r => r.IA), analogData.map(r => r.IB), analogData.map(r => r.IC), cyc, MAGS);
+  const seriesNegSeqI = computeNegSeqMagnitude(...seqPhaseOrder(P, analogData.map(r => r.IA), analogData.map(r => r.IB), analogData.map(r => r.IC)), cyc, MAGS);
+  // SEL negative-sequence overcurrent pickups (50QnP, 51QP, 51QJP) are set in 3I2, not I2 — the
+  // same basis the SEL-851 path already uses. Comparing I2 against a 3I2 pickup read every Q
+  // element three times too insensitive: a 51Q that the relay timed out on showed "0.33x pickup".
+  const seriesNegSeq3I = seriesNegSeqI.map(v => 3 * v);
 
   const seriesV = {};
   ['yTerminal', 'zTerminal'].forEach(term => {
@@ -90,8 +94,8 @@ function analyzeCEV(P, prevEvent) {
     seriesV[term] = {
       A: computeRmsMagnitude(sA, cyc, MAGS), B: computeRmsMagnitude(sB, cyc, MAGS), C: computeRmsMagnitude(sC, cyc, MAGS),
       zero: computeZeroSeqMagnitude(sA, sB, sC, cyc, MAGS),
-      neg: computeNegSeqMagnitude(sA, sB, sC, cyc, MAGS),
-      pos: computePosSeqMagnitude(sA, sB, sC, cyc, MAGS),
+      neg: computeNegSeqMagnitude(...seqPhaseOrder(P, sA, sB, sC), cyc, MAGS),
+      pos: computePosSeqMagnitude(...seqPhaseOrder(P, sA, sB, sC), cyc, MAGS),
       ab: computePhaseDiffMagnitude(sA, sB, cyc, MAGS),
       bc: computePhaseDiffMagnitude(sB, sC, cyc, MAGS),
       ca: computePhaseDiffMagnitude(sC, sA, cyc, MAGS),
@@ -119,7 +123,7 @@ function analyzeCEV(P, prevEvent) {
     // relay-word bits at whatever instant the cursor sits on.
     P,
     voltUnit: detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], 'V'),
-    current: { maxPhaseI: seriesMaxPhaseI, groundI: seriesGroundI, neutralI: seriesNeutralI, negSeqI: seriesNegSeqI },
+    current: { maxPhaseI: seriesMaxPhaseI, groundI: seriesGroundI, neutralI: seriesNeutralI, negSeqI: seriesNegSeqI, negSeq3I: seriesNegSeq3I },
     voltage: seriesV,
     length: analogData.length,
   };
@@ -158,7 +162,7 @@ function analyzeCEV(P, prevEvent) {
   // Instantaneous / definite-time families — 50P/50G/50Q/50N, levels 1-4. Families/levels with
   // no pickup configured (OFF, or not present in this file's settings) are silently skipped.
   const instLabel = { '50P': 'Phase', '50G': 'Ground', '50Q': 'Neg-Seq', '50N': 'Neutral' };
-  const instSeriesKey = { '50P': 'maxPhaseI', '50G': 'groundI', '50Q': 'negSeqI', '50N': 'neutralI' };
+  const instSeriesKey = { '50P': 'maxPhaseI', '50G': 'groundI', '50Q': 'negSeq3I', '50N': 'neutralI' };
   ['50P', '50G', '50Q', '50N'].forEach(fam => {
     for (let lvl = 1; lvl <= 4; lvl++) {
       const p = OC[`${fam}${lvl}P`];
@@ -168,7 +172,7 @@ function analyzeCEV(P, prevEvent) {
 
   // Inverse-time families — 51P, 51G1, 51G2, 51Q, 51N1, 51N2.
   const timeLabel = { '51P': 'Phase', '51P1': 'Phase Lvl1', '51P2': 'Phase Lvl2', '51G1': 'Ground Lvl1', '51G2': 'Ground Lvl2', '51Q': 'Neg-Seq', '51N1': 'Neutral Lvl1', '51N2': 'Neutral Lvl2' };
-  const timeSeriesKey = { '51P': 'maxPhaseI', '51P1': 'maxPhaseI', '51P2': 'maxPhaseI', '51G1': 'groundI', '51G2': 'groundI', '51Q': 'negSeqI', '51N1': 'neutralI', '51N2': 'neutralI' };
+  const timeSeriesKey = { '51P': 'maxPhaseI', '51P1': 'maxPhaseI', '51P2': 'maxPhaseI', '51G1': 'groundI', '51G2': 'groundI', '51Q': 'negSeq3I', '51N1': 'neutralI', '51N2': 'neutralI' };
   ['51P', '51P1', '51P2', '51G1', '51G2', '51Q', '51N1', '51N2'].forEach(fam => {
     const p = OC[`${fam}JP`];
     if (p) addOCRow(fam, `${timeLabel[fam]} Time OC (${OC[`${fam}JC`] || 'U1'})`, p, OC[`${fam}JTD`] || 1, 'td', timeSeriesKey[fam], OC[`${fam}JC`] || 'U1', OC[`${fam}JTD`] || 1, OC[`${fam}TC`], '51');
@@ -374,11 +378,35 @@ function analyzeCEV(P, prevEvent) {
         // appear on the diagram. Only expand when the input bit is actually recorded in this
         // file, since this tree colours every node by its true/false state and a bit the record
         // never captured would otherwise render as a confident "false".
+        // SEL aggregate bit (ORED51T …) — expand into the OR of its recorded member elements so
+        // the diagram reaches the element that actually operated (51QT, not "some 51").
+        if (typeof isOredAggregate === 'function' && isOredAggregate(node.name)) {
+          const members = oredAggregateMembers(node.name, recordedDigitalLabels);
+          if (members.length) {
+            let orAst = { op: 'VAR', name: members[0] };
+            for (const m of members.slice(1)) orAst = { op: 'OR', l: orAst, r: { op: 'VAR', name: m } };
+            const child = bakeFullLogicTree(orAst, isAsserted, visited, depth + 1);
+            return { op: 'SVNODE', label: node.name, refName: node.name, comment: oredAggregateDescription(node.name),
+                     value: !!isAsserted(node.name), child, isAggregate: true };
+          }
+        }
         const elemInput = timedBitInputLabel(node.name, P);
         if (elemInput && !/^SV\d+$/.test(elemInput) && recordedDigitalLabels.has(elemInput)) {
           const inputNode = { op: 'VAR', name: elemInput, label: elemInput, value: !!isAsserted(elemInput) };
+          // An inverse-time (51) element integrates: a short dropout of its pickup does not
+          // restart it, and it can have been timing long before the record began. The gap from
+          // the LAST pickup to the timeout is then not the time the element ran — don't show it.
+          let inverseTimeNote = null;
+          if (/^51/.test(node.name)) {
+            const timedAt = (P.digitalTransitions || []).find(t => t.changes.some(c => c.label === node.name && c.asserted));
+            const fellBefore = timedAt && (P.digitalTransitions || []).some(t => t.analogSampleIdx <= timedAt.analogSampleIdx
+              && t.changes.some(c => c.label === elemInput && !c.asserted));
+            if ((P.initialDigitalState || []).includes(elemInput)) inverseTimeNote = 'inverse-time element; it was already timing when the record started';
+            else if (fellBefore) inverseTimeNote = 'inverse-time element; its pickup dropped out and picked up again, and it kept its timing';
+          }
           return { op: 'TIMERNODE', label: node.name, refName: node.name, value: !!isAsserted(node.name),
-                   measuredMs: measuredTimerMs(P, elemInput, node.name),
+                   inverseTimeNote,
+                   measuredMs: inverseTimeNote ? null : measuredTimerMs(P, elemInput, node.name),
                    settingLabel: node.name.slice(0, -1) + 'D',
                    settingValue: getSettingNum(P, [node.name.slice(0, -1) + 'D']),
                    child: inputNode };
@@ -1258,6 +1286,16 @@ function analyzeCEV(P, prevEvent) {
         sourceEquationName = 'TR3X';
       }
       const sourceEquationText = sourceEquationName === 'TR3X' ? (P.tripEquationX || '') : (P.tripEquation || '');
+      // The equation names an aggregate (ORED51T). Classify the member element that operated,
+      // and keep the aggregate as a step in the chain. equationToken stays the name the trip
+      // equation itself uses, for the branch lookup below.
+      const equationToken = immediateCause;
+      let viaAggregate = null, aggregateMembers = [];
+      if (!immediateCauseNegated && typeof isOredAggregate === 'function' && isOredAggregate(immediateCause) && stateAtTripSnapshot) {
+        aggregateMembers = resolveOredAggregate(immediateCause, recordedDigitalLabels,
+          (tripTransition.changes || []).map(c => c.label), n => stateAtTripSnapshot.has(n));
+        if (aggregateMembers.length) { viaAggregate = immediateCause; immediateCause = aggregateMembers[0]; }
+      }
       const classified = classifyImmediateCauseTerm(immediateCause, immediateCauseNegated);
       let { causeText, causeDetail, causeChain, family, isNonProtection, negElements } = classified;
       // Restore trip-specific phrasing (the shared classifier uses generic wording so it also
@@ -1272,6 +1310,12 @@ function analyzeCEV(P, prevEvent) {
         if (prevEvent) {
           causeDetail += ` (possibly originating in prior event ${prevEvent.parsed.eventInfo.eventType || prevEvent.parsed.fileName})`;
         }
+      }
+
+      if (viaAggregate) {
+        causeChain.push({ label: viaAggregate, desc: oredAggregateDescription(viaAggregate), delay: 0 });
+        if (aggregateMembers.length > 1) causeDetail += ` (also asserted with it: ${aggregateMembers.slice(1).join(', ')})`;
+        causeDetail += ` — reached the trip equation through the aggregate bit ${viaAggregate}`;
       }
 
       // Always add the trip bit at the end
@@ -1298,7 +1342,7 @@ function analyzeCEV(P, prevEvent) {
       if (tripAst && stateAtTripSnapshot) {
         const isAssertedAtTrip = name => stateAtTripSnapshot.has(name);
         const branches = splitTopOr(tripAst);
-        const winningBranch = branches.find(b => astContainsToken(b, immediateCause)) || branches[0];
+        const winningBranch = branches.find(b => astContainsToken(b, equationToken)) || branches[0];
         if (winningBranch) {
           logicTree = pruneLogicTree(bakeFullLogicTree(winningBranch, isAssertedAtTrip, new Set(), 0));
           logicTreeOtherBranchCount = Math.max(0, branches.length - 1);
@@ -1311,6 +1355,7 @@ function analyzeCEV(P, prevEvent) {
         negElementsNeverTransitioned: neverTransitioned,
         logicTree, logicTreeOtherBranchCount, finalLabel: tripBitUsed,
         sourceEquationName, sourceEquationText,
+        viaAggregate, aggregateMembers,
       };
     } else {
       const causeText = 'Trip Detected (cause element not captured in digital data)';
@@ -1540,6 +1585,12 @@ function analyzeCEV(P, prevEvent) {
   // that was already open; a trip that traces to logic/status bits instead of a measured
   // quantity) so that misreading doesn't happen silently.
   A.investigationFlags = [];
+
+  // Trip margin and fault signature — an overcurrent trip whose operating quantity sat near
+  // pickup with no fault in the record (see analyze-trip-margin.js).
+  A.tripMargin = typeof analyzeTripMargin === 'function' ? analyzeTripMargin(P, A) : null;
+  const tripMarginFlagged = typeof tripMarginFlag === 'function' ? tripMarginFlag(A.tripMargin) : null;
+  if (tripMarginFlagged) A.investigationFlags.push(tripMarginFlagged);
 
   // ══════════════════════════════════════════════════════════════════════
   // CLOSE-ATTEMPT ANALYSIS
@@ -1773,8 +1824,15 @@ function analyzeCEV(P, prevEvent) {
         }
         const initiallyOn = (P.initialDigitalState || []).includes(el);
         const base = el.replace(/[PT]$/, '');
-        const ps = A.protectionStatus.find(p => p.element === base || p.element === el);
-        const vs = A.voltageStatus.find(v => v.element === base || v.element === el);
+        // Evaluate at the trip instant. A.protectionStatus/voltageStatus hold the default
+        // instant (end of the fault window), which on a fast-clearing trip is after the breaker
+        // opened — a 51Q that timed out at 1.06× pickup read "0.03× pickup" there.
+        const ocRow = (A.protectionRows || []).find(r => r.el === base || r.el === el);
+        const vRow = (A.voltageRows || []).find(r => r.element === base || r.element === el);
+        const ps = ocRow && tripSampleIdx != null ? evalOcRowAtIdx(A, ocRow, tripSampleIdx)
+          : A.protectionStatus.find(p => p.element === base || p.element === el);
+        const vs = vRow && tripSampleIdx != null ? evalVoltRowAtIdx(A, vRow, tripSampleIdx)
+          : A.voltageStatus.find(v => v.element === base || v.element === el);
         evidence.push({
           el,
           assertMs, initiallyOn,

@@ -167,6 +167,13 @@ function computeZeroSeqMagnitude(sA, sB, sC, N, scale = 1) {
   return mag;
 }
 
+// Order three phase arrays for the sequence transforms below, which are written for ABC
+// rotation. A relay set PHROT := ACB computes its sequence quantities on A-C-B, so B and C swap
+// places before the transform. Files with no PHROT setting are treated as ABC, as before.
+function seqPhaseOrder(P, a, b, c) {
+  return (P && P.settings && P.settings.PHROT === 'ACB') ? [a, c, b] : [a, b, c];
+}
+
 // Negative-sequence magnitude series from three phase sample arrays, via the Fortescue
 // transform V2 = (Va + a²·Vb + a·Vc)/3 where a = 1∠120°. Formula convention verified
 // against a synthetic three-phase signal with a known injected 20∠30° negative-sequence
@@ -349,7 +356,7 @@ function evalOcRowAtIdx(A, row, idx) {
   if (el.startsWith('51') && asserted) {
     const curve = row.curve || 'U1';
     const td = row.td || 1;
-    if (curve === 'U1') opTime = calcU1Time(multiple, td);
+    opTime = typeof calcSelCurveTime === 'function' ? calcSelCurveTime(curve, multiple, td) : (curve === 'U1' ? calcU1Time(multiple, td) : null);
   } else if (asserted && delayUnit === 'cycles') {
     opTime = delay / (cd.freq || 60);
   }
@@ -527,19 +534,19 @@ function computeConsistencyCheck(P, A, kind) {
     iMag = hasCurrentChannel ? computeRmsMagnitude(data.map(r => r[hasCurrentChannel]), samplesPerCycle, MAGS) : null;
     iPickupPatterns = ['51G#JP', '51G#P', '50G#P', '50GFP', '50GF#P', '50G#AP'];
   } else {
-    vMag = computeNegSeqMagnitude(data.map(r => r.VAY), data.map(r => r.VBY), data.map(r => r.VCY), samplesPerCycle, MAGS);
+    vMag = computeNegSeqMagnitude(...seqPhaseOrder(P, data.map(r => r.VAY), data.map(r => r.VBY), data.map(r => r.VCY)), samplesPerCycle, MAGS);
     vLabel = 'V2';
     vPickupPatterns = ['59Q#P', '59QP', '59Q#AP'];
     hasCurrentChannel = 'computed'; // I2 is always computable from phase currents
     iLabel = 'I2';
-    iMag = computeNegSeqMagnitude(data.map(r => r.IA), data.map(r => r.IB), data.map(r => r.IC), samplesPerCycle, MAGS);
+    iMag = computeNegSeqMagnitude(...seqPhaseOrder(P, data.map(r => r.IA), data.map(r => r.IB), data.map(r => r.IC)), samplesPerCycle, MAGS);
     iPickupPatterns = ['51Q#JP', '51Q#P', '50Q#P', '50QFP', '50Q#AP'];
   }
 
   if (!iMag) return null; // no usable ground-current channel populated in this file
 
   const vSustained = median(vMag), vPeak = Math.max(...vMag);
-  const iSustained = median(iMag), iPeak = Math.max(...iMag);
+  let iSustained = median(iMag), iPeak = Math.max(...iMag);
 
   // Prefer the SPECIFIC numbered element this event's own trip-cause chain actually used
   // (e.g. an immediateCause of "59G2T" means "59G2P" — not some unrelated "59G1P" backup
@@ -572,6 +579,13 @@ function computeConsistencyCheck(P, A, kind) {
   if (iPickupSec == null) {
     const all = getAllSettingNums(P, iPickupPatterns);
     if (all.length) iPickupSec = Math.min(...all);
+  }
+  // A negative-sequence OC pickup is set in 3I2. When one is the reference, compare 3I2 to it.
+  // The fallback reference (phase current) keeps the I2 basis it always used.
+  if (kind !== 'zero' && iPickupSec != null) {
+    iMag = iMag.map(v => 3 * v);
+    iLabel = '3I2';
+    iSustained = median(iMag); iPeak = Math.max(...iMag);
   }
 
   // CRITICAL: whether to convert settings (always secondary, by SEL convention) up to

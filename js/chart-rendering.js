@@ -131,7 +131,7 @@ function sliceChartWindow(kind, fullTraces, tripIdxFull, triggerIdxFull, msPerSa
   const totalLen = fullTraces[0]?.values.length || 0;
   const startIdx = zoomRange ? Math.max(0, Math.min(totalLen - 1, Math.round(zoomRange.start))) : 0;
   const endIdx = zoomRange ? Math.max(startIdx + 1, Math.min(totalLen - 1, Math.round(zoomRange.end))) : totalLen - 1;
-  const slicedTraces = fullTraces.map(t => ({ label: t.label, color: t.color, values: t.values.slice(startIdx, endIdx + 1) }));
+  const slicedTraces = fullTraces.map(t => ({ label: t.label, color: t.color, dash: t.dash, values: t.values.slice(startIdx, endIdx + 1) }));
   const tripIdx = (tripIdxFull != null && tripIdxFull >= startIdx && tripIdxFull <= endIdx) ? tripIdxFull - startIdx : null;
   const triggerIdx = (triggerIdxFull != null && triggerIdxFull >= startIdx && triggerIdxFull <= endIdx) ? triggerIdxFull - startIdx : null;
   const cursorIdx = (CURSOR_IDX != null && CURSOR_IDX >= startIdx && CURSOR_IDX <= endIdx) ? CURSOR_IDX - startIdx : null;
@@ -407,7 +407,7 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
     note = '3V0 is the instantaneous sum of the three phase voltages — near zero when balanced, and the quantity 59G/59N/59YN elements actually monitor.';
   }
   if (family === 'negSeqV' || family === 'zeroSeqV+negSeqV') {
-    const v2 = computeNegSeqMagnitude(data.map(r => r.VAY), data.map(r => r.VBY), data.map(r => r.VCY), samplesPerCycle, MAGS);
+    const v2 = computeNegSeqMagnitude(...seqPhaseOrder(P, data.map(r => r.VAY), data.map(r => r.VBY), data.map(r => r.VCY)), samplesPerCycle, MAGS);
     traces.push({ label: 'V2.Mag', color: '#a78bfa', values: v2 });
     title = traces.length > 1 ? 'Zero + Negative-Sequence Voltage' : 'Negative-Sequence Voltage (V2)';
     yUnit = detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], 'V');
@@ -426,11 +426,14 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
   }
   if (family === 'negSeqI') {
     const unit = detectChannelUnit(P, ['IA'], 'A');
-    const i2 = computeNegSeqMagnitude(data.map(r => r.IA), data.map(r => r.IB), data.map(r => r.IC), samplesPerCycle, MAGS);
-    traces.push({ label: 'I2.Mag', color: '#a78bfa', values: i2 });
-    title = 'Negative-Sequence Current (I2)';
+    // 3I2, the basis SEL sets 50Q/51Q pickups in. Read from the same series the Protection tab
+    // compares against the pickup, so the chart and the table always agree.
+    const i3i2 = A?.cursorData?.current?.negSeq3I
+      || computeNegSeqMagnitude(...seqPhaseOrder(P, data.map(r => r.IA), data.map(r => r.IB), data.map(r => r.IC)), samplesPerCycle, MAGS).map(v => 3 * v);
+    traces.push({ label: '3I2.Mag', color: '#a78bfa', values: i3i2 });
+    title = 'Negative-Sequence Current (3I2)';
     yUnit = unit;
-    note = 'I2 is the negative-sequence current, computed via a Fortescue transform — the quantity 50Q/51Q/67Q elements and open-phase detection monitor.';
+    note = '3I2 is three times the negative-sequence current, calculated with a Fortescue transform. SEL 50Q/51Q pickups are set in 3I2. A phase-current chart does not show this quantity.';
   }
   if (family === 'freq') {
     traces.push({ label: 'FREQ', color: '#22c55e', values: data.map(r => r.FREQ || 0) });
@@ -441,6 +444,18 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
   }
 
   if (!traces.length) return '';
+
+  // Pickup reference line for the element that operated, when that element's operating
+  // quantity is the one on this chart (see analyze-trip-margin.js). Same units as the trace.
+  const TM = A?.tripMargin;
+  const quantityOnChart = TM && ((TM.seriesKey === 'negSeq3I' && family === 'negSeqI')
+    || ((TM.seriesKey === 'groundI' || TM.seriesKey === 'neutralI') && family === 'groundI'));
+  if (quantityOnChart && TM.pickupSec > 0) {
+    const pk = A.cursorData?.iDataIsPrimary ? TM.pickupPri : TM.pickupSec;
+    traces.push({ label: `${TM.element}P pickup`, color: '#ef4444', dash: '5,4', values: new Array(traces[0].values.length).fill(pk) });
+    title += ` vs ${TM.element} pickup`;
+    note += ` The dashed line is the ${TM.element} pickup (${TM.pickupSec} A sec).`;
+  }
 
   if (compact) {
     const { slicedTraces, tripIdx, triggerIdx, cursorIdx, markAIdx, markBIdx, xOffsetMs } = sliceChartWindow('relevant', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.relevant);
