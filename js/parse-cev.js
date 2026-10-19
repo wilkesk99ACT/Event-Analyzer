@@ -293,6 +293,9 @@ function parseCEV(text, fileName) {
   if (!R.settings.PTRY) R.settings.PTRY = mf(/PTRY\s*:=\s*([\d.]+)/) || mf(/PTR\s*:=\s*([\d.]+)/);
   if (!R.settings.PTRZ) R.settings.PTRZ = mf(/PTRZ\s*:=\s*([\d.]+)/) || R.settings.PTRY;
   if (!R.settings.VNOM) R.settings.VNOM = mf(/VNOM\s*:=\s*([\d.]+)/);
+  // Phase rotation. Sequence quantities (I2, V2, V1) depend on it: on an ACB system the
+  // Fortescue transform written for ABC returns the positive-sequence magnitude as "I2".
+  R.settings.PHROT = (m(/PHROT\s*:=\s*(ABC|ACB)/) || 'ABC').toUpperCase();
   R.settings.RID = m(/RID\s*:=([^\r\n]+)/);
   R.settings.TID = m(/TID\s*:=([^\r\n]+)/);
   // The Event Report trigger equation. Every record in a CEV set exists because ONE of this
@@ -891,6 +894,23 @@ function reconcileVnomAcrossEvents(results) {
 function calcU1Time(multiple, td) {
   if (multiple <= 1) return Infinity;
   return td * (0.0226 + 0.0104 / (Math.pow(multiple, 0.02) - 1));
+}
+
+// Operate time (seconds) for every SEL US (U1–U5) and IEC (C1–C5) inverse-time curve, from the
+// equations in the SEL relay instruction manuals: tp = TD × (A + B / (M^p − 1)). Returns
+// Infinity at or below pickup and null for a curve name this table does not know, so a caller
+// can say "not computed" rather than show a wrong time.
+const SEL_CURVES = {
+  U1: [0.0226, 0.0104, 0.02], U2: [0.180, 5.95, 2], U3: [0.0963, 3.88, 2],
+  U4: [0.02434, 5.64, 2], U5: [0.00262, 0.00342, 0.02],
+  C1: [0, 0.14, 0.02], C2: [0, 13.5, 1], C3: [0, 80, 2], C4: [0, 120, 1], C5: [0, 0.05, 0.04],
+};
+function calcSelCurveTime(curve, multiple, td) {
+  const c = SEL_CURVES[String(curve || '').toUpperCase()];
+  if (!c) return null;
+  if (!(multiple > 1)) return Infinity;
+  const [A, B, p] = c;
+  return td * (A + B / (Math.pow(multiple, p) - 1));
 }
 
 // `scale` is the per-file magnitude calibration from calibrateAnalogBasis() (P.magScale):

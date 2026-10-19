@@ -140,6 +140,27 @@ current through the relay's CTs. A disturbance elsewhere on the system lowers vo
 raising current. This separates a site that caused an event from a site that only responded to
 one.
 
+**The summary says overcurrent, but the phase currents look normal. What tripped?**
+Some trips come from a quantity that the phase-current chart does not show. The SEL-751
+`ORED51T` bit is one example. It is the OR of all the 51 elements, so the trip equation names
+only the family. The tool follows `ORED50T`, `ORED51T`, `ORED81T` and `ORED81RT` to the element
+that operated (for example `51QT`) and charts that element's quantity in the banner, with its
+pickup as a dashed line:
+
+| Element | Chart |
+|---|---|
+| 50Q / 51Q | 3I2, the basis SEL sets negative-sequence pickups in |
+| 50G / 51G / 50N / 51N | IG / IN |
+
+For an overcurrent trip, the tool also measures the margin. It compares the operating quantity
+with its pickup at the trip, and it looks for the signs a fault leaves in the record: a rise in
+phase current, a voltage dip, or phase current above a phase pickup. When there is no fault
+signature, the Flagged for Further Investigation panel says so. It gives the multiple of pickup,
+whether the pickup bit was already up at the start of the record or dropped out and picked up
+again, the curve operate time at that multiple, I2/I1, and V2/V1 before and after the breaker
+opened. It lists the possible errors — setting, current measurement, system unbalance — and it
+does not rank them.
+
 **The 79 element is off. Does that mean the device will not come back by itself?**
 Not necessarily, and the tool no longer assumes it does. Many DER interconnection reclosers have
 `E79 := N` and an automatic return written by hand in SELogic instead — usually an IEEE 1547
