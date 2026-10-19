@@ -35,7 +35,7 @@ vm.runInContext(`
   function isFilteredQuarterCycle(spc){return spc===4;}
   function formatTimestamp(ts){return ts.month+'/'+ts.day+'/'+ts.year;}
 `, ctx);
-for (const f of ['signal-processing.js', 'file-loading.js', 'parse-cev.js', 'analyze-cev.js', 'logic-graph-model.js', 'tooltips.js',
+for (const f of ['signal-processing.js', 'file-loading.js', 'ored-aggregates.js', 'analyze-trip-margin.js', 'parse-cev.js', 'analyze-cev.js', 'logic-graph-model.js', 'tooltips.js',
                  'analyze-reclose.js', 'analyze-custom-close.js', 'analyze-close-attempt.js', 'analyze-close-readiness.js']) {
   vm.runInContext(fs.readFileSync(R + f, 'utf8'), ctx, { filename: f });
 }

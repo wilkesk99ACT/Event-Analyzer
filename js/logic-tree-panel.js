@@ -350,7 +350,9 @@ function buildLogicTreeSection(P, A) {
       const conv = (!measured && node.pickupDelay != null) ? svDelayMs(P, node.pickupDelay, freqForDelay) : null;
       const delayMs = measured ? Math.round(node.measuredMs) : (conv ? Math.round(conv.ms) : null);
       const settingNote = node.settingValue != null ? ` · setting ${node.settingLabel} = ${node.settingValue}` : '';
-      const edgeTitle = measured
+      const edgeTitle = node.inverseTimeNote
+        ? `${childLabel} → ${node.label} — ${node.inverseTimeNote}`
+        : measured
         ? `${childLabel} → ${node.label} — timer ran ${delayMs} ms in this record${settingNote}`
         : `${childLabel} → ${node.label} — ${delayMs} ms pickup timer${conv && conv.assumed ? ' (setting units not confirmed by this record; read as cycles)' : ''}${settingNote}`;
 
@@ -386,10 +388,13 @@ function buildLogicTreeSection(P, A) {
 
       linesHTML += titledEdge(cx, cy, x, ny, node.value ? trueColor : falseColor, '2,3', edgeTitle);
       const midX = (cx + x) / 2 - 16;
-      const badgeTitle = measured
+      const badgeTitle = node.inverseTimeNote
+        ? `This is an ${node.inverseTimeNote}. The record does not show how long it ran.`
+        : measured
         ? `Measured in this record: ${delayMs} ms${settingNote}`
         : `${delayMs} ms${conv && conv.assumed ? ' — setting units not confirmed by this record; read as cycles' : ''}${settingNote}`;
-      boxesHTML += `<div class="logic-timer-label" style="left:${midX}px;top:${ny - 16}px;" title="${badgeTitle}">⏱ ${delayMs}ms${measured ? '' : '*'}</div>`;
+      const badgeText = node.inverseTimeNote ? '⏱ inv' : delayMs == null ? '⏱ —' : `⏱ ${delayMs}ms${measured ? '' : '*'}`;
+      boxesHTML += `<div class="logic-timer-label" style="left:${midX}px;top:${ny - 16}px;" title="${badgeTitle}">${badgeText}</div>`;
       boxesHTML += `<div class="logic-box logic-sv-box logic-timer-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${prefix}${tt(node.label, P)}</div>`;
       renderNode(node.child, node.label);
       return;

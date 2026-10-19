@@ -186,7 +186,10 @@ function renderMagnitudeChartSVG(traces, opts) {
   let polylines = '';
   traces.forEach(t => {
     const pts = t.values.map((v, i) => `${xScale(i).toFixed(1)},${yScale(v).toFixed(1)}`).join(' ');
-    polylines += `<polyline points="${pts}" fill="none" stroke="${t.color}" stroke-width="${opts.compact ? 1.2 : 1.4}" opacity="0.95"/>`;
+    // A trace with `dash` set is a reference level (an element pickup), drawn dashed so it
+    // never reads as a measured quantity.
+    const dashAttr = t.dash ? ` stroke-dasharray="${t.dash}"` : '';
+    polylines += `<polyline points="${pts}" fill="none" stroke="${t.color}" stroke-width="${opts.compact ? 1.2 : 1.4}" opacity="0.95"${dashAttr}/>`;
   });
 
   // Legend
