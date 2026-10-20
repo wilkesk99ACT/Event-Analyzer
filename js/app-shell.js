@@ -235,7 +235,7 @@ function renderContent() {
     </tr></thead><tbody>`;
     A.freqStatus.forEach(f => {
       html += `<tr><td>${f.element}</td><td>${f.type}</td><td>${f.pickup}</td>
-        <td>${f.timeDelay}</td><td>${f.measured}</td><td>${badge(f.asserted)}</td></tr>`;
+        <td>${f.timeDelay}</td><td>${f.measured}</td><td>${badge(f.asserted)}${f.timedOut ? ' <span style="font-size:11px;color:var(--text-dim);">timer expired</span>' : ''}</td></tr>`;
     });
     html += `</tbody></table>`;
   } else {
@@ -249,6 +249,7 @@ function renderContent() {
   [
     [`${P.tripEquationName || 'TR'} (Trip)`, P.tripEquation],
     ['TR3X (Trip Unconditional)', P.tripEquationX || '—'],
+    ...Object.entries(P.tripEquationsPhase || {}).map(([n, eq]) => [`${n} (Phase ${n.slice(2)} Trip)`, eq || '—']),
     ['FAULT', P.faultEquation],
     ['79RI3P (Reclose Initiate)', P.recloseEquation],
     ['79DTL3P (Dead Timer Lockout)', P.dtlEquation],

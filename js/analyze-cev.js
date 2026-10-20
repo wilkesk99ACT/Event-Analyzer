@@ -264,7 +264,9 @@ function analyzeCEV(P, prevEvent) {
 
   // SV chain — mark which are in the trip equation
   A.svChain = svSettings.map(sv => {
-    const tripEqClean = P.tripEquation.split('#')[0];
+    // Per-phase equations (TRA/TRB/TRC) count as trip logic too; see tripEqSources below.
+    const tripEqClean = [P.tripEquation, ...Object.values(P.tripEquationsPhase || {})]
+      .map(e => (e || '').split('#')[0]).join(' ');
     const inTrip = tripEqClean.includes(sv.label + 'T') || tripEqClean.includes(sv.label + ' ') || tripEqClean.includes(sv.label + ')') || tripEqClean.endsWith(sv.label);
     // Also check the unconditional trip path (TR3X/TRIP3X), already parsed robustly above
     const trxClean = (P.tripEquationX || '').split('#')[0];
@@ -354,8 +356,33 @@ function analyzeCEV(P, prevEvent) {
             const info = svEquationInfo(num);
             if (info) {
               const nextVisited = new Set(visited); nextVisited.add(num);
-              const child = bakeFullLogicTree(info.ast, isAsserted, nextVisited, depth + 1);
-              const bareSvNode = { op: 'SVNODE', label: info.label, comment: info.comment, value: !!isAsserted(info.label), child, refName: info.label };
+              let child = bakeFullLogicTree(info.ast, isAsserted, nextVisited, depth + 1);
+              // An SV that reads asserted while its own equation reads false at this instant is
+              // a pulse or one-shot (for example "NOT SV02T AND ... OR SV29T": the equation drops
+              // the moment the timer output rises). Showing that false equation hides what
+              // actually set it. In that case only, show the inputs at the row where the SV rose,
+              // with its own output read as false there. Every other node is unchanged.
+              let inputsAtRise = false;
+              if (isAsserted(node.name) && !child.value) {
+                const stRise = stateWhenSvAsserted(info.label, bakeRefIdx);
+                if (stRise) {
+                  const own = new Set([info.label, info.label + 'T']);
+                  // SVs this equation reads under NOT (blocking timers, the opposite pulse) are
+                  // permissives here, not causes: show each as one block, do not expand it.
+                  const riseVisited = new Set(nextVisited);
+                  (function collectNegSv(n, neg) {
+                    if (!n) return;
+                    if (n.op === 'VAR') { const m = neg && n.name.match(/^SV(\d+)T?$/); if (m) riseVisited.add(parseInt(m[1])); return; }
+                    if (n.op === 'NOT') return collectNegSv(n.c, !neg);
+                    if (n.c) collectNegSv(n.c, neg);
+                    if (n.l) collectNegSv(n.l, neg);
+                    if (n.r) collectNegSv(n.r, neg);
+                  })(info.ast, false);
+                  const atRise = bakeFullLogicTree(info.ast, n => !own.has(n) && stRise.has(n), riseVisited, depth + 1);
+                  if (atRise.value) { child = atRise; inputsAtRise = true; }
+                }
+              }
+              const bareSvNode = { op: 'SVNODE', label: info.label, comment: info.comment, value: !!isAsserted(info.label), child, refName: info.label, inputsAtRise };
               // When the reference is the TIMED form (SVxxT) and this SV actually has a pickup
               // delay configured, the timer is a real hop of its own — SVxx and SVxxT can read
               // differently for up to that whole delay — so show it as a distinct node rather
@@ -781,11 +808,34 @@ function analyzeCEV(P, prevEvent) {
   // names (digital transitions + initial state). When present, boolean evaluation
   // decides which leaves/children are live; when absent (structure-only mode) we fall
   // back to following everything so the tool still degrades gracefully.
-  function resolveSV(svLabel, depth, triggered) {
+  // Bit state at the digital row where `label` (an SV, bare form first, then its timer form)
+  // asserted — the latest such row at or before the trip, or at record start when the bit was
+  // already up then. Null when the record never shows it asserted. This is what lets an SV be
+  // explained by the inputs that were true WHEN IT ROSE, rather than by every bit that asserted
+  // anywhere in the record.
+  function stateWhenSvAsserted(label, limitIdx) {
+    if (typeof timeline === 'undefined' || !timeline.length) return null;
+    const limit = Math.min(limitIdx != null ? limitIdx : svResolveLimitIdx, digitalTransitions.length - 1);
+    for (const name of [label, label + 'T']) {
+      for (let i = limit; i >= 0; i--) {
+        if (digitalTransitions[i].changes.some(c => c.asserted && c.label === name)) return timeline[i + 1];
+      }
+    }
+    if (timeline[0].has(label) || timeline[0].has(label + 'T')) return timeline[0];
+    return null;
+  }
+
+  function resolveSV(svLabel, depth, triggered, visited) {
     if (depth > 8) return { elements: [], svPath: [], comment: '' };
     const svNum = parseInt(svLabel.replace(/SV|T/g, ''));
     const sv = svSettings.find(s => s.num === svNum);
     if (!sv) return { elements: [], svPath: [], comment: '' };
+    // One SV is expanded once per resolution. Without this, SV equations that reference each
+    // other (open/close pulse pairs, blocking timers, seal-ins) were expanded again on every
+    // path that reached them, and a single trip produced a chain thousands of steps long.
+    visited = visited || new Set();
+    if (visited.has(svNum)) return { elements: [], negElements: [], svPath: [], comment: '' };
+    visited.add(svNum);
 
     const eq = sv.equation.split('#')[0].trim();
     const comment = sv.equation.includes('#') ? sv.equation.split('#').slice(1).join('#').trim() : '';
@@ -805,7 +855,24 @@ function analyzeCEV(P, prevEvent) {
 
     // Determine the set of leaf names that actually drove this equation true.
     let liveLeaves, negLeaves = [];
-    if (haveTriggered) {
+    // Preferred: evaluate the equation at the row where this SV rose. Its own output (SVnn and
+    // SVnnT) is read as false there, because it was false just before it rose. That is what
+    // makes one-shot patterns like "NOT SV02T AND ... OR SV29T" resolve: the old record-wide
+    // reading saw SV02T asserted (it did, one row later) and read the whole AND as false.
+    let timedOk = false;
+    const timedState = haveTriggered ? stateWhenSvAsserted(sv.label) : null;
+    if (timedState) {
+      const own = new Set([sv.label, sv.label + 'T']);
+      const res = evalAst(parseEq(tokenizeEq(eq)), name => !own.has(name) && timedState.has(name));
+      if (res.value && (res.live.size || res.neg.size)) {
+        liveLeaves = [...res.live];
+        negLeaves = [...res.neg];
+        timedOk = true;
+      }
+    }
+    if (timedOk) {
+      // resolved above
+    } else if (haveTriggered) {
       const res = evalAst(parseEq(tokenizeEq(eq)), isAsserted);
       liveLeaves = [...res.live];
       negLeaves = [...res.neg]; // leaves that drove this true via NOT (de-assertion), not assertion
@@ -841,7 +908,7 @@ function analyzeCEV(P, prevEvent) {
     for (const ref of svRefs) {
       const childNum = parseInt(ref.replace(/SV|T/g, ''));
       if (childNum !== svNum) { // avoid self-reference
-        const child = resolveSV(ref, depth + 1, triggered);
+        const child = resolveSV(ref, depth + 1, triggered, visited);
         allElements = allElements.concat(child.elements);
         allNegElements = allNegElements.concat(child.negElements || []);
         allSvPath = child.svPath.concat(allSvPath);
@@ -947,7 +1014,22 @@ function analyzeCEV(P, prevEvent) {
       family = 'freq';
     } else if (hasFreq && !hasUV && !hasOV) {
       causeText = 'Frequency Protection Trip';
-      causeDetail = topComment || 'Frequency element timer expired via ' + label;
+      // Name the element(s), with pickup and delay, ahead of any settings comment. A comment on
+      // the SV that issues the trip often describes the switch operation ("OPEN S1 WHEN ...")
+      // and never says which frequency element started it.
+      const freqEls = [...new Set(elements.filter(e => /^81D\d/.test(e)))];
+      const freqDesc = freqEls.map(e => {
+        const n = (e.match(/^81D(\d)/) || [])[1];
+        const p = n ? FE[`81D${n}P`] : null;
+        const d = n ? (FE[`81D${n}E`] ?? FE[`81D${n}D`]) : null;
+        if (p == null) return e;
+        const kind = p < (P.eventInfo?.nfreq || 60) ? 'underfrequency' : 'overfrequency';
+        return `${e} (${kind}, pickup ${p} Hz${d != null ? `, delay ${d} ${FE[`81D${n}E`] != null ? 's' : 'cyc'}` : ''})`;
+      });
+      const elPart = freqDesc.length ? `${freqDesc.join(', ')} asserted and reached the trip through ${label}.` : '';
+      causeText = freqEls.length === 1 ? `Frequency Protection Trip (${freqEls[0]})` : causeText;
+      causeDetail = [elPart, topComment ? `Settings comment on ${svPath.length ? svPath[svPath.length - 1].label : label}: ${topComment}` : '']
+        .filter(Boolean).join(' ') || 'Frequency element timer expired via ' + label;
       family = 'freq';
     } else if (hasFreq && (hasUV || hasOV)) {
       causeText = 'Voltage/Frequency Protection Trip';
@@ -1036,6 +1118,10 @@ function analyzeCEV(P, prevEvent) {
   // snapshotting after each one, seeded from the initial digital state at record start. Built
   // once here (rather than inside the trip-only branch) so both the trip equation (TR/TR3P)
   // and the event-report equation (ER) below can share it.
+  // Upper bound for stateWhenSvAsserted(): rows after the trip cannot explain it.
+  const svResolveLimitIdx = tripTransition ? digitalTransitions.indexOf(tripTransition) : digitalTransitions.length - 1;
+  // Reference row for logic trees built for other bits (buildTreeForBit sets it, then clears it).
+  let bakeRefIdx = null;
   const timeline = [new Set(P.initialDigitalState || [])];
   const timelineRunning = new Set(timeline[0]);
   for (const t of digitalTransitions) {
@@ -1053,18 +1139,42 @@ function analyzeCEV(P, prevEvent) {
   // meant TR3X (and any element living only in TR3X, like a 3V0/zero-sequence overvoltage
   // element) could vanish from consideration entirely on any relay where TR3P/TR happened to
   // carry a comment, with no error or warning — the tool just silently failed to find a cause.
-  const tripEqCombined = [P.tripEquation, P.tripEquationX || '']
-    .map(e => e.split('#')[0].trim())
-    .filter(Boolean)
-    .join(' OR ');
+  //
+  // PER-PHASE TRIP LOGIC. SEL-651R templates for independent-pole reclosers often set TR3P := 0
+  // and put the real logic in TRA/TRB/TRC (TRA := SV02T OR OC3, and so on). Those equations drive
+  // TRIPA/TRIPB/TRIPC. Before this, the tracer only knew TR/TR3P and TR3X, so on such a device it
+  // evaluated "0" and reported "cause element not captured" for every trip. Now the equation for
+  // each TRIPx bit that asserted at the trip instant joins the combined logic. If no single-phase
+  // bit asserted (TRIP3P only), every non-trivial phase equation joins, because any of them can
+  // produce a three-pole trip on these templates. An equation that is only "0" or "NA" adds
+  // nothing and is left out, so it cannot take credit for a cause.
+  const cleanTripEq = e => (e || '').split('#')[0].trim();
+  const isTrivialTripEq = e => { const c = cleanTripEq(e); return !c || /^(0|NA)$/i.test(c); };
+  const PHASE_EQ_FOR_TRIP_BIT = { TRIPA: 'TRA', TRIPB: 'TRB', TRIPC: 'TRC' };
+  const phaseTripEqs = P.tripEquationsPhase || {};
+  const tripEqSources = [];
+  if (!isTrivialTripEq(P.tripEquation)) tripEqSources.push({ name: P.tripEquationName || 'TR', raw: P.tripEquation });
+  if (!isTrivialTripEq(P.tripEquationX)) tripEqSources.push({ name: 'TR3X', raw: P.tripEquationX });
+  {
+    const phaseBits = tripTransition
+      ? tripTransition.changes.filter(c => c.asserted && PHASE_EQ_FOR_TRIP_BIT[c.label]).map(c => c.label)
+      : [];
+    const phaseNames = phaseBits.length ? phaseBits.map(b => PHASE_EQ_FOR_TRIP_BIT[b]) : Object.keys(phaseTripEqs);
+    for (const n of phaseNames) {
+      if (!isTrivialTripEq(phaseTripEqs[n]) && !tripEqSources.some(s => s.name === n)) tripEqSources.push({ name: n, raw: phaseTripEqs[n] });
+    }
+  }
+  for (const s of tripEqSources) {
+    s.text = cleanTripEq(s.raw);
+    try { s.ast = parseEq(tokenizeEq(s.text)); } catch (e) { s.ast = null; }
+  }
+  // Joined with a bare OR: OR has the lowest precedence, so each equation keeps its own meaning.
+  const tripEqCombined = tripEqSources.map(s => s.text).join(' OR ');
   const tripAst = tripEqCombined ? parseEq(tokenizeEq(tripEqCombined)) : null;
-  // Separate ASTs for TR and TR3X individually (in addition to the combined one above) — needed
-  // so that once an immediate cause is resolved, we can report WHICH of the two actually
-  // contains/produced it (e.g. "via TR3X" vs "via TR") instead of always crediting the combined
-  // equation's name. TR3X is typically the relay's unconditional-trip path and often protects
-  // completely different elements than TR/TR3P, so conflating them mis-attributes the cause.
-  const tripAstMain = P.tripEquation ? parseEq(tokenizeEq(P.tripEquation.split('#')[0].trim())) : null;
-  const tripAstX = P.tripEquationX ? parseEq(tokenizeEq(P.tripEquationX.split('#')[0].trim())) : null;
+  // Each source keeps its own AST (above) so that, once an immediate cause is resolved, we can
+  // report WHICH equation contains it ("via TR3X", "via TRA") instead of crediting the combined
+  // logic. TR3X and the per-phase equations often protect different elements than TR/TR3P, so
+  // conflating them mis-attributes the cause.
 
   // ── Shared classification: turn a resolved immediate-cause term into a human explanation ──
   // Used by BOTH the trip path (TR/TR3P below) and the event-report path (ER further down) so
@@ -1281,11 +1391,13 @@ function analyzeCEV(P, prevEvent) {
       // attributes the cause even when the leaf sits deep inside a nested SV chain reference.
       // Falls back to the combined/main name if neither individual AST can be checked (e.g. one
       // of the two equations is empty) or if — unusually — the leaf appears in both.
-      let sourceEquationName = P.tripEquationName || 'TR';
-      if (tripAstX && astContainsToken(tripAstX, immediateCause) && !(tripAstMain && astContainsToken(tripAstMain, immediateCause))) {
-        sourceEquationName = 'TR3X';
-      }
-      const sourceEquationText = sourceEquationName === 'TR3X' ? (P.tripEquationX || '') : (P.tripEquation || '');
+      // Priority follows tripEqSources order (TR/TR3P, then TR3X, then the per-phase equations),
+      // so a leaf found in TR/TR3P keeps that credit exactly as before.
+      const containingSource = tripEqSources.find(s => s.ast && astContainsToken(s.ast, immediateCause));
+      const sourceEquationName = containingSource ? containingSource.name
+        : (tripEqSources[0] ? tripEqSources[0].name : (P.tripEquationName || 'TR'));
+      const sourceEquationText = containingSource ? containingSource.raw
+        : (tripEqSources[0] ? tripEqSources[0].raw : (P.tripEquation || ''));
       // The equation names an aggregate (ORED51T). Classify the member element that operated,
       // and keep the aggregate as a step in the chain. equationToken stays the name the trip
       // equation itself uses, for the branch lookup below.
@@ -1360,7 +1472,8 @@ function analyzeCEV(P, prevEvent) {
     } else {
       const causeText = 'Trip Detected (cause element not captured in digital data)';
       const causeDetail = `${tripBitUsed} asserted but the specific triggering term could not be resolved from the trip logic against the reconstructed bit-state timeline. The SV Logic and Timeline tabs contain the underlying digital transitions and equation resolution.`;
-      const causeChain = [{ label: P.tripEquationName || 'TR', desc: 'Trip equation', delay: 0 }, { label: tripBitUsed, desc: 'Trip', delay: 0 }];
+      const eqLabel = tripEqSources.length ? tripEqSources.map(s => s.name).join(' / ') : (P.tripEquationName || 'TR');
+      const causeChain = [{ label: eqLabel, desc: 'Trip equation', delay: 0 }, { label: tripBitUsed, desc: 'Trip', delay: 0 }];
       A.tripCause = { causeText, causeDetail, immediateCause: null, causeChain, tripTransition };
     }
   } else if (P.erEquation) {
@@ -1857,6 +1970,9 @@ function analyzeCEV(P, prevEvent) {
           items: evidence,
           completedBy,
           uninvolvedUV: [...uvPickedUp],
+          // Whether an overcurrent element is in the trip path. The undervoltage note may only
+          // say "fault current" when there was fault current to speak of.
+          tripPathHasOvercurrent: measuredEls.some(e => /^(5[01]|67)/.test(e)),
         };
       }
     }
@@ -2091,6 +2207,7 @@ function analyzeCEV(P, prevEvent) {
     const clean = eq => (eq || '').split('#')[0].trim();
     if (label === (P.tripEquationName || 'TR') && clean(P.tripEquation)) return clean(P.tripEquation);
     if (label === 'TR3X' && clean(P.tripEquationX)) return clean(P.tripEquationX);
+    if (/^TR[ABC]$/.test(label) && clean((P.tripEquationsPhase || {})[label])) return clean(P.tripEquationsPhase[label]);
     if (label === (P.erEquationName || 'ER') && clean(P.erEquation)) return clean(P.erEquation);
     if (label === 'FAULT' && clean(P.faultEquation)) return clean(P.faultEquation);
     if (label === '79RI3P' && clean(P.recloseEquation)) return clean(P.recloseEquation);
@@ -2126,10 +2243,52 @@ function analyzeCEV(P, prevEvent) {
       }
     } catch (e) { /* fall through with the whole equation */ }
     let baked;
-    try { baked = pruneLogicTree(bakeFullLogicTree(rootAst, isAssertedFn, new Set(), 0)); } catch (e) { return null; }
+    // Rows after the reference instant cannot explain a bit's state at that instant.
+    let refTransIdx = -1;
+    digitalTransitions.forEach((t, i) => { if (t.digitalSampleIdx <= refDigIdx) refTransIdx = i; });
+    bakeRefIdx = refTransIdx;
+    try { baked = pruneLogicTree(bakeFullLogicTree(rootAst, isAssertedFn, new Set(), 0)); } catch (e) { bakeRefIdx = null; return null; }
+    bakeRefIdx = null;
     return { logicTree: baked, finalLabel: label, logicTreeOtherBranchCount: otherBranchCount };
   }
   A._buildTreeForBit = buildTreeForBit;
+
+  // ── Frequency table at the trip instant ──
+  // The first pass above averages FREQ over the window that starts at the '*' row. SEL puts '*'
+  // on the row it used for the summary currents, which for a frequency trip is usually normal
+  // pre-event load, long before the excursion. That made the table show 59.96 Hz and "not
+  // asserted" for an 81D4 element the relay had just tripped on at 62.8 Hz. When there is a
+  // trip, re-read each row at the trip instant: status from the relay's own 81Dn / 81DnT bits
+  // when the record carries them (ground truth), otherwise from the measured value.
+  try {
+    const tt = A.tripCause && A.tripCause.tripTransition;
+    if (tt && tt.analogSampleIdx != null && analogData[tt.analogSampleIdx]) {
+      const ti = tt.analogSampleIdx;
+      const fAt = analogData[ti].FREQ;
+      const upTo = analogData.slice(0, ti + 1).map(r => r.FREQ).filter(f => f > 0);
+      if (fAt > 0 && upTo.length) {
+        const fMax = Math.max(...upTo), fMin = Math.min(...upTo);
+        const stTrip = stateSetAtDigitalIdx(tt.digitalSampleIdx);
+        const recorded = new Set((P.digitalLabels || []).filter(l => l && l !== '*'));
+        A.freqStatus = A.freqStatus.map(row => {
+          const n = (row.element.match(/^81D(\d)$/) || [])[1];
+          const pu = n ? FE[`81D${n}P`] : null;
+          if (pu == null) return row;
+          const isUnder = row.type === 'Underfrequency';
+          const extreme = isUnder ? fMin : fMax;
+          const bitRecorded = recorded.has(row.element);
+          const asserted = bitRecorded ? stTrip.has(row.element) : (isUnder ? fAt <= pu : fAt >= pu);
+          const timedOut = recorded.has(row.element + 'T') ? stTrip.has(row.element + 'T') : null;
+          return {
+            ...row,
+            measured: `${fAt.toFixed(2)} Hz at trip (${isUnder ? 'lowest' : 'highest'} before trip: ${extreme.toFixed(2)} Hz)`,
+            asserted, timedOut,
+            statusSource: bitRecorded ? 'relay bit' : 'measured',
+          };
+        });
+      }
+    }
+  } catch (e) { console.warn('frequency-at-trip pass failed', e); }
 
   // ── Automatic reclosing outlook ──
   // Runs last: it reads A.tripCause (to anchor on the trip instant) and the parsed 79 scheme,

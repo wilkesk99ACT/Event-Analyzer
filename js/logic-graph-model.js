@@ -129,7 +129,8 @@ function isBlinkerLabel(label, P) {
 function isTerminalBit(label, P) {
   return ['TRIP', 'TRIP3P', 'TRIPA', 'TRIPB', 'TRIPC', 'CLOSE', 'CLOSE3P', 'CLOSEA', 'CLOSEB', 'CLOSEC', 'ER']
     .includes(label) || label === (P.tripEquationName || 'TR') || label === (P.erEquationName || 'ER')
-    || (label === 'TR3X' && !!P.tripEquationX);
+    || (label === 'TR3X' && !!P.tripEquationX)
+    || (/^TR[ABC]$/.test(label) && !!(P.tripEquationsPhase || {})[label]);
 }
 
 // SEL relays generally have exactly ONE internal trip-logic bit — the equation this tool calls
@@ -150,6 +151,16 @@ function canonicalTripLabel(label, P) {
     // equation that genuinely drove this trip, not the unrelated TR/TR3P equation.
     const src = (typeof ANALYSIS !== 'undefined' && ANALYSIS?.tripCause?.sourceEquationName) || null;
     if (src === 'TR3X') return 'TR3X';
+    // Per-phase templates (TR3P := 0, logic in TRA/TRB/TRC): TRIPA is driven by TRA, and so on.
+    // When the main equation itself drove this trip it keeps the bit, as before. Otherwise a
+    // per-phase bit shows its own equation, and a generic trip bit shows the per-phase equation
+    // that drove the trip.
+    const trivial = e => !e || /^(0|NA)$/i.test(String(e).split('#')[0].trim());
+    if (src === eqName && !trivial(P.tripEquation)) return eqName;
+    const phaseEqs = P.tripEquationsPhase || {};
+    const phaseForBit = { TRIPA: 'TRA', TRIPB: 'TRB', TRIPC: 'TRC' }[label];
+    if (phaseForBit) return trivial(phaseEqs[phaseForBit]) ? eqName : phaseForBit; // never another phase's equation
+    if (/^TR[ABC]$/.test(src || '') && !trivial(phaseEqs[src])) return src;
     return eqName;
   }
   // Clicking "TR3X" or "TRIP3X" directly always means the TR3X equation itself, regardless of

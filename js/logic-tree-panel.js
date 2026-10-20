@@ -525,14 +525,16 @@ function buildEvidenceBlock(P, cause) {
       : '';
     return `<li style="margin-bottom:5px;"><span style="font-family:var(--mono);color:var(--text);">${tt(it.el, P)}</span> ${timing}${meas}${completed}</li>`;
   }).join('');
-  const uvNote = ev.uninvolvedUV?.length
+  // Plain-language note. It says "fault current" only when an overcurrent element is in the
+  // trip path; for a voltage or frequency trip there is no fault current to blame the dip on.
+  const uvN = ev.uninvolvedUV?.length || 0;
+  const uvNote = uvN
     ? `<p style="font-size:12px;color:var(--text-dim);line-height:1.6;margin-top:8px;">
-        Phase voltage${ev.uninvolvedUV.length > 1 ? 's' : ''} also dipped during this event, and undervoltage
-        element${ev.uninvolvedUV.length > 1 ? 's' : ''} <span style="font-family:var(--mono);">${ev.uninvolvedUV.join(', ')}</span>
-        picked up — but ${ev.uninvolvedUV.length > 1 ? "they aren't referenced" : "it isn't referenced"} in the resolved
-        trip equation above. That's consistent with the dip being a downstream effect of the fault current rather than
-        a separate input the relay acted on here, though it's worth a look at the diagram and Equations tab to confirm
-        for this specific relay's logic.</p>`
+        Undervoltage element${uvN > 1 ? 's' : ''} <span style="font-family:var(--mono);">${ev.uninvolvedUV.join(', ')}</span>
+        picked up during this event. The resolved trip logic above does not use ${uvN > 1 ? 'them' : 'it'}.
+        ${ev.tripPathHasOvercurrent
+          ? 'This agrees with a voltage dip caused by the fault current, not a separate input to the trip.'
+          : `${uvN > 1 ? 'They' : 'It'} did not cause this trip.`}</p>`
     : '';
   return `<div style="background:var(--card);border:1px solid var(--card-border);border-radius:8px;padding:12px 16px;margin-bottom:16px;">
     <div style="font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Why this determination — evidence from this record</div>
@@ -562,6 +564,9 @@ function getAllChartableBitLabels(P, A) {
   (P.svSettings || []).forEach(sv => { set.add(`SV${sv.num}`); set.add(`SV${sv.num}T`); });
   set.add(P.tripEquationName || 'TR');
   if (P.tripEquationX) set.add('TR3X');
+  Object.entries(P.tripEquationsPhase || {}).forEach(([n, eq]) => {
+    if (eq && !/^(0|NA)$/i.test(String(eq).split('#')[0].trim())) set.add(n);
+  });
   if (P.erEquation) set.add(P.erEquationName || 'ER');
   if (P.faultEquation) set.add('FAULT');
   if (P.recloseEquation) set.add('79RI3P');

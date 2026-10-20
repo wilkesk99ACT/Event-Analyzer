@@ -10,7 +10,7 @@ function parseCEV(text, fileName) {
     analogChannels: [], analogData: [], digitalLabels: [],
     settings: {}, svSettings: [], latchSettings: [], voltageElements: {},
     freqElements: {}, overcurrentElements: {},
-    tripEquation: '', tripEquationName: '', tripEquationX: '', faultEquation: '', recloseEquation: '', dtlEquation: '', erEquation: '', erEquationName: '',
+    tripEquation: '', tripEquationName: '', tripEquationX: '', tripEquationsPhase: {}, faultEquation: '', recloseEquation: '', dtlEquation: '', erEquation: '', erEquationName: '',
     digitalTransitions: [], raw: text, fileName: fileName || '',
     format: 'unknown', // will be 'sel651r' or 'sel751' or 'generic'
   };
@@ -346,6 +346,19 @@ function parseCEV(text, fileName) {
   // TR3X / TRIP3X is the "unconditional trip" / "trip on external" path.
   const trxHit = matchEquation(['TR3X', 'TRIP3X', 'TRX']);
   R.tripEquationX = trxHit ? trxHit.value : '';
+
+  // Per-phase trip equations (SEL-651R single-pole/independent-pole recloser templates).
+  // On these devices TR3P is often set to 0 and the real trip logic is in TRA, TRB and TRC,
+  // which drive TRIPA, TRIPB and TRIPC. Without these the cause tracer had nothing to evaluate
+  // and reported "cause element not captured" for every per-phase trip (example: a TRA := SV02T
+  // OR OC3 template where TR3P := 0). Kept by name so the analyzer can pick the equation that
+  // matches the TRIPx bit that asserted. The left-boundary rule in matchEquation keeps "TRA"
+  // from matching inside longer names such as "XTRA" or "ULTRA".
+  R.tripEquationsPhase = {};
+  for (const name of ['TRA', 'TRB', 'TRC']) {
+    const hit = matchEquation([name]);
+    if (hit) R.tripEquationsPhase[name] = hit.value;
+  }
 
   // FAULT can legitimately appear outside the group-settings slice, so search full text —
   // but still require a standalone-token boundary to avoid partial matches.
