@@ -6,6 +6,7 @@ function rerenderZoomChart(kind) {
   else if (kind === 'voltage') html = buildVoltageMagChart(PARSED, ANALYSIS, true);
   else if (kind === 'relevant') html = buildRelevantQuantityChart(PARSED, ANALYSIS, true);
   else if (kind === 'svflags') html = buildSVFlagsChart(PARSED, ANALYSIS, true);
+  else if (CUSTOM_CHART_IDS.includes(kind)) html = buildCustomAnalogChart(PARSED, ANALYSIS, kind, true);
   if (!html) return;
   // The builder returns the whole wrapper (title + slot) — pull just the slot's inner content
   // back out rather than replacing the wrapper itself (which would also blow away the title's
@@ -73,55 +74,59 @@ window.addEventListener('mouseup', () => {
 // nothing stale to double-bind here; only the WINDOW-level handlers above need the
 // "registered once" guard.
 function wireChartInteractivity() {
-  ZOOM_KINDS.forEach(kind => {
-    const slot = document.getElementById('chartSlot-' + kind);
-    if (!slot) return;
-    slot.style.cursor = CHART_ZOOM[kind] ? 'grab' : 'default';
+  ZOOM_KINDS.forEach(kind => wireChartSlot(kind));
+}
+// Per-slot half of the above, also called for an extra analog chart added after load. The
+// data-wired guard keeps a slot that is still in the DOM from collecting duplicate listeners.
+function wireChartSlot(kind) {
+  const slot = document.getElementById('chartSlot-' + kind);
+  if (!slot || slot.dataset.wired) return;
+  slot.dataset.wired = '1';
+  slot.style.cursor = CHART_ZOOM[kind] ? 'grab' : 'default';
 
-    slot.addEventListener('wheel', e => {
-      const geom = CHART_GEOM[kind];
-      if (!geom) return;
-      const rect = slot.getBoundingClientRect();
-      const px = e.clientX - rect.left;
-      const svgX = px / rect.width * geom.viewW;
-      const plotW = geom.viewW - geom.marginLeft - geom.marginRight;
-      if (svgX < geom.marginLeft || svgX > geom.marginLeft + plotW) return; // outside the plot (e.g. over the legend) — let the page scroll normally
-      e.preventDefault();
-      const frac = Math.max(0, Math.min(1, (svgX - geom.marginLeft) / plotW));
-      const curLen = geom.endIdx - geom.startIdx;
-      const cursorIdx = geom.startIdx + frac * curLen;
-      const zoomFactor = e.deltaY < 0 ? 0.82 : 1.22; // scroll up = zoom in, down = zoom out
-      let newLen = curLen * zoomFactor;
-      newLen = Math.max(6, Math.min(geom.totalLen - 1, newLen));
-      let newStart = cursorIdx - frac * newLen;
-      let newEnd = newStart + newLen;
-      if (newStart < 0) { newEnd -= newStart; newStart = 0; }
-      if (newEnd > geom.totalLen - 1) { newStart -= (newEnd - (geom.totalLen - 1)); newEnd = geom.totalLen - 1; }
-      newStart = Math.max(0, Math.round(newStart));
-      newEnd = Math.min(geom.totalLen - 1, Math.round(newEnd));
-      if (newEnd - newStart < 4) return;
-      setZoomAll((newStart <= 0 && newEnd >= geom.totalLen - 1) ? null : { start: newStart, end: newEnd });
-    }, { passive: false });
+  slot.addEventListener('wheel', e => {
+    const geom = CHART_GEOM[kind];
+    if (!geom) return;
+    const rect = slot.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const svgX = px / rect.width * geom.viewW;
+    const plotW = geom.viewW - geom.marginLeft - geom.marginRight;
+    if (svgX < geom.marginLeft || svgX > geom.marginLeft + plotW) return; // outside the plot (e.g. over the legend) — let the page scroll normally
+    e.preventDefault();
+    const frac = Math.max(0, Math.min(1, (svgX - geom.marginLeft) / plotW));
+    const curLen = geom.endIdx - geom.startIdx;
+    const cursorIdx = geom.startIdx + frac * curLen;
+    const zoomFactor = e.deltaY < 0 ? 0.82 : 1.22; // scroll up = zoom in, down = zoom out
+    let newLen = curLen * zoomFactor;
+    newLen = Math.max(6, Math.min(geom.totalLen - 1, newLen));
+    let newStart = cursorIdx - frac * newLen;
+    let newEnd = newStart + newLen;
+    if (newStart < 0) { newEnd -= newStart; newStart = 0; }
+    if (newEnd > geom.totalLen - 1) { newStart -= (newEnd - (geom.totalLen - 1)); newEnd = geom.totalLen - 1; }
+    newStart = Math.max(0, Math.round(newStart));
+    newEnd = Math.min(geom.totalLen - 1, Math.round(newEnd));
+    if (newEnd - newStart < 4) return;
+    setZoomAll((newStart <= 0 && newEnd >= geom.totalLen - 1) ? null : { start: newStart, end: newEnd });
+  }, { passive: false });
 
-    // Dragging near the existing cursor line moves it; dragging elsewhere pans (if zoomed);
-    // a plain click on empty space (not zoomed, no cursor nearby) plants the cursor there and
-    // starts dragging it immediately, so click-and-drag from anywhere works in one motion.
-    slot.addEventListener('mousedown', e => {
-      const geom = CHART_GEOM[kind];
-      const idx = idxFromClientX(kind, e.clientX);
-      if (idx == null) return;
-      const nearCursor = CURSOR_IDX != null && geom && Math.abs(idx - CURSOR_IDX) * ((slot.getBoundingClientRect().width) / Math.max(1, geom.endIdx - geom.startIdx)) < 10;
-      if (nearCursor || !CHART_ZOOM[kind]) {
-        CURSOR_DRAG = { kind };
-        setCursorAll(idx);
-        return;
-      }
-      CHART_DRAG = { kind, startClientX: e.clientX, startRange: { ...CHART_ZOOM[kind] } };
-      slot.style.cursor = 'grabbing';
-    });
-
-    slot.addEventListener('dblclick', () => setZoomAll(null));
+  // Dragging near the existing cursor line moves it; dragging elsewhere pans (if zoomed);
+  // a plain click on empty space (not zoomed, no cursor nearby) plants the cursor there and
+  // starts dragging it immediately, so click-and-drag from anywhere works in one motion.
+  slot.addEventListener('mousedown', e => {
+    const geom = CHART_GEOM[kind];
+    const idx = idxFromClientX(kind, e.clientX);
+    if (idx == null) return;
+    const nearCursor = CURSOR_IDX != null && geom && Math.abs(idx - CURSOR_IDX) * ((slot.getBoundingClientRect().width) / Math.max(1, geom.endIdx - geom.startIdx)) < 10;
+    if (nearCursor || !CHART_ZOOM[kind]) {
+      CURSOR_DRAG = { kind };
+      setCursorAll(idx);
+      return;
+    }
+    CHART_DRAG = { kind, startClientX: e.clientX, startRange: { ...CHART_ZOOM[kind] } };
+    slot.style.cursor = 'grabbing';
   });
+
+  slot.addEventListener('dblclick', () => setZoomAll(null));
 }
 
 // Slice a set of full-record traces down to a zoom window (or pass them through unchanged for
@@ -131,7 +136,7 @@ function sliceChartWindow(kind, fullTraces, tripIdxFull, triggerIdxFull, msPerSa
   const totalLen = fullTraces[0]?.values.length || 0;
   const startIdx = zoomRange ? Math.max(0, Math.min(totalLen - 1, Math.round(zoomRange.start))) : 0;
   const endIdx = zoomRange ? Math.max(startIdx + 1, Math.min(totalLen - 1, Math.round(zoomRange.end))) : totalLen - 1;
-  const slicedTraces = fullTraces.map(t => ({ label: t.label, color: t.color, dash: t.dash, values: t.values.slice(startIdx, endIdx + 1) }));
+  const slicedTraces = fullTraces.map(t => ({ label: t.label, color: t.color, dash: t.dash, unit: t.unit, values: t.values.slice(startIdx, endIdx + 1) }));
   const tripIdx = (tripIdxFull != null && tripIdxFull >= startIdx && tripIdxFull <= endIdx) ? tripIdxFull - startIdx : null;
   const triggerIdx = (triggerIdxFull != null && triggerIdxFull >= startIdx && triggerIdxFull <= endIdx) ? triggerIdxFull - startIdx : null;
   const cursorIdx = (CURSOR_IDX != null && CURSOR_IDX >= startIdx && CURSOR_IDX <= endIdx) ? CURSOR_IDX - startIdx : null;
@@ -164,6 +169,7 @@ function buildCurrentMagChart(P, A, compact, heightOverride) {
     { label: 'IB.Mag', color: '#3b82f6', values: ibMag },
     { label: 'IC.Mag', color: '#22c55e', values: icMag },
   ];
+  if (compact) appendExtraAnalogTraces('current', traces, unit);
 
   if (compact) {
     const { slicedTraces, tripIdx, triggerIdx, cursorIdx, markAIdx, markBIdx, xOffsetMs } = sliceChartWindow('current', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.current);
@@ -174,7 +180,7 @@ function buildCurrentMagChart(P, A, compact, heightOverride) {
       numHGrid: 4, numVGrid: 8, fontSize: 12, msPerSample, yUnit: unit,
       forceZeroBaseline: true, triggerIdx, tripIdx, cursorIdx, markAIdx, markBIdx, compact: true, bg: 'var(--card)', xOffsetMs,
     });
-    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">Current Magnitude${zoomHintHTML('current')}</div><div class="chart-svg-slot" id="chartSlot-current">${svg}</div></div>`;
+    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">Current Magnitude${zoomHintHTML('current')}</div><div class="chart-svg-slot" id="chartSlot-current">${svg}</div>${analogPickerHTML('current')}</div>`;
   }
 
   const svg = renderMagnitudeChartSVG(traces, { msPerSample, yUnit: unit, forceZeroBaseline: true, triggerIdx: triggerIdxFull, tripIdx: tripIdxFull });
@@ -208,6 +214,7 @@ function buildVoltageMagChart(P, A, compact, heightOverride) {
     { label: `${labels[1]}.Mag`, color: '#3b82f6', values: vbMag },
     { label: `${labels[2]}.Mag`, color: '#22c55e', values: vcMag },
   ];
+  if (compact) appendExtraAnalogTraces('voltage', traces, unit);
 
   if (compact) {
     const { slicedTraces, tripIdx, triggerIdx, cursorIdx, markAIdx, markBIdx, xOffsetMs } = sliceChartWindow('voltage', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.voltage);
@@ -218,7 +225,7 @@ function buildVoltageMagChart(P, A, compact, heightOverride) {
       numHGrid: 4, numVGrid: 8, fontSize: 12, msPerSample, yUnit: unit,
       forceZeroBaseline: false, triggerIdx, tripIdx, cursorIdx, markAIdx, markBIdx, compact: true, bg: 'var(--card)', xOffsetMs,
     });
-    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">Voltage Magnitude${zoomHintHTML('voltage')}</div><div class="chart-svg-slot" id="chartSlot-voltage">${svg}</div></div>`;
+    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">Voltage Magnitude${zoomHintHTML('voltage')}</div><div class="chart-svg-slot" id="chartSlot-voltage">${svg}</div>${analogPickerHTML('voltage')}</div>`;
   }
 
   const svg = renderMagnitudeChartSVG(traces, { msPerSample, yUnit: unit, forceZeroBaseline: false, triggerIdx: triggerIdxFull, tripIdx: tripIdxFull });
@@ -456,6 +463,7 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
     title += ` vs ${TM.element} pickup`;
     note += ` Dashed line: ${TM.element} pickup (${TM.pickupSec} A sec).`;
   }
+  if (compact) appendExtraAnalogTraces('relevant', traces, yUnit);
 
   if (compact) {
     const { slicedTraces, tripIdx, triggerIdx, cursorIdx, markAIdx, markBIdx, xOffsetMs } = sliceChartWindow('relevant', traces, tripIdxFull, triggerIdxFull, msPerSample, CHART_ZOOM.relevant);
@@ -466,7 +474,7 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
       numHGrid: 4, numVGrid: 8, fontSize: 12, msPerSample, yUnit,
       forceZeroBaseline, triggerIdx, tripIdx, cursorIdx, markAIdx, markBIdx, compact: true, bg: 'var(--card)', xOffsetMs,
     });
-    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">${title}${zoomHintHTML('relevant')}</div><div class="chart-svg-slot" id="chartSlot-relevant">${svg}</div></div>`;
+    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">${title}${zoomHintHTML('relevant')}</div><div class="chart-svg-slot" id="chartSlot-relevant">${svg}</div>${analogPickerHTML('relevant')}</div>`;
   }
 
   const svg = renderMagnitudeChartSVG(traces, { msPerSample, yUnit, forceZeroBaseline, triggerIdx: triggerIdxFull, tripIdx: tripIdxFull });

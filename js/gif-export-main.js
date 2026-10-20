@@ -5,7 +5,8 @@ async function downloadMainGIF() {
   const savedCursor = CURSOR_IDX;
   const savedViewIdx = LLG_VIEW_SAMPLE_IDX;
   const savedBannerWidth = BANNER_CHART_WIDTH;
-  const savedZoom = { current: CHART_ZOOM.current, voltage: CHART_ZOOM.voltage, relevant: CHART_ZOOM.relevant, svflags: CHART_ZOOM.svflags };
+  const savedZoom = {};
+  ZOOM_KINDS.forEach(k => { savedZoom[k] = CHART_ZOOM[k]; });
   const savedLogicColW = LOGIC_COL_W, savedLogicRowH = LOGIC_ROW_H, savedLogicBoxW = LOGIC_BOX_W, savedLogicBoxH = LOGIC_BOX_H, savedLogicMargin = LOGIC_MARGIN;
   stopMainPlay();
   const btns = document.querySelectorAll('.mainGifBtn');
@@ -48,8 +49,7 @@ async function downloadMainGIF() {
     // matches what's actually being played/exported, and gives the visible portion much more of
     // the chart's own width to work with.
     const gifZoomRange = (PLAY_MARK_A != null || PLAY_MARK_B != null) ? { start, end } : null;
-    CHART_ZOOM.current = gifZoomRange; CHART_ZOOM.voltage = gifZoomRange;
-    CHART_ZOOM.relevant = gifZoomRange; CHART_ZOOM.svflags = gifZoomRange;
+    ZOOM_KINDS.forEach(k => { CHART_ZOOM[k] = gifZoomRange; });
     let frameIdxs = [start, ...trans.map(t => t.analogSampleIdx).filter(a => a >= start && a <= end), end];
     if (!CHARTED_FILTER_RELEVANT) {
       // Best-effort only — if anything here goes wrong, the export still works, it just won't
@@ -195,6 +195,10 @@ async function downloadMainGIF() {
         scaledChartCard(buildVoltageMagChart(PARSED, ANALYSIS, true, GIF_CHART_HEIGHT));
         const relevantHtml = buildRelevantQuantityChart(PARSED, ANALYSIS, true, GIF_CHART_HEIGHT);
         if (relevantHtml) scaledChartCard(relevantHtml);
+        // Extra analog charts the operator added, in on-page order; empty ones are left out.
+        CUSTOM_CHART_IDS.forEach(id => {
+          if ((EXTRA_ANALOG[id] || []).length) scaledChartCard(buildCustomAnalogChart(PARSED, ANALYSIS, id, true, GIF_CHART_HEIGHT));
+        });
         const svflagsHtml = buildSVFlagsChart(PARSED, ANALYSIS, true);
         if (svflagsHtml) scaledChartCard(svflagsHtml);
         await new Promise(r => setTimeout(r, 0));
@@ -239,8 +243,7 @@ async function downloadMainGIF() {
   } finally {
     SVFLAGS_HIDE_PICKER = false;
     BANNER_CHART_WIDTH = savedBannerWidth;
-    CHART_ZOOM.current = savedZoom.current; CHART_ZOOM.voltage = savedZoom.voltage;
-    CHART_ZOOM.relevant = savedZoom.relevant; CHART_ZOOM.svflags = savedZoom.svflags;
+    ZOOM_KINDS.forEach(k => { CHART_ZOOM[k] = savedZoom[k]; });
     LOGIC_COL_W = savedLogicColW; LOGIC_ROW_H = savedLogicRowH; LOGIC_BOX_W = savedLogicBoxW;
     LOGIC_BOX_H = savedLogicBoxH; LOGIC_MARGIN = savedLogicMargin;
     CURSOR_IDX = savedCursor;

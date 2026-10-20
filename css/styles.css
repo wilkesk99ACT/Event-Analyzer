@@ -765,6 +765,19 @@ body.dragging-file #drop-overlay { display: flex; }
 .svflags-clear:hover { color: var(--text-dim); }
 .svflags-legend-note { color: var(--text-muted); font-style: italic; }
 
+/* ── "Add quantity" picker on the analog charts + extra analog charts ── */
+.ana-add-chip { padding: 2px 4px; }
+.ana-dropdown { width: 300px; }
+.ana-list-hint { font-size: 10px; color: var(--text-muted); margin: 0 2px 4px; }
+.ana-tag {
+  font-family: var(--sans); font-size: 10px; font-weight: 600;
+  color: var(--text-dim); background: var(--bg2);
+  border: 1px solid var(--card-border); border-radius: 999px; padding: 0 6px;
+}
+.ana-tag-trip { color: var(--red); border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.1); }
+.ana-empty { font-size: 12px; color: var(--text-muted); padding: 24px 16px; margin: 0; text-align: center; }
+.ana-add-chart-bar { display: flex; justify-content: center; padding: 4px 0 10px; }
+
 /* ── Tab Bar ── */
 .tab-bar {
   display: flex;

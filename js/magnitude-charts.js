@@ -75,7 +75,7 @@ function renderMagnitudeChartSVG(traces, opts) {
     const rows = traces.map(t => {
       const v = t.values[idx];
       return (v == null || !isFinite(v)) ? null
-        : { color: t.color, label: t.label, dotY: yScale(v), text: (Math.abs(v) < 10 ? v.toFixed(3) : v.toFixed(2)) + (opts.yUnit ? ' ' + opts.yUnit : '') };
+        : { color: t.color, label: t.label, dotY: yScale(v), text: (Math.abs(v) < 10 ? v.toFixed(3) : v.toFixed(2)) + ((t.unit ?? opts.yUnit) ? ' ' + (t.unit ?? opts.yUnit) : '') };
     }).filter(Boolean);
 
     let dots = '';

@@ -5,6 +5,7 @@ function renderBanner() {
   const el = document.getElementById('tripBanner');
   const cause = ANALYSIS.tripCause;
   EXTRA_FLAG_BITS = [];
+  resetAnalogPicks();
   resetChartZoom(); // a freshly (re)loaded event has a different sample range — don't carry over a stale zoom window from whatever was previously displayed
 
   // ── DEBUG PANEL — shows parsing diagnostics ──
@@ -91,6 +92,7 @@ function renderBanner() {
     ${buildCurrentMagChart(PARSED, ANALYSIS, true)}
     ${buildVoltageMagChart(PARSED, ANALYSIS, true)}
     ${buildRelevantQuantityChart(PARSED, ANALYSIS, true)}
+    ${buildCustomAnalogChartsHTML(PARSED, ANALYSIS)}
     ${buildSVFlagsChart(PARSED, ANALYSIS, true)}
   </div>`;
 
