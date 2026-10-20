@@ -1469,6 +1469,31 @@ function analyzeCEV(P, prevEvent) {
         sourceEquationName, sourceEquationText,
         viaAggregate, aggregateMembers,
       };
+
+      // ── Per-phase trip equation note ──
+      // When the trip came through TRA/TRB/TRC, the phase letter on the trip bit (TRIPA …) and
+      // on the targets comes from where the settings put the logic, not from a faulted phase.
+      // Templates that control two separate switches use TRA/TRB as "open switch 1/2". Record
+      // whether the resolved cause is itself an element of that phase, so the note can say
+      // which case this is instead of leaving "TRIPA" to be read as an A-phase fault.
+      const phaseMatch = /^TR([ABC])$/.exec(sourceEquationName || '');
+      if (phaseMatch) {
+        const ph = phaseMatch[1];
+        const phaseElRe = new RegExp(`^(5[01]${ph}\\d*T?|67${ph}\\d*T?|(27|59)[YZ]?${ph}\\d+T?)$`);
+        const causeEls = (causeChain || []).map(c => c.label).filter(l => !/^(SV\d+T?|TRIP[ABC3P]*|TR[ABC]|TR3[PX])$/.test(l));
+        A.tripCause.perPhaseNote = {
+          phase: ph,
+          equationName: sourceEquationName,
+          equationText: cleanTripEq(sourceEquationText),
+          tripBit: tripBitUsed,
+          tr3pUnused: isTrivialTripEq(P.tripEquation),
+          causeElements: causeEls,
+          causeIsPhaseElement: causeEls.length > 0 && causeEls.every(l => phaseElRe.test(l)),
+          phaseEquations: Object.entries(phaseTripEqs)
+            .filter(([, eq]) => !isTrivialTripEq(eq))
+            .map(([n, eq]) => `${n} := ${cleanTripEq(eq)}`),
+        };
+      }
     } else {
       const causeText = 'Trip Detected (cause element not captured in digital data)';
       const causeDetail = `${tripBitUsed} asserted but the specific triggering term could not be resolved from the trip logic against the reconstructed bit-state timeline. The SV Logic and Timeline tabs contain the underlying digital transitions and equation resolution.`;

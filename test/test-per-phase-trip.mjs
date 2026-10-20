@@ -67,6 +67,11 @@ if (!file) {
     if (n.child) walk(n.child); (n.children || []).forEach(walk); })(tc.logicTree);
   names.includes('81D4T') && names.includes('SV29') ? ok('diagram reaches 81D4T through SV29') : bad('diagram', names.join(' '));
   !names.includes('SV01') ? ok('diagram does not expand the negated SV01 close logic') : bad('diagram expands SV01');
+  const pn = tc.perPhaseNote;
+  pn && pn.equationName === 'TRA' && pn.tripBit === 'TRIPA' && pn.tr3pUnused
+    ? ok('per-phase note: TRA -> TRIPA, TR3P not used') : bad('per-phase note', JSON.stringify(pn));
+  pn && pn.causeIsPhaseElement === false ? ok('per-phase note: 81D4T is not a phase-A element') : bad('causeIsPhaseElement', JSON.stringify(pn));
+  pn && pn.phaseEquations.length === 2 ? ok('per-phase note lists TRA and TRB', pn.phaseEquations.join('; ')) : bad('phaseEquations', JSON.stringify(pn));
 }
 
 console.info(`\n${fails ? fails + ' check(s) failed.' : 'All checks passed.'}`);

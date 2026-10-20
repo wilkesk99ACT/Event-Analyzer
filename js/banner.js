@@ -167,6 +167,7 @@ function renderBanner() {
         </div>
         ${cause.crossEvent ? '<div style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:4px;background:var(--yellow-dim);color:var(--yellow);font-size:11px;font-weight:600;margin-bottom:10px;border:1px solid #5c4506"><span>🔗</span> CROSS-EVENT: Condition started in a prior event record</div>' : ''}
         <p style="color:${cause.isEventReport ? '#bfdbfe' : '#fecaca'};font-size:13px;margin-bottom:16px;line-height:1.6;">${cause.causeDetail}</p>
+        ${buildPerPhaseNote(cause)}
         ${buildEvidenceBlock(PARSED, cause)}
         <div id="mainChartedLogicSlot"></div>
         <div class="trip-timing">
@@ -231,4 +232,29 @@ function magMethodNote(P) {
   return isFilteredQuarterCycle(spc)
     ? `Filtered report (${spc} samples/cycle): magnitude is the quarter-cycle phasor |x[n] + j&middot;x[n&minus;1]|, already RMS — the same quantity SynchroWAVe plots as .Mag and the relay quotes in its event summary.`
     : `Raw report (${spc} samples/cycle): magnitude is a 1-cycle sliding RMS of the recorded instantaneous samples — an approximation of SynchroWAVe's Mag trace, not a re-implementation of SEL's exact DSP filter.`;
+}
+
+// Short note when the trip came through a per-phase trip equation (TRA/TRB/TRC). Plain language:
+// the phase letter on TRIPA/TRIPB/TRIPC and on the targets follows the settings, and only
+// points to a faulted phase when the cause element is itself an element of that phase.
+function buildPerPhaseNote(cause) {
+  const n = cause && cause.perPhaseNote;
+  if (!n) return '';
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const mono = s => `<span style="font-family:var(--mono);color:var(--text);">${esc(s)}</span>`;
+  const els = n.causeElements.length ? n.causeElements.map(mono).join(', ') : 'the cause';
+  const lines = [];
+  lines.push(`This trip came through the per-phase trip equation ${mono(n.equationName + ' := ' + n.equationText)}. `
+    + `${mono(n.equationName)} asserts ${mono(n.tripBit || 'TRIP' + n.phase)} only${n.tr3pUnused ? `, and ${mono('TR3P')} is not used on this relay` : ''}.`);
+  lines.push(n.causeIsPhaseElement
+    ? `The cause, ${els}, is a phase-${n.phase} element, so the phase letter agrees with the phase that operated.`
+    : `The cause, ${els}, is not a phase-${n.phase} element. The letter ${mono(n.phase)} comes from the settings, not from a faulted phase. Do not read ${mono(n.tripBit || 'TRIP' + n.phase)} or the phase-${n.phase} target as a phase-${n.phase} fault.`);
+  if (n.phaseEquations.length > 1) {
+    lines.push(`Per-phase trip equations on this relay: ${n.phaseEquations.map(mono).join('; ')}. `
+      + `Some templates use them as separate commands, for example one for each switch. The settings comments and the output contact equations show what each one controls.`);
+  }
+  return `<div style="background:var(--card);border:1px solid var(--card-border);border-radius:8px;padding:12px 16px;margin-bottom:16px;">
+    <div style="font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Per-phase trip equation</div>
+    ${lines.map(l => `<p style="font-size:12px;color:var(--text-dim);line-height:1.6;margin:0 0 6px;">${l}</p>`).join('')}
+  </div>`;
 }
