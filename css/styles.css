@@ -166,6 +166,17 @@ body.dragging-file #drop-overlay { display: flex; }
   transition: all 0.15s;
 }
 .btn:hover { background: var(--accent); color: var(--bg); }
+.btn-bug { background: var(--orange); color: var(--bg); border-color: var(--orange); }
+.btn-bug:hover { background: var(--yellow); border-color: var(--yellow); color: var(--bg); }
+.btn-bug:disabled { opacity: 0.6; cursor: wait; }
+.bug-label { display: block; margin: 12px 0 4px; font-size: 12px; font-weight: 600; color: var(--text); }
+.bug-label:first-child { margin-top: 0; }
+.bug-input {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  background: var(--bg2); color: var(--text); border: 1px solid var(--card-border); border-radius: 6px;
+  padding: 8px 10px; font-family: var(--sans); font-size: 13px; line-height: 1.5;
+}
+.bug-input:focus { outline: none; border-color: var(--accent); }
 
 /* ── Trip Cause Banner ── */
 .trip-banner {

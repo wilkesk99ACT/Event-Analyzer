@@ -346,10 +346,10 @@ function evalOcRowAtIdx(A, row, idx) {
   let tcNote = null;
   if (tcBlocks && tcExprText) {
     tcNote = gatesElement
-      ? `Supervised OFF — torque control ${el}TC := ${tcExprText} is de-asserted at this instant, so the element cannot pick up regardless of current.`
-      : `Picked up, but torque control ${el}TC := ${tcExprText} is de-asserted at this instant, so the timed output ${el}T is blocked and this element cannot trip.`;
+      ? `Blocked: torque control ${el}TC := ${tcExprText} is off here, so the element cannot pick up.`
+      : `Picked up, but torque control ${el}TC := ${tcExprText} is off here, so ${el}T is blocked and cannot trip.`;
   } else if (tcUnknown && tcExprText) {
-    tcNote = `Torque control ${el}TC := ${tcExprText} could not be resolved from this record's digital data — pickup shown unsupervised.`;
+    tcNote = `Torque control ${el}TC := ${tcExprText} unknown from this record; pickup shown without it.`;
   }
 
   let opTime = null;

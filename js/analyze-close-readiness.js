@@ -57,8 +57,8 @@ function rsUnits(P) {
   const ev = typeof svTimerUnit === 'function' ? svTimerUnit(P) : null;
   if (ev) return { unit: ev, basis: 'measured in this record' };
   const fam = rsFamilyUnit(P);
-  if (fam) return { unit: fam, basis: 'assumed from the relay model — this record does not show it' };
-  return { unit: 'cycles', basis: 'assumed — this record does not show it' };
+  if (fam) return { unit: fam, basis: 'assumed from relay model' };
+  return { unit: 'cycles', basis: 'assumed' };
 }
 function rsToMs(v, unit, freq) { return unit === 'seconds' ? v * 1000 : v / freq * 1000; }
 
@@ -172,12 +172,12 @@ function rsSimulate(P, K, base, command, opts) {
       cmpKeys.forEach(k => { delete fit[k]; });
     }
     frozen.add(label);
-    notes.push(`${label} does not follow from its equation with the recorded bits (${eq.text}). It is held at its recorded state (${want ? 'on' : 'off'}).`);
+    notes.push(`${label} held at its recorded state (${want ? 'on' : 'off'}); its equation (${eq.text}) does not match the recorded bits.`);
   };
   K.svs.forEach(sv => fitCheck(sv.label, sv));
   if (K.tr && K.tr.ast && !base.get(K.tripBit) && rsEval(K.tr.ast, S, S, S, K.tr.cmp, fit)) {
     frozen.add(K.tripBit);
-    notes.push(`${K.trName} reads true from the recorded bits, but ${K.tripBit} is off. ${K.tripBit} is held off.`);
+    notes.push(`${K.trName} reads true but ${K.tripBit} is off; ${K.tripBit} held off.`);
   }
   K.outs.forEach(o => fitCheck(o.label, o));
 
@@ -188,7 +188,7 @@ function rsSimulate(P, K, base, command, opts) {
     const inOn = !!S.get(sv.label), outOn = !!S.get(sv.tLabel);
     tm.set(sv.label, { on: inOn ? (sv.pu > 0 ? 0 : Infinity) : 0, off: !inOn && outOn ? 0 : Infinity });
     const blinker = sv.ast && llgCollectLeaves(sv.ast).some(l => l.name === sv.tLabel);
-    if (inOn && !outOn && sv.pu > 0 && recorded.has(sv.tLabel) && !blinker) notes.push(`${sv.label} is on and ${sv.tLabel} is not yet on. The record does not show how long ${sv.label} has been on, so its ${sv.pu} pickup delay is counted from now.`);
+    if (inOn && !outOn && sv.pu > 0 && recorded.has(sv.tLabel) && !blinker) notes.push(`${sv.label} is on, ${sv.tLabel} not yet; its ${sv.pu} pickup delay is counted from now.`);
   }
 
   const trans = [];
@@ -381,12 +381,12 @@ function analyzeCloseReadiness(P, A) {
   };
   const U = rsUnits(P);
   out.units = U;
-  if (!K.cl) { out.verdict = { kind: 'no-cl', tone: 'warn', headline: 'No close equation in this file', detail: 'The file has no CL or CL3P setting, so the tool cannot tell how a close is issued.' }; return out; }
+  if (!K.cl) { out.verdict = { kind: 'no-cl', tone: 'warn', headline: 'No close equation in this file', detail: 'No CL or CL3P setting, so how a close is issued is unknown.' }; return out; }
 
   const starters = rsCloseStarters(P, K.cl.text).slice(0, RS_MAX_COMMANDS);
   if (!starters.length) {
     out.verdict = { kind: 'no-command', tone: 'warn', headline: 'No operator close command in the close equation',
-      detail: `${K.clName} := ${K.cl.text}. No CC, pushbutton, local bit or remote bit starts it, so a close command has no path into the close logic.` };
+      detail: `${K.clName} := ${K.cl.text}. No CC, pushbutton, local bit or remote bit starts it.` };
     return out;
   }
   const freq = (P.eventInfo && P.eventInfo.freq) || 60;
@@ -454,29 +454,29 @@ function analyzeCloseReadiness(P, A) {
   const t = main.trace;
   if (t) {
     for (const x of t.auxOutputs.filter(x => x.onAtStart && x.heldBy && x.heldBy.some(h => h.onAtStart))) {
-      out.general.push({ sev: 'bad', text: `${x.name}${x.comment ? ` ("${x.comment}")` : ''} is already on, held by ${x.heldBy.map(h => `${h.name} (resets on ${String(h.reset || '—').split('#')[0].trim()})`).join(', ')}. A new close will not change its state. If the device it drives starts on a change of state, it will not start. Reset ${x.heldBy.map(h => h.name).join(', ')} first.` });
+      out.general.push({ sev: 'bad', text: `${x.name}${x.comment ? ` ("${x.comment}")` : ''} is already on, held by ${x.heldBy.map(h => `${h.name} (resets on ${String(h.reset || '—').split('#')[0].trim()})`).join(', ')}. A new close won't change it, so a device that starts on a change of state won't start; reset ${x.heldBy.map(h => h.name).join(', ')} first.` });
     }
     const gate = t.timers.find(tm => tm.dropoutMs && main.cfdMs && tm.dropoutMs > main.cfdMs && /permiss|control|window|rvc/i.test(tm.comment || ''));
     if (main.outcome === 'waits-external' && main.cfdMs) {
       const handoff = main.aux && main.aux.started.length;
-      out.general.push({ sev: 'warn', text: `${handoff ? `If the breaker closes only through the relay's own close contact, the` : 'The'} external permissive must arrive within CFD (${ctFmtMs(main.cfdMs)}) of the command, or the relay declares ${K.cfBit}.${gate ? ` ${gate.label} ("${gate.comment}") holds its window for ${ctFmtMs(gate.dropoutMs)}, longer than CFD.` : ''}${handoff ? ` If the outside device closes the breaker itself, the relay sees ${K.bkrBit} come on and ${K.closeBit} drops out without ${K.cfBit}.` : ''}` });
+      out.general.push({ sev: 'warn', text: `${handoff ? `If the breaker closes only through the relay close contact, the` : 'The'} external permissive must arrive within CFD (${ctFmtMs(main.cfdMs)}) or the relay declares ${K.cfBit}.${gate ? ` ${gate.label} ("${gate.comment}") holds its window ${ctFmtMs(gate.dropoutMs)}, longer than CFD.` : ''}${handoff ? ` If the outside device closes the breaker, ${K.bkrBit} comes on and ${K.closeBit} drops out without ${K.cfBit}.` : ''}` });
     }
     if (t.er) {
       out.general.push(main.res.er != null
         ? { sev: 'good', text: `This command would make an event report (ER via ${main.res.erTerm || '—'}).` }
-        : { sev: 'warn', text: `This command would not make an event report on its own. The close outcome ${t.er.closedInER ? 'is recorded if the breaker closes' : t.er.cfInER ? 'is recorded only if it fails (CF)' : 'is not recorded at all'}.` });
+        : { sev: 'warn', text: `No event report from this command alone; the outcome ${t.er.closedInER ? 'is recorded if the breaker closes' : t.er.cfInER ? 'is recorded only if it fails (CF)' : 'is not recorded at all'}.` });
     }
-    if (t.clock && !t.clock.synced) out.general.push({ sev: 'warn', text: `The relay clock is not synchronized (${t.clock.offBits.join(', ')} off). Match the resulting event by event number, not by time.` });
+    if (t.clock && !t.clock.synced) out.general.push({ sev: 'warn', text: `Relay clock not synchronized (${t.clock.offBits.join(', ')} off). Match the resulting event by event number, not time.` });
   }
   const lo = ['79LO3P', '79LO'].find(n => base.get(n));
-  if (lo) out.general.push({ sev: 'info', text: `${lo} is on (reclosing locked out). A manual or remote close is still allowed through ${K.clName}; the lockout resets after the breaker stays closed for 79RSLD.` });
+  if (lo) out.general.push({ sev: 'info', text: `${lo} is on (reclosing locked out). Manual or remote close is still allowed through ${K.clName}; lockout resets after the breaker stays closed for 79RSLD.` });
   for (const hw of ['TCCAP', 'BTFAIL', 'DTFAIL', 'CHRGG', 'PWR_SRC1']) {
     if (!base.has(hw)) continue;
     const on = base.get(hw);
     if ((hw === 'TCCAP' || hw === 'PWR_SRC1') && !on) out.general.push({ sev: 'bad', text: `${hw} is off — ${hw === 'TCCAP' ? 'trip/close capacitor not charged' : 'control power source not present'}.` });
     if ((hw === 'BTFAIL' || hw === 'DTFAIL') && on) out.general.push({ sev: 'bad', text: `${hw} is on — ${hw === 'BTFAIL' ? 'battery test failed' : 'battery discharge test failed'}.` });
   }
-  out.general.push({ sev: 'info', text: 'Outside what the relay can see: the close circuit wiring, the close coil or actuator, the mechanism, and the 52A auxiliary contact. The relay can only energize its close output.' });
+  out.general.push({ sev: 'info', text: 'Not visible to the relay: close circuit wiring, close coil or actuator, mechanism, and 52A auxiliary contact.' });
   out.notes = Array.from(new Set(out.commands.flatMap(c => c.notes)));
   out.verdict = main.verdict;
   return out;
@@ -497,16 +497,16 @@ function rsHandoffText(cmd, K, ext, where) {
     const h = aux.held;
     return {
       kind: 'handoff-held', tone: 'bad',
-      headline: `would likely fail — ${h.map(x => x.name).join(', ')} is already on, so the outside device gets no new start, and ${where === 'cl' ? K.clName : 'the relay close contact'} waits on ${ext}`,
-      detail: `${h.map(x => `${nm(x)} is already on${x.heldBy && x.heldBy.length ? `, held by ${x.heldBy.map(l => `${l.name} (resets on ${l.reset || '—'})`).join(', ')}` : ''}`).join('; ')}. A new close does not change its state, so a device that starts on a change of state does not start. ${own[0].toUpperCase() + own.slice(1)} waits on ${ext}.`,
+      headline: `would likely fail — ${h.map(x => x.name).join(', ')} already on (no new start to the outside device); ${where === 'cl' ? K.clName : 'relay close contact'} waits on ${ext}`,
+      detail: `${h.map(x => `${nm(x)} is already on${x.heldBy && x.heldBy.length ? `, held by ${x.heldBy.map(l => `${l.name} (resets on ${l.reset || '—'})`).join(', ')}` : ''}`).join('; ')}, so a new close gives the outside device no new start. ${own[0].toUpperCase() + own.slice(1)} waits on ${ext}.`,
     };
   }
   if (!aux.started.length) return null;
   const s = aux.started;
   return {
     kind: 'handoff', tone: 'info',
-    headline: `would start the outside device through ${s.map(x => x.name).join(', ')}; ${where === 'cl' ? K.clName : 'the relay close contact'} waits on ${ext}`,
-    detail: `${s.map(x => `${nm(x)} would operate at +${ctFmtMs(x.atMs)}`).join('; ')}. That is a new start signal to the device it drives. If that device closes the breaker by its own path, the close does not need ${ext}. If the breaker closes only through ${own}, ${ext} must come on${cmd.cfdMs && where === 'out' ? ` within CFD (${ctFmtMs(cmd.cfdMs)})` : ''}. The settings alone cannot tell which.`,
+    headline: `would start the outside device through ${s.map(x => x.name).join(', ')}; ${where === 'cl' ? K.clName : 'relay close contact'} waits on ${ext}`,
+    detail: `${s.map(x => `${nm(x)} would operate at +${ctFmtMs(x.atMs)}`).join('; ')}, a new start to the device it drives. If that device closes the breaker on its own, the close does not need ${ext}; if only through ${own}, ${ext} must come on${cmd.cfdMs && where === 'out' ? ` within CFD (${ctFmtMs(cmd.cfdMs)})` : ''}. The settings cannot tell which.`,
   };
 }
 
@@ -517,42 +517,42 @@ function rsCommandVerdict(cmd, K, P, trace) {
   switch (cmd.outcome) {
     case 'rejected':
       return V('rejected', 'bad', `${L} would be rejected — ${K.clName} would not assert`,
-        `${K.clName} := ${K.cl.text}.${cmd.ownRoute && cmd.ownRoute.length ? ` This command reaches ${K.clName} through ${cmd.ownRoute.map(n => rcGloss(P, n)).join(' → ')}.` : ''}${cmd.clBlockers && cmd.clBlockers.length ? ` With the present conditions: ${cmd.clBlockers.map(phrase).join('; ')}.` : ''} No close would be issued by this command.${cmd.clExternalAlt ? ` ${K.clName} can also come on through ${cmd.clExternalAlt.route.join(' → ') || 'another branch'} when ${cmd.clExternalAlt.names.join(', ')} comes on from outside the relay.` : ''}`);
+        `${K.clName} := ${K.cl.text}.${cmd.ownRoute && cmd.ownRoute.length ? ` This command reaches ${K.clName} via ${cmd.ownRoute.map(n => rcGloss(P, n)).join(' → ')}.` : ''}${cmd.clBlockers && cmd.clBlockers.length ? ` Blocking it now: ${cmd.clBlockers.map(phrase).join('; ')}.` : ''}${cmd.clExternalAlt ? ` ${K.clName} can also come on via ${cmd.clExternalAlt.route.join(' → ') || 'another branch'} when ${cmd.clExternalAlt.names.join(', ')} comes on from outside the relay.` : ''}`);
     case 'cl-waits-external': {
       const ext = cmd.clBlockers.map(b => b.name).join(', ');
       const ho = rsHandoffText(cmd, K, ext, 'cl');
-      if (ho) return V(ho.kind, ho.tone, `${L} ${ho.headline}`, `${cmd.ownRoute.length ? `This command reaches ${K.clName} through ${cmd.ownRoute.map(n => rcGloss(P, n)).join(' → ')}.` : ''} ${ho.detail} ${K.clName} waits on ${ext}: ${cmd.clBlockers.map(phrase).join('; ')}.`.trim());
+      if (ho) return V(ho.kind, ho.tone, `${L} ${ho.headline}`, `${cmd.ownRoute.length ? `Reaches ${K.clName} via ${cmd.ownRoute.map(n => rcGloss(P, n)).join(' → ')}.` : ''} ${ho.detail} ${K.clName} waits on ${ext}: ${cmd.clBlockers.map(phrase).join('; ')}.`.trim());
       return V('cl-waits-external', 'warn', `${L} would not close unless ${ext} comes on`,
-        `${cmd.ownRoute.length ? `This command reaches ${K.clName} through ${cmd.ownRoute.map(n => rcGloss(P, n)).join(' → ')}.` : `This command feeds ${K.clName} directly (${K.clName} := ${K.cl.text}).`} ${K.clName} would wait on ${ext}: ${cmd.clBlockers.map(phrase).join('; ')}. That signal comes from outside this relay, so the record cannot say whether it would arrive. Until it does, no close is issued.`);
+        `${cmd.ownRoute.length ? `Reaches ${K.clName} via ${cmd.ownRoute.map(n => rcGloss(P, n)).join(' → ')}.` : `Feeds ${K.clName} directly (${K.clName} := ${K.cl.text}).`} ${K.clName} would wait on ${ext}: ${cmd.clBlockers.map(phrase).join('; ')}. That signal comes from outside this relay; no close is issued until it arrives.`);
     }
     case 'close-blocked':
       return V('close-blocked', 'bad', `${L} would be rejected — ${K.closeBit} would not latch`,
         `${K.clName} would assert, but ${cmd.closeBlock ? `${cmd.closeBlock} is on, which blocks ${K.closeBit}` : `${K.closeBit} would not latch`}. No close would be issued.`);
     case 'energizes':
       return V('energizes', 'good', `${L} would energize the close output`,
-        `${K.closeBit} would latch at +${ctFmtMs(cmd.times.close)} and the close contact would operate at +${ctFmtMs(cmd.times.out)}. With the breaker assumed closed 3 cycles later, ${K.trName} did not assert in the next ${ctFmtMs(RS_POST_CLOSE_MS)} with the present conditions. The close should succeed if the breaker and its close circuit work.`);
+        `${K.closeBit} would latch at +${ctFmtMs(cmd.times.close)} and the close contact operate at +${ctFmtMs(cmd.times.out)}; no ${K.trName} in the next ${ctFmtMs(RS_POST_CLOSE_MS)} under present conditions. Should succeed if the breaker and close circuit work.`);
     case 'closes-then-trips': {
       const drv = cmd.res.tripDrivers || [];
       const volt = drv.filter(d => /^(27|59|81|3P27|3P59)/.test(d));
-      const drvTxt = drv.length ? ` The trip is driven by ${drv.join(', ')}, which ${drv.length > 1 ? 'are' : 'is'} on now.` : '';
+      const drvTxt = drv.length ? ` Driven by ${drv.join(', ')}, on now.` : '';
       const caveat = volt.length
-        ? ` Caution: ${volt.join(', ')} ${volt.length > 1 ? 'are' : 'is'} a voltage or frequency element, held at its present state. If the VTs are on the side this close would energize, the voltage comes back when the breaker closes and this trip would not happen. If the VTs see the source side, the source is not healthy and the trip would happen.`
+        ? ` Caution: ${volt.join(', ')} ${volt.length > 1 ? 'are voltage/frequency elements' : 'is a voltage/frequency element'} held at present state — if the VTs are on the side this close energizes, voltage returns and this trip would not happen; if they see the source side, it would.`
         : '';
       return V('closes-then-trips', volt.length ? 'warn' : 'bad', `${L} would close, then trip — ${cmd.res.tripBranch || K.trName}`,
-        `The close output would operate at +${ctFmtMs(cmd.times.out)}. With the breaker closed, ${K.trName} would assert ${ctFmtMs(cmd.times.trip)} later via ${cmd.res.tripBranch || '—'}, under the present conditions.${drvTxt}${caveat}`);
+        `Close output at +${ctFmtMs(cmd.times.out)}, then ${K.trName} ${ctFmtMs(cmd.times.trip)} after closing via ${cmd.res.tripBranch || '—'}.${drvTxt}${caveat}`);
     }
     case 'waits-external': {
       const ext = (cmd.outBlockers || []).map(b => b.name).join(', ');
       const ho = rsHandoffText(cmd, K, ext, 'out');
       if (ho) return V(ho.kind, ho.tone, `${L} ${ho.headline}`, `${K.closeBit} would latch. ${ho.detail} ${(cmd.outBlockers || []).map(phrase).join('; ')}.`);
       const started = trace ? trace.auxOutputs.filter(x => x.everOn && !x.onAtStart) : [];
-      const startTxt = started.length ? ` ${started.map(x => `${x.name}${x.comment ? ` ("${x.comment}")` : ''} would operate at +${ctFmtMs(x.firstOnMs)}`).join('; ')}, so the device it drives gets its start signal.` : '';
+      const startTxt = started.length ? ` ${started.map(x => `${x.name}${x.comment ? ` ("${x.comment}")` : ''} would operate at +${ctFmtMs(x.firstOnMs)}`).join('; ')}, so its device gets a start signal.` : '';
       return V('waits-external', 'warn', `${L} would not close unless ${ext} comes on`,
-        `${K.closeBit} would latch, but the close contact would wait on ${ext}.${startTxt} ${(cmd.outBlockers || []).map(phrase).join('; ')}. That signal comes from outside this relay, so the record cannot say whether it would arrive. If it does not arrive within CFD (${ctFmtMs(cmd.cfdMs)}), the relay declares ${K.cfBit}.`);
+        `${K.closeBit} would latch, but the close contact would wait on ${ext}.${startTxt} ${(cmd.outBlockers || []).map(phrase).join('; ')}. That signal is outside this relay; if it does not arrive within CFD (${ctFmtMs(cmd.cfdMs)}), the relay declares ${K.cfBit}.`);
     }
     default:
       return V('output-blocked', 'bad', `${L} would fail — the close output would not operate`,
-        `${K.closeBit} would latch, but the close contact would be held off: ${(cmd.outBlockers || []).map(phrase).join('; ') || 'see the trace'}. The relay would declare ${K.cfBit} after ${ctFmtMs(cmd.cfdMs)}.`);
+        `${K.closeBit} would latch, but the close contact would be held off: ${(cmd.outBlockers || []).map(phrase).join('; ') || 'see the trace'}; ${K.cfBit} would follow after ${ctFmtMs(cmd.cfdMs)}.`);
   }
 }
 
@@ -575,25 +575,25 @@ function buildCloseReadinessCard(P, A) {
     if (tl.length) body += `<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Simulated sequence: ${tl.join(' → ')}</div>`;
     if (c.whatIf) {
       const w = c.whatIf;
-      const txt = !w.energizes ? `the close output would still not operate. Something else also holds it off.`
-        : w.trips ? `the close output would operate at +${ctFmtMs(w.outMs)}, but the recloser would trip again ${ctFmtMs(w.tripMs)} after closing via ${ctEsc(w.tripBranch || '—')}.`
-        : `the close output would operate at +${ctFmtMs(w.outMs)}, and no trip would follow in the next ${ctFmtMs(RS_POST_CLOSE_MS)} under the present conditions.`;
+      const txt = !w.energizes ? `the close output would still not operate; something else also holds it off.`
+        : w.trips ? `close output at +${ctFmtMs(w.outMs)}, but it would trip again ${ctFmtMs(w.tripMs)} after closing via ${ctEsc(w.tripBranch || '—')}.`
+        : `close output at +${ctFmtMs(w.outMs)}; no trip in the next ${ctFmtMs(RS_POST_CLOSE_MS)}.`;
       body += `<div style="font-size:12px;margin:4px 0 6px;padding:6px 10px;border-left:3px solid ${w.energizes && !w.trips ? 'var(--green)' : 'var(--red)'};"><b>If ${ctEsc(w.names.join(' and '))} ${w.names.length > 1 ? 'come' : 'comes'} on:</b> ${txt}</div>`;
     }
     if ((c.outcome === 'rejected' || c.outcome === 'cl-waits-external') && c.clAlternatives) {
       body += `<div style="font-size:11.5px;font-weight:700;margin:6px 0 2px;">Why ${ctEsc(R.clName)} would not assert</div>` + c.clAlternatives.map(a => ctRenderWhy(a.tree, P, 1)).join('');
     }
     if (i === 0 && c.trace && c.res.closeRose != null) {
-      body += `<details style="margin-top:6px;"><summary style="cursor:pointer;font-size:11.5px;color:var(--accent);">Show the simulated close path (outputs, blockers, timers)</summary><div style="margin-top:8px;">${buildCloseTraceSections(P, { closeTrace: c.trace })}</div></details>`;
+      body += `<details style="margin-top:6px;"><summary style="cursor:pointer;font-size:11.5px;color:var(--accent);">Show simulated close path</summary><div style="margin-top:8px;">${buildCloseTraceSections(P, { closeTrace: c.trace })}</div></details>`;
     }
     return `<div style="border:1px solid var(--border, #243042);border-radius:8px;padding:10px 12px;margin-top:10px;">
       <div style="font-size:12.5px;font-weight:700;color:${tone};">${ctEsc(c.verdict.headline)}</div>${body}</div>`;
   }).join('');
   const gen = R.general.map(g => `<div style="font-size:12px;margin:3px 0;"><span style="color:${sev[g.sev][0]}">${sev[g.sev][1]}</span> ${ctEsc(g.text)}</div>`).join('');
-  const notes = R.notes.length ? `<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:11px;color:var(--text-muted);">Assumptions made from this record (${R.notes.length})</summary>${R.notes.map(n => `<div style="font-size:11px;color:var(--text-muted);margin:2px 0;">• ${ctEsc(n)}</div>`).join('')}</details>` : '';
+  const notes = R.notes.length ? `<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:11px;color:var(--text-muted);">Assumptions (${R.notes.length})</summary>${R.notes.map(n => `<div style="font-size:11px;color:var(--text-muted);margin:2px 0;">• ${ctEsc(n)}</div>`).join('')}</details>` : '';
   return `<div class="card yellow-accent"><div class="card-header">🔮 Close Readiness — if a close were sent now</div>
     <div style="font-size:13px;font-weight:700;color:${ctTone(R.verdict.tone)};margin-bottom:4px;">${ctEsc(R.verdict.headline)}</div>
-    <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">The relay logic is run forward from the last sample of this record, with inputs and measured elements held where they are. Timer units: ${ctEsc(R.units.unit)} (${ctEsc(R.units.basis)}).</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Inputs and measured elements held at their last recorded state. Timer units: ${ctEsc(R.units.unit)} (${ctEsc(R.units.basis)}).</div>
     ${cmds}
     <div style="margin-top:14px;font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-muted);">What else could stop the close</div>
     ${gen}

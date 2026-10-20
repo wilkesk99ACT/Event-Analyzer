@@ -109,8 +109,8 @@ function renderBanner() {
             </div>
           </div>
           <p style="color:var(--text-dim);font-size:13px;">${isTrigRecord
-            ? 'This record was taken on demand (TRIG command). It shows the relay state at that moment, not a protection operation.'
-            : 'The digital word did not show a trip transition in this event record. The protection elements and SV logic tabs contain the underlying element states for this record.'}</p>
+            ? 'Taken on demand (TRIG command). Shows relay state at that moment, not a protection operation.'
+            : 'No trip transition in this record. See the Protection and SV Logic tabs for element states.'}</p>
           ${buildRecloseBannerBlock(PARSED, ANALYSIS)}
         ${typeof buildCloseReadinessBannerBlock === 'function' ? buildCloseReadinessBannerBlock(PARSED, ANALYSIS) : ''}
         </div>
@@ -230,8 +230,8 @@ function isFilteredQuarterCycle(samplesPerCycle) { return samplesPerCycle === 4;
 function magMethodNote(P) {
   const spc = P?.eventInfo?.samPerCycA || 32;
   return isFilteredQuarterCycle(spc)
-    ? `Filtered report (${spc} samples/cycle): magnitude is the quarter-cycle phasor |x[n] + j&middot;x[n&minus;1]|, already RMS — the same quantity SynchroWAVe plots as .Mag and the relay quotes in its event summary.`
-    : `Raw report (${spc} samples/cycle): magnitude is a 1-cycle sliding RMS of the recorded instantaneous samples — an approximation of SynchroWAVe's Mag trace, not a re-implementation of SEL's exact DSP filter.`;
+    ? `Filtered report (${spc} samples/cycle). Magnitudes match the relay's event summary.`
+    : `Raw report (${spc} samples/cycle). Magnitudes are approximate RMS.`;
 }
 
 // Short note when the trip came through a per-phase trip equation (TRA/TRB/TRC). Plain language:
@@ -244,14 +244,12 @@ function buildPerPhaseNote(cause) {
   const mono = s => `<span style="font-family:var(--mono);color:var(--text);">${esc(s)}</span>`;
   const els = n.causeElements.length ? n.causeElements.map(mono).join(', ') : 'the cause';
   const lines = [];
-  lines.push(`This trip came through the per-phase trip equation ${mono(n.equationName + ' := ' + n.equationText)}. `
-    + `${mono(n.equationName)} asserts ${mono(n.tripBit || 'TRIP' + n.phase)} only${n.tr3pUnused ? `, and ${mono('TR3P')} is not used on this relay` : ''}.`);
   lines.push(n.causeIsPhaseElement
-    ? `The cause, ${els}, is a phase-${n.phase} element, so the phase letter agrees with the phase that operated.`
-    : `The cause, ${els}, is not a phase-${n.phase} element. The letter ${mono(n.phase)} comes from the settings, not from a faulted phase. Do not read ${mono(n.tripBit || 'TRIP' + n.phase)} or the phase-${n.phase} target as a phase-${n.phase} fault.`);
+    ? `${mono(n.tripBit || 'TRIP' + n.phase)} agrees with the cause: ${els} is a phase-${n.phase} element.`
+    : `${mono(n.tripBit || 'TRIP' + n.phase)} here does not mean a phase-${n.phase} fault. The cause, ${els}, is not a phase-${n.phase} element; the letter comes from the settings.`);
+  lines.push(`Tripped via ${mono(n.equationName + ' := ' + n.equationText)}, which asserts ${mono(n.tripBit || 'TRIP' + n.phase)} only${n.tr3pUnused ? ` (${mono('TR3P')} unused)` : ''}.`);
   if (n.phaseEquations.length > 1) {
-    lines.push(`Per-phase trip equations on this relay: ${n.phaseEquations.map(mono).join('; ')}. `
-      + `Some templates use them as separate commands, for example one for each switch. The settings comments and the output contact equations show what each one controls.`);
+    lines.push(`Per-phase equations: ${n.phaseEquations.map(mono).join('; ')}. Check output contact equations for what each controls.`);
   }
   return `<div style="background:var(--card);border:1px solid var(--card-border);border-radius:8px;padding:12px 16px;margin-bottom:16px;">
     <div style="font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Per-phase trip equation</div>

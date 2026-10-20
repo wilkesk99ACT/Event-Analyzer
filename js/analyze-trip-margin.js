@@ -154,53 +154,53 @@ function tripMarginFlag(M) {
   if (M.belowPickup) {
     return {
       severity: 'medium',
-      title: `${M.element} operated, but the measured ${q} is below its pickup (${f2(M.multipleAtTrip)}× pickup)`,
-      detail: `The relay timed out ${M.timedBit}. The tool calculates ${q} = ${M.atTripSec.toFixed(3)} A sec at the trip, and the pickup is ${M.pickupSec} A sec. The relay and this calculation do not agree. Possible errors: the CT ratio (CTR := ${M.CTR}) or the quantity basis that this tool uses, a pickup setting group that is different from the group in this file, or filtering of the event data.`,
+      title: `${M.element} operated, but measured ${q} is below pickup (${f2(M.multipleAtTrip)}× pickup)`,
+      detail: `The relay timed out ${M.timedBit}, but ${q} reads ${M.atTripSec.toFixed(3)} A sec at the trip against a ${M.pickupSec} A sec pickup. Check the CT ratio (CTR := ${M.CTR}), the active setting group, or event-data filtering.`,
     };
   }
   if (!M.noFaultSignature) return null;
 
   const timing = M.pickupAtStart
-    ? `${M.pickupBit} was already picked up when the record started, ${M.recordPreTripMs.toFixed(0)} ms before the trip. The element timed for longer than the record shows.`
+    ? `${M.pickupBit} was already picked up when the record started (${M.recordPreTripMs.toFixed(0)} ms before the trip), so it timed longer than the record shows.`
     : `${M.pickupBit || M.element} picked up inside the record.`;
   const chatter = M.pickupFalls > 0
-    ? ` ${M.pickupBit} dropped out ${M.pickupFalls} time(s) and picked up again before the trip. The quantity was at the threshold.`
+    ? ` ${M.pickupBit} dropped out and picked up again ${M.pickupFalls} time(s) before the trip: ${q} sat at the threshold.`
     : '';
   const curve = (M.expectedOperateSec != null && isFinite(M.expectedOperateSec))
-    ? ` At ${f2(M.multipleAtTrip)}× pickup, curve ${M.curve} with TD ${M.td} gives an operate time of approximately ${M.expectedOperateSec.toFixed(1)} s.`
+    ? ` Curve ${M.curve}, TD ${M.td} at ${f2(M.multipleAtTrip)}× pickup gives ~${M.expectedOperateSec.toFixed(1)} s to operate.`
     : '';
 
   const ev = [];
-  ev.push(`Before the trip, the highest phase current was ${f2(M.fault.phaseRise)}× its value at the start of the record${M.fault.lowestPhasePickupSec != null ? `, and ${(M.fault.phaseFracOfPickup * 100).toFixed(0)} % of the lowest phase pickup` : ''}.`);
-  if (M.fault.voltageDip != null) ev.push(`The lowest phase voltage dropped by ${pct(Math.max(0, M.fault.voltageDip))} before the trip.`);
+  ev.push(`Highest phase current rose ${f2(M.fault.phaseRise)}× before the trip${M.fault.lowestPhasePickupSec != null ? ` (${(M.fault.phaseFracOfPickup * 100).toFixed(0)} % of the lowest phase pickup)` : ''}.`);
+  if (M.fault.voltageDip != null) ev.push(`Lowest phase voltage dipped ${pct(Math.max(0, M.fault.voltageDip))}.`);
 
   const errors = [];
-  errors.push(`<b>Setting.</b> The ${M.element} pickup (${M.pickupSec} A sec, ${M.pickupPri.toFixed(1)} A pri) is at or below the normal value of ${q} on this circuit. Before the trip, ${q} was ${f2(M.multipleMin)}× to ${f2(M.multipleMax)}× pickup.`);
+  errors.push(`<b>Setting.</b> ${M.element} pickup (${M.pickupSec} A sec, ${M.pickupPri.toFixed(1)} A pri) is at or below normal ${q}; before the trip ${q} ran ${f2(M.multipleMin)}× to ${f2(M.multipleMax)}× pickup.`);
   if (M.seq && M.seq.i2i1 != null) {
     const wiring = M.seq.i2i1 < 0.5
-      ? `I2/I1 = ${pct(M.seq.i2i1)} and the residual current is ${pct(M.fault.residualFrac)} of phase current. These values do not show a phase swap or a reversed CT.`
-      : `I2/I1 = ${pct(M.seq.i2i1)}. A phase swap or a reversed CT gives a value near or above 100 %.`;
-    errors.push(`<b>Current measurement.</b> A CT wiring, polarity or ratio error changes ${q}. ${wiring}`);
+      ? `I2/I1 = ${pct(M.seq.i2i1)} and residual is ${pct(M.fault.residualFrac)} of phase current: no sign of a phase swap or reversed CT.`
+      : `I2/I1 = ${pct(M.seq.i2i1)}; a phase swap or reversed CT reads near or above 100 %.`;
+    errors.push(`<b>Current measurement.</b> CT wiring, polarity or ratio error. ${wiring}`);
   } else {
-    errors.push(`<b>Current measurement.</b> A CT wiring, polarity or ratio error changes ${q}. The residual current is ${pct(M.fault.residualFrac)} of phase current.`);
+    errors.push(`<b>Current measurement.</b> CT wiring, polarity or ratio error. Residual is ${pct(M.fault.residualFrac)} of phase current.`);
   }
   if (M.seq && M.seq.v2v1Pre != null) {
-    let src = `<b>System unbalance.</b> Voltage unbalance (V2/V1) was ${pct(M.seq.v2v1Pre)} before the trip`;
+    let src = `<b>System unbalance.</b> V2/V1 was ${pct(M.seq.v2v1Pre)} before the trip`;
     if (M.seq.v2v1Post != null) {
-      src += ` and ${pct(M.seq.v2v1Post)} after the breaker opened. The unbalance stays when there is no current through this breaker. Thus the source of the unbalance is not the current through this breaker.`;
+      src += ` and ${pct(M.seq.v2v1Post)} after the breaker opened, so current through this breaker is not the source.`;
     } else {
-      src += '. The record does not show the voltage after the breaker opened.';
+      src += '; the record does not show voltage after the breaker opened.';
     }
-    src += ' A voltage error at one PT input can also show as voltage unbalance.';
+    src += ' A bad PT input can also look like unbalance.';
     errors.push(src);
   }
 
   return {
     severity: 'high',
     title: `No fault in the record — ${M.element} tripped at ${f2(M.multipleAtTrip)}× pickup on ${q}${M.viaAggregate ? ` (through ${M.viaAggregate})` : ''}`,
-    detail: `${q} was ${M.atTripSec.toFixed(3)} A sec (${M.atTripPri.toFixed(1)} A pri) at the trip. The pickup is ${M.pickupSec} A sec. ${timing}${chatter}${curve}`
-      + `<br><br>${ev.join(' ')} The record does not show a fault signature. The relay operated as its settings tell it to, but the trip is not explained by a fault.`
-      + `<br><br>Possible errors (not ranked — the record alone cannot decide between them):<ul style="margin:6px 0 0 18px;padding:0;">${errors.map(e => `<li style="margin-bottom:4px;">${e}</li>`).join('')}</ul>`
-      + `The <b>${q}</b> chart in the banner shows this quantity against its pickup.`,
+    detail: `${q} was ${M.atTripSec.toFixed(3)} A sec (${M.atTripPri.toFixed(1)} A pri) at the trip; pickup is ${M.pickupSec} A sec. ${timing}${chatter}${curve}`
+      + `<br><br>${ev.join(' ')} No fault signature: the relay followed its settings, but no fault explains the trip.`
+      + `<br><br>Possible causes (unranked):<ul style="margin:6px 0 0 18px;padding:0;">${errors.map(e => `<li style="margin-bottom:4px;">${e}</li>`).join('')}</ul>`
+      + `See the <b>${q}</b> chart in the banner.`,
   };
 }

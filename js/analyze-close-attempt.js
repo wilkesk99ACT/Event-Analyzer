@@ -385,7 +385,7 @@ function analyzeCloseAttempt(P, A, prevEvent) {
   const clEq = clEqName ? ctSetting(P, clEqName) : null;
   out.clEqName = clEqName; out.clEq = clEq;
   if (closeAtStart) {
-    out.source = { type: 'carried', text: `${closeBit} was already on when this record started. The close began in an earlier record.` };
+    out.source = { type: 'carried', text: `${closeBit} was already on at record start (close began in an earlier record).` };
     if (prevEvent && prevEvent.analysis && prevEvent.analysis.closeTrace) {
       const pt = prevEvent.analysis.closeTrace;
       if (!pt.carried && pt.startClock != null) out.source.prev = { ref: prevEvent.parsed.eventInfo && prevEvent.parsed.eventInfo.refNum, clock: pt.startClock, source: pt.source };
@@ -399,14 +399,14 @@ function analyzeCloseAttempt(P, A, prevEvent) {
       branch = r && r.branches ? r.branches.find(b => b.value) : null;
     }
     const pb = bundle.find(l => /^PB\d+_PUL$/.test(l));
-    if (/^CC/.test((branch && branch.text) || '') || onAt('CC') || onAt('CC3')) out.source = { type: 'remote', term: onAt('CC3') ? 'CC3' : 'CC', text: 'a close command from a communications port (CC) — SCADA or a CLO command' };
+    if (/^CC/.test((branch && branch.text) || '') || onAt('CC') || onAt('CC3')) out.source = { type: 'remote', term: onAt('CC3') ? 'CC3' : 'CC', text: 'a remote close command (CC, SCADA or CLO)' };
     else if (pb) out.source = { type: 'pushbutton', term: pb, text: `a front-panel pushbutton (${pb})` };
     else if (bundle.some(l => /^79CY/.test(l)) || (ctPick(P, ['79CY3P', '79CY']) && bitStateAtAnalogIdx(P, ctPick(P, ['79CY3P', '79CY']), closeRise.analogSampleIdx).state)) out.source = { type: 'reclose', text: 'the 79 reclosing element' };
     else if (branch) out.source = { type: 'logic', term: branch.text, text: `the close equation branch ${branch.text}` };
-    else out.source = { type: 'unknown', text: 'not determinable from this record' };
+    else out.source = { type: 'unknown', text: 'an unknown source' };
     if (clEqName) out.source.clBranch = branch ? branch.text : null;
   } else {
-    out.source = { type: 'unknown', text: `${closeBit} does not show in this record, only ${cfBit}.` };
+    out.source = { type: 'unknown', text: `an unknown source (only ${cfBit} is in this record)` };
   }
 
   // ── 2. The close outputs ──
@@ -584,12 +584,12 @@ function analyzeCloseAttempt(P, A, prevEvent) {
 
 function ctBlockerPhrase(b, P) {
   const g = typeof rcGloss === 'function' ? rcGloss(P, b.name) : b.name;
-  if (b.kind === 'pulse-only') return `${g} was on for only one processing interval, and ${'the output'} did not respond to it`;
-  if (b.kind === 'timer-not-expired') return `${g} did not time out (its input came on, but not for long enough)`;
+  if (b.kind === 'pulse-only') return `${g} pulsed for one processing interval only; the output did not respond`;
+  if (b.kind === 'timer-not-expired') return `${g} did not time out (input came on, but not long enough)`;
   if (b.kind === 'latch-not-set') return `${g} is not set${b.latch && b.latch.comment ? ` ("${b.latch.comment}")` : ''}`;
   if (b.kind === 'not-together') return `the terms of ${b.text} were never on at the same time`;
-  if (b.cls && b.cls.cls === 'analog') return `${b.name} (an analog comparison the tool does not evaluate)`;
-  if (b.negated) return `${g} is on, and the path needs it off${b.latch && b.latch.comment ? ` — "${b.latch.comment}"` : ''}`;
+  if (b.cls && b.cls.cls === 'analog') return `${b.name} (analog comparison, not evaluated)`;
+  if (b.negated) return `${g} is on; the path needs it off${b.latch && b.latch.comment ? ` — "${b.latch.comment}"` : ''}`;
   return `${g} never came on${b.cls && b.cls.cls !== 'other' ? ` (${b.cls.what})` : ''}`;
 }
 
@@ -598,8 +598,8 @@ function ctBlockerPhrase(b, P) {
 function ctWhereToConfirm(o, P, main, external) {
   const bkr = o.bkrBit || '52A', cf = o.cfBit || 'CF';
   const erTxt = o.er && !o.er.closedInER
-    ? `ER has no rising ${bkr} term, so a good close makes no event report here${o.er.cfInER ? `; only ${cf} does. No ${cf} record after this one means the close most likely went through` : ''}.`
-    : `Look at the next record from this relay: ${bkr} rising means it closed; ${cf} means it did not.`;
+    ? `A good close makes no event report here (ER has no rising ${bkr})${o.er.cfInER ? `; no ${cf} record after this one means it most likely closed` : ''}.`
+    : `Check the next record: ${bkr} rising means it closed; ${cf} means it did not.`;
   const ser = new Set();
   for (let n = 1; n <= 4; n++) {
     const v = ctSetting(P, 'SER' + n);
@@ -610,7 +610,7 @@ function ctWhereToConfirm(o, P, main, external) {
   const inSer = Array.from(new Set(want.filter(n => n && ser.has(n))));
   const notSer = Array.from(new Set(want.filter(n => n && !ser.has(n) && ctRecorded(P, n))));
   if (!inSer.length) return erTxt;
-  return `${erTxt} The SER records ${inSer.join(', ')}${notSer.length ? ` (not ${notSer.join(', ')})` : ''}. Read it for the time after this record: ${bkr} on with ${main.name} never on means the breaker closed through the outside device.`;
+  return `${erTxt} Check the SER after this record (it logs ${inSer.join(', ')}${notSer.length ? `, not ${notSer.join(', ')}` : ''}): ${bkr} on with ${main.name} never on means it closed through the outside device.`;
 }
 
 function ctBuildVerdict(o, P) {
@@ -618,33 +618,33 @@ function ctBuildVerdict(o, P) {
   const closeOuts = o.closeOutputs;
   const anyCloseOut = closeOuts.some(x => x.everOn);
   const lead = o.carried
-    ? `A close request (${o.closeBit}) was already in progress when this record started.`
-    : `${o.closeBit} asserted at t=${o.startMs.toFixed(0)} ms, started by ${o.source ? o.source.text : 'an unknown source'}.`;
+    ? `Close request (${o.closeBit}) already in progress at record start.`
+    : `${o.closeBit} at t=${o.startMs.toFixed(0)} ms, from ${o.source ? o.source.text : 'an unknown source'}.`;
 
-  if (o.bkrClosedAlready) return V('already-closed', 'info', 'Close request with the breaker already closed', `${lead} ${o.bkrBit} was already on, so there was nothing to close.`);
+  if (o.bkrClosedAlready) return V('already-closed', 'info', 'Close request with the breaker already closed', `${lead} ${o.bkrBit} was already on; nothing to close.`);
   const nm = (x) => `${x.name}${x.comment ? ` ("${x.comment}")` : ''}`;
   const handoff = o.handoff || [];
   const handoffTxt = handoff.length
-    ? ` ${handoff.map(x => `${nm(x)} operated at +${ctFmtMs(x.firstOnMs)}`).join('; ')}: a new start signal to the device it drives. That device can close the breaker by a path this relay does not control.`
+    ? ` ${handoff.map(x => `${nm(x)} operated at +${ctFmtMs(x.firstOnMs)}`).join('; ')}: a new start to the outside device, which can close the breaker without this relay.`
     : '';
   if (o.bkrConfirmed) {
     const viaOwn = closeOuts.some(x => x.everOn);
     return V('closed', 'good', 'The breaker closed', `${lead} ${o.bkrBit} confirmed closed ${ctFmtMs(o.bkrConfirmMs)} later.${!viaOwn && closeOuts.length && handoff.length
-      ? ` ${closeOuts.map(x => x.name).join(', ')} never operated.${handoffTxt} The breaker closed through that device, not through this relay's close contact.` : ''}`);
+      ? ` ${closeOuts.map(x => x.name).join(', ')} never operated.${handoffTxt} It closed through that device, not this relay's close contact.` : ''}`);
   }
 
-  const endTxt = o.endReason === 'cf' ? `The relay declared close failure (${o.cfBit})${o.cf && o.cf.measuredMs != null ? ` ${ctFmtMs(o.cf.measuredMs)} after the close started` : ''}.`
+  const endTxt = o.endReason === 'cf' ? `Close failure (${o.cfBit}) declared${o.cf && o.cf.measuredMs != null ? ` ${ctFmtMs(o.cf.measuredMs)} after the close started` : ''}.`
     : o.endReason === 'dropped' ? `${o.closeBit} dropped out at t=${o.endMs.toFixed(0)} ms without a close.`
-    : `${o.closeBit} was still on at the end of the record.`;
+    : `${o.closeBit} still on at end of record.`;
 
   if (!closeOuts.length) {
     return V('no-output-found', 'warn', 'Close requested — no close output found in the settings',
-      `${lead} ${endTxt} No OUTnnn equation in this file references ${o.closeBit}, so the tool cannot tell whether the breaker was told to close.`);
+      `${lead} ${endTxt} No OUTnnn equation uses ${o.closeBit}, so this file cannot show whether the breaker was told to close.`);
   }
   if (anyCloseOut) {
     const on = closeOuts.filter(x => x.everOn).map(x => x.name).join(', ');
-    return V('output-no-breaker', 'bad', 'The relay energized its close output — the breaker did not close',
-      `${lead} ${on} operated. ${o.bkrBit || '52A'} never confirmed closed. ${endTxt} The relay did its part. Look at the close circuit wiring, the close coil, the mechanism, and the 52A auxiliary contact.`);
+    return V('output-no-breaker', 'bad', 'Close output operated — breaker did not close',
+      `${lead} ${on} operated; ${o.bkrBit || '52A'} never confirmed closed. ${endTxt} Check the close circuit, close coil, mechanism, and 52A contact.`);
   }
 
   // No close output operated. Name what it was waiting on.
@@ -656,30 +656,30 @@ function ctBuildVerdict(o, P) {
   const alt = (main.alternatives || [])[0];
   const blockers = alt ? alt.blockers : (main.rootBlockers || []);
   const external = blockers.filter(b => b.cls && b.cls.cls === 'external' && !b.negated);
-  const waitTxt = blockers.length ? ` It was waiting on: ${blockers.map(b => ctBlockerPhrase(b, P)).join('; ')}.` : '';
+  const waitTxt = blockers.length ? ` Waiting on: ${blockers.map(b => ctBlockerPhrase(b, P)).join('; ')}.` : '';
   const routeTxt = alt && alt.route && alt.route.length ? ` (path ${[main.name].concat(alt.route).map(n => typeof rcGloss === 'function' ? rcGloss(P, n) : n).join(' → ')})` : '';
   const headline = external.length
     ? `Close blocked — ${main.name} never operated, waiting on ${external.map(b => b.name).join(', ')}`
-    : `Close blocked — the relay never energized its close output (${main.name})`;
+    : `Close blocked — close output ${main.name} never operated`;
   const stuck = o.stuckAux || [];
   const stuckTxt = stuck.length
-    ? ` ${stuck.map(x => `${nm(x)} was already on when this close started, held by ${x.heldBy.map(h => h.name).join(', ')}`).join('; ')}. The device it drives saw no new signal for this close.`
+    ? ` ${stuck.map(x => `${nm(x)} was already on when this close started, held by ${x.heldBy.map(h => h.name).join(', ')}`).join('; ')}, so its device saw no new start.`
     : '';
   if (pending) {
     const extNames = external.map(b => b.name).join(', ');
     return V('pending', 'warn',
-      `Close in progress at end of record — ${main.name} had not operated${external.length ? `, waiting on ${external.map(b => b.name).join(', ')}` : ''}${stuck.length
+      `Close in progress at end of record — ${main.name} not yet operated${external.length ? `, waiting on ${external.map(b => b.name).join(', ')}` : ''}${stuck.length
         ? `; ${stuck.map(x => x.name).join(', ')} already held on (no new start)`
         : handoff.length ? `; ${handoff.map(x => x.name).join(', ')} started the outside device` : ''}`,
-      `${lead} The record ends ${ctFmtMs(o.endMs - o.startMs)} after ${o.closeBit}${cfdMs ? `, before CFD (${ctFmtMs(cfdMs)})` : ''}, so the outcome is not in this record. Up to then, ${main.name} (${main.eq}) had not operated${routeTxt}.${waitTxt}${handoffTxt}${stuckTxt}${handoff.length && extNames
+      `${lead} Record ends ${ctFmtMs(o.endMs - o.startMs)} after ${o.closeBit}${cfdMs ? `, before CFD (${ctFmtMs(cfdMs)})` : ''}; the outcome is not in this record. ${main.name} had not operated${routeTxt}.${waitTxt}${handoffTxt}${stuckTxt}${handoff.length && extNames
         ? ` The breaker can still close through that device without ${main.name} or ${extNames}.` : ''} ${ctWhereToConfirm(o, P, main, external)}`);
   }
   const lead2 = stuck.length
-    ? `Close failed — ${stuck.map(x => x.name).join(', ')} was already held on (no new start to the outside device), and ${main.name} ${external.length ? `waited on ${external.map(b => b.name).join(', ')}` : 'never operated'}`
+    ? `Close failed — ${stuck.map(x => x.name).join(', ')} already held on (no new start), ${main.name} ${external.length ? `waited on ${external.map(b => b.name).join(', ')}` : 'never operated'}`
     : headline;
   return V('blocked', 'bad', lead2,
-    `${lead} ${main.name} (${main.eq}) never operated${routeTxt}.${waitTxt} ${endTxt}${stuckTxt}${handoffTxt}${handoff.length
-      ? ` That device had its start signal and the breaker still did not close, so look at that device and its close path too.`
+    `${lead} ${main.name} never operated${routeTxt}.${waitTxt} ${endTxt}${stuckTxt}${handoffTxt}${handoff.length
+      ? ` That device got its start and the breaker still did not close; check that device and its close path.`
       : ' The breaker was never told to close, so this is not a breaker mechanism problem.'}`);
 }
 
@@ -695,7 +695,7 @@ function ctRenderWhy(step, P, depth = 0) {
   const g = (n) => ctEsc(typeof rcGloss === 'function' ? rcGloss(P, n) : n);
   if (step.kind === 'and') return step.children.map(c => ctRenderWhy(c, P, depth)).join('');
   if (step.kind === 'or') {
-    return `<div style="${pad}font-size:11px;color:var(--text-muted);margin:4px 0 2px;">None of these alternatives came on:</div>`
+    return `<div style="${pad}font-size:11px;color:var(--text-muted);margin:4px 0 2px;">None of these came on:</div>`
       + step.children.map(c => ctRenderWhy(c, P, depth + 1)).join('');
   }
   if (step.kind === 'sv') {
@@ -744,7 +744,7 @@ function buildCloseTraceSections(P, A) {
     html += `<div style="margin-top:14px;padding:10px 12px;border:1px solid #5c1414;border-radius:8px;background:var(--red-dim);">
       <div style="font-size:12.5px;font-weight:700;color:var(--red);margin-bottom:6px;">${o.verdict && o.verdict.kind === 'pending' ? `Why ${ctEsc(x.name)} had not operated by the end of the record` : `Why ${ctEsc(x.name)} did not operate`}</div>`;
     if (x.momentary && x.momentary.length) {
-      html += `<div style="font-size:12px;margin-bottom:6px;">The equation reads true from the recorded bits for ${x.momentary.length} sample${x.momentary.length > 1 ? 's' : ''}${x.momentaryTerms && x.momentaryTerms.length ? `, while ${ctEsc(x.momentaryTerms.join(', '))} was on` : ''}. ${ctEsc(x.name)} did not operate at that instant. A term that is on for only one processing interval cannot close the breaker by itself.</div>`;
+      html += `<div style="font-size:12px;margin-bottom:6px;">Equation true for ${x.momentary.length} sample${x.momentary.length > 1 ? 's' : ''}${x.momentaryTerms && x.momentaryTerms.length ? ` while ${ctEsc(x.momentaryTerms.join(', '))} was on` : ''}, but ${ctEsc(x.name)} did not operate — a one-interval pulse cannot close the breaker.</div>`;
     }
     const alts = x.alternatives || [];
     if (alts.length > 1) {
@@ -763,9 +763,9 @@ function buildCloseTraceSections(P, A) {
     html += `<div style="margin-top:14px;padding:10px 12px;border:1px solid #5c4506;border-radius:8px;background:var(--yellow-dim);">
       <div style="font-size:12.5px;font-weight:700;color:var(--yellow);margin-bottom:6px;">Outputs held on by a latch</div>
       ${held.map(x => x.heldBy.map(h => `<div style="font-size:12px;margin:3px 0;">
-        <b>${ctEsc(x.name)}</b> is on at the end of the record, held by <b>${ctEsc(h.name)}</b>${h.comment ? ` ("${ctEsc(h.comment)}")` : ''}.
+        <b>${ctEsc(x.name)}</b> held on at end of record by <b>${ctEsc(h.name)}</b>${h.comment ? ` ("${ctEsc(h.comment)}")` : ''}.
         ${h.reset ? ` ${ctEsc(h.name)} resets only on <code>${ctEsc(h.reset.split('#')[0].trim())}</code>.` : ''}
-        ${x.onAtStart ? ` <b>${ctEsc(x.name)} was already on when this close started.</b> The device it drives saw no new change of state for this close. If that device starts on a change of state, it will not start again until ${ctEsc(h.name)} resets.` : ` A later close command will not make ${ctEsc(x.name)} change state again until ${ctEsc(h.name)} resets.`}
+        ${x.onAtStart ? ` <b>Already on when this close started</b> — its device saw no new start, and won't until ${ctEsc(h.name)} resets.` : ` A later close won't change ${ctEsc(x.name)} until ${ctEsc(h.name)} resets.`}
       </div>`).join('')).join('')}
     </div>`;
   }
@@ -776,7 +776,7 @@ function buildCloseTraceSections(P, A) {
       <table class="data-table"><thead><tr><th>Timer</th><th>Pickup</th><th>Dropout</th><th>Purpose</th></tr></thead><tbody>
       ${o.timers.map(t => `<tr><td>${ctEsc(t.label)}</td><td>${t.pickup}${t.pickupMs != null ? ` (${ctFmtMs(t.pickupMs)}${t.assumed ? '*' : ''})` : ''}</td><td>${t.dropout}${t.dropoutMs != null ? ` (${ctFmtMs(t.dropoutMs)}${t.assumed ? '*' : ''})` : ''}</td><td>${ctEsc(t.comment || '')}</td></tr>`).join('')}
       </tbody></table>
-      ${o.timers.some(t => t.assumed) ? '<div style="font-size:10.5px;color:var(--text-muted)">* This record does not confirm whether these settings are in cycles or seconds.</div>' : ''}`;
+      ${o.timers.some(t => t.assumed) ? '<div style="font-size:10.5px;color:var(--text-muted)">* Units (cycles or seconds) not confirmed by this record.</div>' : ''}`;
   }
 
   // CF
@@ -784,11 +784,11 @@ function buildCloseTraceSections(P, A) {
     const c = o.cf;
     let t = `CFD = ${c.setting}`;
     if (c.unit) t += ` ${c.unit} (${ctFmtMs(c.settingMs)})`;
-    else t += ' (this record does not show whether this is cycles or seconds)';
+    else t += ' (units unconfirmed)';
     if (c.measuredMs != null) t += ` — measured ${o.closeBit} → ${o.cfBit} ${ctFmtMs(c.measuredMs)}${c.crossRecord ? ' across records' : ''}`;
     else if (c.heldMs != null) t += ` — ${o.closeBit} held ${ctFmtMs(c.heldMs)} to the end of this record with no ${o.cfBit}${c.unit === 'seconds' ? ', so CFD is in seconds' : ''}`;
     const gate = o.timers.find(tm => tm.dropoutMs && c.settingMs && tm.dropoutMs > c.settingMs);
-    if (gate) t += `. <b>Note:</b> ${ctEsc(gate.label)}${gate.comment ? ` ("${ctEsc(gate.comment)}")` : ''} holds its window open for ${ctFmtMs(gate.dropoutMs)}, longer than CFD. A permissive that arrives after ${ctFmtMs(c.settingMs)} comes after this close request has already failed (${ctEsc(o.cfBit || 'CF')}). A close after that needs a new close request.`;
+    if (gate) t += `. <b>Note:</b> ${ctEsc(gate.label)}${gate.comment ? ` ("${ctEsc(gate.comment)}")` : ''} holds its window open ${ctFmtMs(gate.dropoutMs)}, longer than CFD: a permissive after ${ctFmtMs(c.settingMs)} arrives after the close has failed (${ctEsc(o.cfBit || 'CF')}) and needs a new close request.`;
     html += `<div style="margin-top:14px;font-size:12px;"><b>Close failure time:</b> ${t}</div>`;
   }
 
@@ -796,21 +796,21 @@ function buildCloseTraceSections(P, A) {
   if (o.er) {
     const e = o.er;
     const lines = [];
-    const outcome = e.closedInER && e.cfInER ? 'it still makes an event report when the breaker closes or when the close fails (CF)'
-      : e.closedInER ? `it makes an event report only if the breaker closes. A close that fails makes no event report (${ctEsc(o.cfBit || 'CF')} is not in ER)`
-      : e.cfInER ? `it makes an event report only if the close fails (${ctEsc(o.cfBit || 'CF')}). A close that succeeds makes no event report`
-      : 'it makes no event report at all, whether the breaker closes or not';
-    for (const s of e.sources) lines.push(`<div style="font-size:12px;margin:2px 0;">${s.inER ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--red)">✕</span>'} <b>${ctEsc(s.term)}</b> (${ctEsc(s.what)}) — ${s.inER ? 'in ER. It makes an event report every time it asserts.' : `not in ER. For a close started this way, ${outcome}.`}</div>`);
-    if (e.cfInER) lines.push(`<div style="font-size:12px;margin:2px 0;"><span style="color:var(--green)">✓</span> <b>${ctEsc(o.cfBit)}</b> is in ER. Every failed close makes a second record, CFD after the first.</div>`);
-    else if (o.cfBit) lines.push(`<div style="font-size:12px;margin:2px 0;"><span style="color:var(--yellow)">⚠</span> <b>${ctEsc(o.cfBit)}</b> is not in ER. A failed close leaves no record of its own.</div>`);
-    for (const x of e.orphans) lines.push(`<div style="font-size:12px;margin:2px 0;"><span style="color:var(--yellow)">⚠</span> <b>${ctEsc(x.label)}</b> is labelled "${ctEsc(x.comment)}" but is <b>not in ER</b>. It cannot trigger an event report. (<code>${ctEsc(x.eq)}</code>)</div>`);
+    const outcome = e.closedInER && e.cfInER ? 'a report comes only when the breaker closes or the close fails (CF)'
+      : e.closedInER ? `a report comes only if the breaker closes; a failed close makes none (${ctEsc(o.cfBit || 'CF')} not in ER)`
+      : e.cfInER ? `a report comes only if the close fails (${ctEsc(o.cfBit || 'CF')}); a good close makes none`
+      : 'no event report either way';
+    for (const s of e.sources) lines.push(`<div style="font-size:12px;margin:2px 0;">${s.inER ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--red)">✕</span>'} <b>${ctEsc(s.term)}</b> (${ctEsc(s.what)}) — ${s.inER ? 'in ER; always makes an event report.' : `not in ER; ${outcome}.`}</div>`);
+    if (e.cfInER) lines.push(`<div style="font-size:12px;margin:2px 0;"><span style="color:var(--green)">✓</span> <b>${ctEsc(o.cfBit)}</b> is in ER: a failed close makes a second record, CFD after the first.</div>`);
+    else if (o.cfBit) lines.push(`<div style="font-size:12px;margin:2px 0;"><span style="color:var(--yellow)">⚠</span> <b>${ctEsc(o.cfBit)}</b> is not in ER: a failed close leaves no record of its own.</div>`);
+    for (const x of e.orphans) lines.push(`<div style="font-size:12px;margin:2px 0;"><span style="color:var(--yellow)">⚠</span> <b>${ctEsc(x.label)}</b> is labelled "${ctEsc(x.comment)}" but is <b>not in ER</b>, so it cannot trigger a report. (<code>${ctEsc(x.eq)}</code>)</div>`);
     html += `<div style="margin-top:14px;font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-muted);">Which close commands make an event report</div>
       <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">ER := <code>${ctEsc(e.eq)}</code></div>${lines.join('')}`;
   }
 
   // Clock
   if (o.clock && !o.clock.synced) {
-    html += `<div style="margin-top:14px;font-size:12px;"><span style="color:var(--yellow)">⚠</span> <b>Relay clock not synchronized:</b> ${ctEsc(o.clock.offBits.join(' and '))} off for the whole record${o.clock.source ? ` (TIME_SRC := ${ctEsc(o.clock.source)})` : ''}. Event times can be far from the SCADA time of the command. Match events by event number, not by time.</div>`;
+    html += `<div style="margin-top:14px;font-size:12px;"><span style="color:var(--yellow)">⚠</span> <b>Relay clock not synchronized:</b> ${ctEsc(o.clock.offBits.join(' and '))} off for the whole record${o.clock.source ? ` (TIME_SRC := ${ctEsc(o.clock.source)})` : ''}. Match events to SCADA commands by event number, not time.</div>`;
   }
   return html;
 }

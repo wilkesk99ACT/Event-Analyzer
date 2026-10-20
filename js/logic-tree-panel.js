@@ -23,12 +23,10 @@ function renderBasisNote(P) {
   if (!c) return '';
   const CTR = P?.settings?.CTR;
   const bits = [];
-  bits.push(`Pickups are relay <b>secondary</b> amps; this file's current channels read as <b>${c.isPrimary ? 'primary' : 'secondary'}</b>${c.isPrimary && CTR ? ` (converted using CTR = ${CTR})` : ''}.`);
-  bits.push(`Magnitude scaling: <b>x${c.magScale === 1 ? '1 (none)' : c.magScale.toFixed(4)}</b> — ${c.detail}`);
-  bits.push(`Calibrated from ${c.source}; confidence: ${c.confidence}.`);
-  if (c.observedCurrentRatio != null) bits.push(`Observed ratio vs the relay's own reported fault currents: ${c.observedCurrentRatio}${c.observedVoltageRatio != null ? `; vs VNOM x PTR: ${c.observedVoltageRatio}` : ''}.`);
+  bits.push(`Pickups are in secondary amps. This file's currents are <b>${c.isPrimary ? 'primary' : 'secondary'}</b>${c.isPrimary && CTR ? ` (converted with CTR = ${CTR})` : ''}.`);
+  bits.push(`Scaling <b>x${c.magScale === 1 ? '1 (none)' : c.magScale.toFixed(4)}</b>; confidence: ${c.confidence}.`);
   return `<div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;line-height:1.5;border-left:2px solid var(--accent);padding-left:8px;">
-    <b style="color:var(--text-dim);">Unit basis for this file</b><br>${bits.join('<br>')}
+    <b style="color:var(--text-dim);">Units</b><br>${bits.join('<br>')}
   </div>`;
 }
 
@@ -354,7 +352,7 @@ function buildLogicTreeSection(P, A) {
         ? `${childLabel} → ${node.label} — ${node.inverseTimeNote}`
         : measured
         ? `${childLabel} → ${node.label} — timer ran ${delayMs} ms in this record${settingNote}`
-        : `${childLabel} → ${node.label} — ${delayMs} ms pickup timer${conv && conv.assumed ? ' (setting units not confirmed by this record; read as cycles)' : ''}${settingNote}`;
+        : `${childLabel} → ${node.label} — ${delayMs} ms pickup timer${conv && conv.assumed ? ' (assumes setting is in cycles)' : ''}${settingNote}`;
 
       // ── Timer progress ──────────────────────────────────────────────────────
       // While the cursor sits inside the delay, fill the connector from the input end at the
@@ -389,10 +387,10 @@ function buildLogicTreeSection(P, A) {
       linesHTML += titledEdge(cx, cy, x, ny, node.value ? trueColor : falseColor, '2,3', edgeTitle);
       const midX = (cx + x) / 2 - 16;
       const badgeTitle = node.inverseTimeNote
-        ? `This is an ${node.inverseTimeNote}. The record does not show how long it ran.`
+        ? `Run time not in this record: ${node.inverseTimeNote}.`
         : measured
-        ? `Measured in this record: ${delayMs} ms${settingNote}`
-        : `${delayMs} ms${conv && conv.assumed ? ' — setting units not confirmed by this record; read as cycles' : ''}${settingNote}`;
+        ? `Measured: ${delayMs} ms${settingNote}`
+        : `${delayMs} ms${conv && conv.assumed ? ' (assumes setting is in cycles)' : ''}${settingNote}`;
       const badgeText = node.inverseTimeNote ? '⏱ inv' : delayMs == null ? '⏱ —' : `⏱ ${delayMs}ms${measured ? '' : '*'}`;
       boxesHTML += `<div class="logic-timer-label" style="left:${midX}px;top:${ny - 16}px;" title="${badgeTitle}">${badgeText}</div>`;
       boxesHTML += `<div class="logic-box logic-sv-box logic-timer-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${prefix}${tt(node.label, P)}</div>`;
@@ -498,7 +496,7 @@ function buildLogicTreeSection(P, A) {
           ${boxesHTML}
         </div>
       </div>
-      ${otherCount ? `<div class="logic-tree-other">+ ${otherCount} other independent trip condition${otherCount === 1 ? '' : 's'} in this same equation, unrelated to this event (not shown)</div>` : ''}
+      ${otherCount ? `<div class="logic-tree-other">+ ${otherCount} other trip condition${otherCount === 1 ? '' : 's'} in this equation, not involved here (hidden)</div>` : ''}
     </div>`;
 }
 
@@ -516,12 +514,12 @@ function buildEvidenceBlock(P, cause) {
   const rows = ev.items.map(it => {
     const timing = it.assertMs != null
       ? (Math.abs(it.assertMs) < 0.5 ? 'asserted at the trip instant' : `asserted ${Math.abs(it.assertMs).toFixed(0)} ms before the trip`)
-      : (it.initiallyOn ? 'already asserted at record start' : 'assertion time not captured in this record');
+      : (it.initiallyOn ? 'already asserted at record start' : 'assert time not in record');
     const meas = it.measured && it.pickup
       ? ` — measured <b>${it.measured}</b> vs. pickup <b>${it.pickup}</b>${it.multiple ? ` (<b>${it.multiple}×</b> pickup)` : ''}`
       : '';
     const completed = ev.completedBy === it.el
-      ? ` <span style="color:var(--red);font-weight:700;">— last to assert, completing the trip logic</span>`
+      ? ` <span style="color:var(--red);font-weight:700;">— last to assert; completed the trip</span>`
       : '';
     return `<li style="margin-bottom:5px;"><span style="font-family:var(--mono);color:var(--text);">${tt(it.el, P)}</span> ${timing}${meas}${completed}</li>`;
   }).join('');
@@ -531,13 +529,12 @@ function buildEvidenceBlock(P, cause) {
   const uvNote = uvN
     ? `<p style="font-size:12px;color:var(--text-dim);line-height:1.6;margin-top:8px;">
         Undervoltage element${uvN > 1 ? 's' : ''} <span style="font-family:var(--mono);">${ev.uninvolvedUV.join(', ')}</span>
-        picked up during this event. The resolved trip logic above does not use ${uvN > 1 ? 'them' : 'it'}.
-        ${ev.tripPathHasOvercurrent
-          ? 'This agrees with a voltage dip caused by the fault current, not a separate input to the trip.'
-          : `${uvN > 1 ? 'They' : 'It'} did not cause this trip.`}</p>`
+        picked up but ${uvN > 1 ? 'are' : 'is'} not in the trip logic${ev.tripPathHasOvercurrent
+          ? ' — the dip came from the fault current.'
+          : `, so ${uvN > 1 ? 'they' : 'it'} did not cause this trip.`}</p>`
     : '';
   return `<div style="background:var(--card);border:1px solid var(--card-border);border-radius:8px;padding:12px 16px;margin-bottom:16px;">
-    <div style="font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Why this determination — evidence from this record</div>
+    <div style="font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Evidence</div>
     <ul style="font-size:12px;color:var(--text-dim);line-height:1.6;padding-left:18px;margin:0;">${rows}</ul>
     ${uvNote}
   </div>`;
@@ -615,7 +612,7 @@ function buildChartedLocalGraphHTML(label) {
   if (!innerDiagram) return '';
   const legendHTML = renderLLGLegend().replace(/\sid="llgSourceLegend"/, '');
   return `<div class="llg-diagram-outer main-charted-local-graph" style="margin-top:12px;">
-    <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Full logic chart — what feeds ${tt(label, PARSED)}, and what it feeds into:</div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Inputs and outputs of ${tt(label, PARSED)}</div>
     ${legendHTML}
     <div class="llg-wrap" id="mainChartedLocalBody">
       <div id="mainChartedLocalInner">${innerDiagram.innerHTML}</div>
@@ -639,7 +636,7 @@ function renderChartedLogicSlot() {
       if (html) { slot.innerHTML = html; return; }
     }
     slot.innerHTML = isDefault ? LAST_SEQ_HTML
-      : `<div style="color:var(--text-dim);font-size:12px;padding:8px 2px;">No equation-based logic tree available for ${tt(label, PARSED)} — try unchecking "Filter relevant?" to see its full local logic graph instead.</div>`;
+      : `<div style="color:var(--text-dim);font-size:12px;padding:8px 2px;">No logic tree for ${tt(label, PARSED)}. Uncheck "Filter relevant?" to see its full logic chart.</div>`;
     return;
   }
 

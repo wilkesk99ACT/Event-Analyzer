@@ -47,13 +47,12 @@ function renderContent() {
     <div class="card red-accent">
       <div class="card-header">⏱️ Digital Event Timeline</div>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:16px;">
-        Step-by-step sequence of digital state changes decoded from the CEV event record.
-        Each entry shows exactly which relay word bits changed and when.
+        Relay bit changes, in order.
       </p>
       <div class="tab-legend">
         <span><span class="legend-dot" style="background:var(--red);box-shadow:0 0 6px rgba(248,113,113,0.5)"></span> Trip event</span>
-        <span><span class="tl-bit assert" style="padding:2px 6px;">▲ bit</span> Asserted (turned ON) at this step</span>
-        <span><span class="tl-bit deassert" style="padding:2px 6px;">▼ bit</span> De-asserted (turned OFF) at this step</span>
+        <span><span class="tl-bit assert" style="padding:2px 6px;">▲ bit</span> Turned ON</span>
+        <span><span class="tl-bit deassert" style="padding:2px 6px;">▼ bit</span> Turned OFF</span>
       </div>
       ${tripRelevant.size ? `<label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-dim);margin-bottom:14px;cursor:pointer;">
         <input type="checkbox" id="timelineTripOnlyToggle" onchange="toggleTimelineTripFilter(this.checked)">
@@ -147,7 +146,7 @@ function renderContent() {
   html += `<div class="tab-panel" id="panel-protection">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
       <span id="protectionInstantLabel" style="font-size:12px;color:var(--text-dim);font-family:var(--mono);"></span>
-      <span style="font-size:11px;color:var(--text-muted);cursor:pointer;" onclick="refreshProtectionTab(null)" title="Reset to trip instant">Drag the measurement cursor on any chart (Timeline/Voltages/Currents tabs) to see values at that instant — click here to reset to the trip instant.</span>
+      <span style="font-size:11px;color:var(--text-muted);cursor:pointer;" onclick="refreshProtectionTab(null)" title="Reset to trip instant">Move the chart cursor to see values at that instant. Click to reset to trip.</span>
     </div>
     <div class="card red-accent"><div class="card-header">🛡️ Overcurrent Protection Elements</div>
       ${renderBasisNote(P)}
@@ -159,7 +158,7 @@ function renderContent() {
   if (A.voltageStatus.length) {
     html += `<div class="card yellow-accent"><div class="card-header">📐 Voltage Protection Elements</div>
       <p style="font-size:11px;color:var(--text-muted);margin-bottom:10px;">
-        "Measured" shows both the secondary-V figure compared against the relay's own setting, and the same value in chart-native units (kV/A primary, whichever this file's channels use) — matching what's plotted on the Voltages/Currents/Timeline charts, so the two can be read side-by-side.
+        "Measured" shows secondary V (vs. the setting) and the chart units.
       </p>
       <div class="table-scroll"><table class="data-table"><thead><tr>
         <th>Element</th><th>Terminal</th><th>Type</th><th>Pickup</th><th>Measured</th><th>Status</th>
@@ -182,14 +181,14 @@ function renderContent() {
   // ── SV Logic ──
   html += `<div class="tab-panel" id="panel-sv">
     <div class="tab-legend">
-      <span><span class="legend-swatch" style="border-left:3px solid var(--red);"></span> Left border / name in red = this SV is part of the trip equation chain</span>
-      <span><span class="legend-swatch" style="border-left:3px solid var(--accent);"></span> Left border / name in accent color = active elsewhere in the record, not part of this trip</span>
-      <span><span style="color:var(--yellow)">PU</span> = pickup delay (how long the condition must hold before this SV asserts)</span>
-      <span><span style="color:var(--text-muted)">DO</span> = dropout delay (how long it must clear before de-asserting)</span>
+      <span><span class="legend-swatch" style="border-left:3px solid var(--red);"></span> Red = in the trip chain</span>
+      <span><span class="legend-swatch" style="border-left:3px solid var(--accent);"></span> Accent = active, not part of this trip</span>
+      <span><span style="color:var(--yellow)">PU</span> = pickup delay</span>
+      <span><span style="color:var(--text-muted)">DO</span> = dropout delay</span>
     </div>
     <div class="card red-accent"><div class="card-header">🔗 SVs in Trip Equation</div>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:14px;">
-        These SVs are directly referenced in the trip equation (${P.tripEquationName || 'TR'}). Each one's pickup delay determines how long the input condition must persist before the trip path activates.
+        SVs used in ${P.tripEquationName || 'TR'}. Pickup delay = how long the input must hold before the trip path acts.
       </p>`;
   A.svChain.filter(sv => sv.inTrip).forEach(sv => {
     const eq = sv.equation;

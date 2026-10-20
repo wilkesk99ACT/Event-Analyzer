@@ -20,27 +20,27 @@
 // function, and a plain-English statement of what it does to the reclose sequence.
 const RECLOSE_EQ_SPECS = [
   { key: 'RI',   names: ['79RI3P', '79RI'],     title: 'Reclose Initiate',
-    what: 'Starts a reclose sequence. When this asserts (and Reclose Initiate Supervision is satisfied), the recloser leaves Reset, increments the shot counter, and begins timing the open interval.' },
+    what: 'Starts a reclose sequence: the recloser leaves Reset, counts a shot, and starts the open interval.' },
   { key: 'RIS',  names: ['79RIS3P', '79RIS'],   title: 'Reclose Initiate Supervision',
-    what: 'Gates Reclose Initiate. The initiate is only accepted while this is asserted — factory default is "52A OR 79CY", i.e. the breaker was actually closed (or a sequence is already running).' },
+    what: 'Gates Reclose Initiate; the initiate is accepted only while this is true (default "52A OR 79CY").' },
   { key: 'DTL',  names: ['79DTL3P', '79DTL'],   title: 'Drive to Lockout',
-    what: 'Forces the recloser straight to Lockout from Reset or Cycle. Nothing after this matters — no automatic close will be issued for this event.' },
+    what: 'Sends the recloser straight to lockout. No automatic close for this event.' },
   { key: 'DLS',  names: ['79DLS3P', '79DLS'],   title: 'Drive to Last Shot',
-    what: 'Jumps the shot counter to the final shot, so any remaining intermediate attempts are skipped and the next trip goes to Lockout.' },
+    what: 'Jumps to the final shot; remaining attempts are skipped and the next trip locks out.' },
   { key: 'SKP',  names: ['79SKP3P', '79SKP'],   title: 'Skip Shot',
-    what: 'Advances the shot counter without issuing a close — the current open interval is skipped and the sequence moves on to the next one.' },
+    what: 'Advances the shot counter without a close; this open interval is skipped.' },
   { key: 'STL',  names: ['79STL3P', '79STL'],   title: 'Stall Open Interval Timing',
-    what: 'Holds the open-interval timer while asserted. The countdown to the close is frozen — and therefore so is the close — until this drops out.' },
+    what: 'Freezes the open-interval timer, and so the close, while true.' },
   { key: 'BRS',  names: ['79BRS3P', '79BRS'],   title: 'Block Reset Timing',
-    what: 'Holds the reset timer while asserted, keeping the recloser from returning to Reset (shot counter stays where it is) even though the breaker is closed.' },
+    what: 'Holds the reset timer, so the shot counter does not clear even with the breaker closed.' },
   { key: 'CLS',  names: ['79CLS3P', '79CLS'],   title: 'Close Supervision',
-    what: 'The final permissive on the automatic close. When the open interval expires the recloser waits here — the close command is not issued until this asserts.' },
+    what: 'Final permissive on the auto-close: after the open interval, the close waits for this.' },
   { key: 'SEQ',  names: ['79SEQ3P', '79SEQ'],   title: 'Sequence Coordination',
-    what: 'Advances this device’s shot counter in step with a downstream device that cleared the fault, so the two stay coordinated without this one tripping.' },
+    what: 'Steps the shot counter with a downstream device that cleared the fault.' },
   { key: 'CL',   names: ['CL3P', 'CL'],         title: 'Close Logic',
-    what: 'The relay’s general close equation — the non-79 paths that can also issue a CLOSE (front-panel pushbutton, SCADA close, external contact). Separate from automatic reclosing.' },
+    what: 'General close equation for non-79 closes (pushbutton, SCADA, contact input).' },
   { key: 'ULCL', names: ['ULCL3P', 'ULCL'],     title: 'Unlatch Close',
-    what: 'Cancels a close in progress. While asserted the CLOSE output is unlatched, so a close the 79 element wanted to issue is withdrawn.' },
+    what: 'Cancels a close in progress while true.' },
 ];
 
 function parseRecloseScheme(S, fullText) {
@@ -284,7 +284,7 @@ function analyzeReclose(P, A) {
   if (!out.available) {
     out.verdict = {
       kind: 'no-data', tone: 'unknown', headline: 'No reclosing information in this file',
-      detail: 'This record carries neither ANSI 79 settings nor any 79 relay-word bits, so nothing can be said about automatic reclosing from it. Either the device has no reclosing element, or the settings block in this CEV was truncated before the reclose section.',
+      detail: 'No ANSI 79 settings or 79 bits in this record: either the device has no reclosing element or the settings block was truncated.',
     };
     return out;
   }
@@ -420,20 +420,20 @@ function analyzeReclose(P, A) {
   // Gate 1 — is the element switched on at all? Everything downstream is moot if not.
   addGate({
     key: 'E79', title: 'Reclosing element enabled', sel: 'E79',
-    what: 'Master enable for automatic reclosing, and the number of reclose attempts (shots) the sequence is allowed.',
+    what: 'Master enable and number of reclose attempts (shots).',
     equation: null,
     status: enabled === false ? 'blocked' : (enabled === true ? 'settled' : 'unknown'),
     pass: enabled === true,
     summary: enabled === false
-      ? `E79 := ${sch.E79raw} — automatic reclosing is switched OFF on this device.`
+      ? `E79 := ${sch.E79raw} — automatic reclosing is OFF.`
         + (out.hasCustomAutoClose
-          ? ` The device can still close by itself. Custom SELogic does it, not the 79 element. See "Close Logic Outside the 79 Element" below.`
-          : (custom && custom.present ? ` The close equation ${custom.closeName} is the only way this device closes. See "Close Logic Outside the 79 Element" below.` : ''))
+          ? ` The device can still close by itself through custom SELogic; see "Close Logic Outside the 79 Element" below.`
+          : (custom && custom.present ? ` The close equation ${(custom.equations || []).filter(e => !e.disabled).map(e => e.name).join(' / ') || 'CL'} is the only way this device closes; see "Close Logic Outside the 79 Element" below.` : ''))
       : (enabled === true
         ? (out.shotsCappedByOI
-          ? `E79 := ${sch.E79raw} allows ${declaredShots} attempts, but only ${contiguousOIs} open interval${contiguousOIs === 1 ? ' is' : 's are'} actually set (79OI${contiguousOIs + 1} := OFF). This is a ${contiguousOIs}-shot scheme: reaching shot ${contiguousOIs + 1} has no interval to time and goes to lockout.`
+          ? `E79 := ${sch.E79raw} allows ${declaredShots} attempts, but only ${contiguousOIs} open interval${contiguousOIs === 1 ? ' is' : 's are'} set (79OI${contiguousOIs + 1} := OFF): a ${contiguousOIs}-shot scheme.`
           : `E79 := ${sch.E79raw != null ? sch.E79raw : 'enabled'} — ${shots ? shots : 'an unstated number of'} reclose attempt${shots === 1 ? '' : 's'} allowed.`)
-        : 'No E79 setting found in this file’s settings block.'),
+        : 'No E79 setting in this file.'),
   });
 
   const gateSpecs = [
@@ -489,16 +489,16 @@ function analyzeReclose(P, A) {
       status: hit ? 'settled' : (chosen && chosen.definite ? 'blocked' : 'unknown'),
       pass: !!hit,
       summary: hit
-        ? `Satisfied ${hit.ms <= 0 ? 'at the trip' : `${hit.ms.toFixed(0)} ms after the trip`}${branch ? ` via ${rcGlossText(P, branch.text)}` : ''} — a reclose sequence is initiated by this event.`
+        ? `Satisfied ${hit.ms <= 0 ? 'at the trip' : `${hit.ms.toFixed(0)} ms after the trip`}${branch ? ` via ${rcGlossText(P, branch.text)}` : ''} — this trip starts a reclose sequence.`
         : (chosen && chosen.definite
-          ? `Never satisfied anywhere between the trip and the end of the record — this trip does not start a reclose sequence. ${describeWhyFalse(chosen)}`
-          : 'Could not be evaluated — the equation references bits this record does not carry.'),
+          ? `Never satisfied after the trip — this trip does not start a reclose sequence. ${describeWhyFalse(chosen)}`
+          : 'Cannot evaluate — uses bits this record does not carry.'),
     });
   } else if (enabled) {
     addGate({
       key: 'RI', title: 'Reclose initiated by this trip', sel: '79RI', what: specOf('RI').what,
       equation: null, status: 'unknown', pass: null,
-      summary: 'No Reclose Initiate equation found in this file. On SEL relays the factory default initiates on the relay’s own trip, so a trip would normally start a sequence — but that cannot be confirmed from this record.',
+      summary: 'No Reclose Initiate equation in this file. The SEL default initiates on the relay trip, but this record cannot confirm it.',
     });
   }
 
@@ -523,10 +523,10 @@ function analyzeReclose(P, A) {
       status: res && res.definite ? (res.value ? 'settled' : 'blocked') : 'unknown',
       pass: res && res.definite ? res.value : null,
       summary: res && res.value
-        ? `Satisfied at the moment of initiate${branch ? ` via ${rcGlossText(P, branch.text)}` : ''} — the initiate is accepted.`
+        ? `Satisfied at initiate${branch ? ` via ${rcGlossText(P, branch.text)}` : ''} — initiate accepted.`
         : (res && res.definite
-          ? `Not satisfied at the moment of initiate — the reclose initiate is rejected and no sequence starts. ${describeWhyFalse(res)}`
-          : 'Could not be evaluated from this record.'),
+          ? `Not satisfied at initiate — the initiate is rejected and no sequence starts. ${describeWhyFalse(res)}`
+          : 'Cannot evaluate from this record.'),
     });
   }
 
@@ -543,10 +543,10 @@ function analyzeReclose(P, A) {
       pass: !hit,
       inverted: true,
       summary: hit
-        ? `ASSERTED ${hit.ms <= 0 ? 'at the trip' : `${hit.ms.toFixed(0)} ms after the trip`}${branch ? ` via ${rcGlossText(P, branch.text)}` : ''} — the recloser is driven straight to lockout. No automatic close will be issued.`
+        ? `ASSERTED ${hit.ms <= 0 ? 'at the trip' : `${hit.ms.toFixed(0)} ms after the trip`}${branch ? ` via ${rcGlossText(P, branch.text)}` : ''} — the recloser is driven to lockout. No automatic close.`
         : ((r.atTrip && r.atTrip.definite)
-          ? 'Not asserted at any point from the trip to the end of the record — nothing in this event forces lockout.'
-          : 'Could not be evaluated from this record.'),
+          ? 'Not asserted from the trip to record end — nothing forces lockout.'
+          : 'Cannot evaluate from this record.'),
     });
   }
 
@@ -564,7 +564,7 @@ function analyzeReclose(P, A) {
       addGate({
         key: 'DLS', title: 'Driven to last shot', sel: r.sel, what: r.spec.what,
         equation: r.eq, evaluation: null, status: 'settled', pass: true, soft: true,
-        summary: `Set to mirror ${loLabels.slice().sort((a, b) => b.length - a.length).find(l => (r.eq || '').includes(l)) || '79LO'}, so it simply follows the lockout state rather than acting as a separate condition — it does not independently shorten the sequence.`,
+        summary: `Mirrors ${loLabels.slice().sort((a, b) => b.length - a.length).find(l => (r.eq || '').includes(l)) || '79LO'}, so it just follows the lockout state and does not shorten the sequence on its own.`,
       });
       gateResults.DLS = null;
     } else addGate({
@@ -572,8 +572,8 @@ function analyzeReclose(P, A) {
       equation: r.eq, evaluation: hit ? hit.result : r.atTrip,
       status: hit ? 'blocked' : 'settled', pass: !hit, inverted: true, soft: true,
       summary: hit
-        ? `Asserted ${hit.ms <= 0 ? 'at the trip' : `${hit.ms.toFixed(0)} ms after the trip`} — the shot counter jumps to the final shot, so intermediate attempts are skipped and the next trip locks out.`
-        : 'Not asserted — the sequence runs its full shot count.',
+        ? `Asserted ${hit.ms <= 0 ? 'at the trip' : `${hit.ms.toFixed(0)} ms after the trip`} — jumps to the final shot; the next trip locks out.`
+        : 'Not asserted — full shot count available.',
     });
   }
 
@@ -585,7 +585,7 @@ function analyzeReclose(P, A) {
       key: 'SKP', title: 'Shot skipped', sel: r.sel, what: r.spec.what,
       equation: r.eq, evaluation: hit ? hit.result : r.atTrip,
       status: hit ? 'blocked' : 'settled', pass: !hit, inverted: true, soft: true,
-      summary: hit ? 'Asserted — this open interval is skipped and the sequence advances without closing.' : 'Not asserted — no shots are skipped.',
+      summary: hit ? 'Asserted — this open interval is skipped without a close.' : 'Not asserted — no shots skipped.',
     });
   }
 
@@ -599,7 +599,7 @@ function analyzeReclose(P, A) {
       equation: r.eq, evaluation: now,
       status: 'pending', pass: now ? !now.value : null, inverted: true, soft: true,
       summary: now && now.value
-        ? `Asserted at the end of the record${(() => {
+        ? `Asserted at record end${(() => {
           const hold = (now.branches || []).filter(b => b.value)
             .flatMap(b => b.leaves.filter(l => l.effective && l.known).map(l => `${l.negated ? 'NOT ' : ''}${rcGloss(P, l.name)}`))
             .filter((v, i, a) => a.indexOf(v) === i);
@@ -607,8 +607,8 @@ function analyzeReclose(P, A) {
             .flatMap(b => b.leaves.filter(l => l.effective && l.known).map(l => rcResolveTermText(P, A, l.name, endIdx)))
             .filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join('; ');
           return (hold.length ? ` via ${hold.join(' and ')}` : '') + (deep ? ` — ${deep}` : '');
-        })()}. While it stays asserted the open-interval countdown is frozen, so the close is not postponed by a known amount — it is not being timed at all.`
-        : 'Not asserted at the end of the record — the open-interval timer runs normally unless this picks up later.',
+        })()}. While it holds, the open-interval countdown is frozen and the close is not being timed at all.`
+        : 'Not asserted at record end — the open-interval timer runs normally.',
     });
   }
 
@@ -623,10 +623,10 @@ function analyzeReclose(P, A) {
       equation: r.eq, evaluation: now,
       status: 'pending', pass: (now && now.definite) ? now.value : null,
       summary: now && now.value
-        ? 'Satisfied as of the last sample in this record. It is re-checked when the open interval expires, well after this record ends — if it still holds then, the close is issued.'
+        ? 'Satisfied at the last sample. Re-checked when the open interval expires; if it still holds, the close is issued.'
         : (now && now.definite
-          ? `NOT satisfied as of the last sample in this record. Until it is, the close is held even after the open interval expires. ${describeWhyFalse(now)}`
-          : 'Could not be evaluated from this record.'),
+          ? `NOT satisfied at the last sample; the close is held until it is, even after the open interval expires. ${describeWhyFalse(now)}`
+          : 'Cannot evaluate from this record.'),
       supervisionTerms: bad,
       heldBy: (now && !now.value && now.definite) ? bad.filter(l => l.known).map(l => ({ name: l.name, negated: l.negated })) : [],
     });
@@ -634,7 +634,7 @@ function analyzeReclose(P, A) {
     addGate({
       key: 'CLS', title: 'Close supervision satisfied', sel: '79CLS', what: specOf('CLS').what,
       equation: null, status: 'settled', pass: true,
-      summary: 'No close-supervision equation is configured, so the close is issued as soon as the open interval expires — there is no line-condition permissive to wait on.',
+      summary: 'No close supervision configured — the close is issued as soon as the open interval expires.',
     });
   }
 
@@ -647,8 +647,8 @@ function analyzeReclose(P, A) {
       equation: r.eq, evaluation: now,
       status: 'pending', pass: now ? !now.value : null, inverted: true,
       summary: now && now.value
-        ? `Asserted at the end of the record — while this holds, a close command is withdrawn as soon as it is issued. ${describeWhyTrue(now)}`
-        : 'Not asserted at the end of the record — nothing is currently withdrawing the close.',
+        ? `Asserted at record end — while it holds, any close is withdrawn as soon as it is issued. ${describeWhyTrue(now)}`
+        : 'Not asserted at record end — nothing is withdrawing the close.',
     });
   }
 
@@ -713,31 +713,31 @@ function analyzeReclose(P, A) {
     if (gateResults.DTL && gateResults.DTL.eq) {
       out.lockoutPaths.push({
         title: `Drive to Lockout (${gateResults.DTL.sel}) asserts`,
-        detail: `Any term of "${gateResults.DTL.eq.split('#')[0].trim()}" going true sends the recloser straight to lockout from Reset or Cycle — immediately, without waiting out an open interval.`,
+        detail: `Any term of "${gateResults.DTL.eq.split('#')[0].trim()}" going true sends the recloser straight to lockout, without waiting out an open interval.`,
       });
     }
     out.lockoutPaths.push({
       title: `Final shot used and the fault persists`,
-      detail: `After reclose attempt ${totalShots} of ${totalShots}, another trip with the shot counter already at SH${totalShots} takes the recloser to lockout. There is no attempt ${totalShots + 1}.`,
+      detail: `After attempt ${totalShots} of ${totalShots}, another trip (counter at SH${totalShots}) goes to lockout. There is no attempt ${totalShots + 1}.`,
     });
     if (out.shotsCappedByOI) {
       out.lockoutPaths.push({
         title: `Shot counter reaches SH${totalShots + 1} with 79OI${totalShots + 1} := OFF`,
-        detail: `E79 := ${sch.E79raw} nominally allows ${out.declaredShots} attempts, but 79OI${totalShots + 1} is OFF, so shot ${totalShots + 1} has no open interval to time. Anything that advances the counter to SH${totalShots + 1} — including a trip that arrives while the breaker is already open during an open interval — lands in lockout immediately rather than starting another countdown.`,
+        detail: `E79 := ${sch.E79raw} allows ${out.declaredShots} attempts, but 79OI${totalShots + 1} is OFF: anything that advances the counter to SH${totalShots + 1}, including a trip during an open interval, goes straight to lockout.`,
       });
     }
     if (sch.closeSupLimit != null) {
       out.lockoutPaths.push({
         title: `Close supervision times out (79CLSD = ${sch.closeSupLimit} s)`,
-        detail: `Once an open interval expires, the recloser waits for close supervision. If it is not satisfied within ${sch.closeSupLimit} s, the recloser gives up and goes to lockout instead of closing.`,
+        detail: `If close supervision is not satisfied within ${sch.closeSupLimit} s after the open interval expires, the recloser locks out instead of closing.`,
       });
     } else if (sch.closeSupLimitOff && gateResults.CLS && gateResults.CLS.eq) {
-      out.notes.push(`79CLSD := OFF — there is no time limit on waiting for close supervision. If the supervising condition never comes back, the recloser waits indefinitely with the breaker open rather than locking out. It will simply sit there, neither closed nor locked out.`);
+      out.notes.push(`79CLSD := OFF — no time limit on close supervision. If the condition never returns, the recloser waits open indefinitely, neither closed nor locked out.`);
     }
     if (bits.CF) {
       out.lockoutPaths.push({
         title: 'Close failure (CF)',
-        detail: 'A close command issued with no breaker-closed confirmation within the close-failure time asserts CF, which normally drives the recloser to lockout rather than retrying.',
+        detail: 'A close with no breaker-closed confirmation within the close-failure time asserts CF, which normally drives lockout.',
       });
     }
   }
@@ -759,22 +759,22 @@ function analyzeReclose(P, A) {
   const obs = out.observed;
   const atTripLabel = out.hasTrip ? 'at the trip' : 'at the start of the record';
   if (!out.hasTrip) {
-    obs.push({ k: 'Trip in this record', v: `none — ${out.tripLabel || 'the trip bit'} never asserts. The 79 states below are carried in from a previous record, not produced by this one.` });
+    obs.push({ k: 'Trip in this record', v: `none — ${out.tripLabel || 'the trip bit'} never asserts. The 79 states below are carried in from an earlier record.` });
     if (out.recordTrigger && out.recordTrigger.term) {
-      obs.push({ k: 'Record triggered by', v: `${rcGloss(P, out.recordTrigger.term)} — a term of the ER equation, ${out.recordTrigger.msAfterStart != null ? `asserting ${out.recordTrigger.msAfterStart.toFixed(0)} ms into the record` : 'asserted in this record'}. That makes it ${rcTriggerKindText(out.recordTrigger.term).replace(/^a /, 'a ')}` });
+      obs.push({ k: 'Record triggered by', v: `${rcGloss(P, out.recordTrigger.term)} (ER term${out.recordTrigger.msAfterStart != null ? `, ${out.recordTrigger.msAfterStart.toFixed(0)} ms into the record` : ''}): ${rcTriggerKindText(out.recordTrigger.term).replace(/^a /, 'a ')}` });
     }
   }
-  if (out.shotAtTrip != null) obs.push({ k: `Shot counter ${atTripLabel}`, v: `SH${out.shotAtTrip}${out.shotAtTrip === 0 ? ' — in reset, no reclose attempts used yet' : ` — ${out.shotAtTrip} reclose attempt${out.shotAtTrip === 1 ? '' : 's'} already used`}` });
-  if (out.shotAtEnd != null && out.shotAtEnd !== out.shotAtTrip) obs.push({ k: 'Shot counter at end of record', v: `SH${out.shotAtEnd} — the counter advanced during this record` });
+  if (out.shotAtTrip != null) obs.push({ k: `Shot counter ${atTripLabel}`, v: `SH${out.shotAtTrip}${out.shotAtTrip === 0 ? ' — in reset, no attempts used' : ` — ${out.shotAtTrip} attempt${out.shotAtTrip === 1 ? '' : 's'} already used`}` });
+  if (out.shotAtEnd != null && out.shotAtEnd !== out.shotAtTrip) obs.push({ k: 'Shot counter at end of record', v: `SH${out.shotAtEnd} — advanced during this record` });
   if (out.inLockoutAtTrip != null) obs.push({ k: `${bits.LO} ${atTripLabel}`, v: out.inLockoutAtTrip ? (out.hasTrip ? 'ASSERTED — already locked out before this trip' : 'ASSERTED — carried in already locked out') : 'not asserted' });
-  if (out.lockoutCausedByThisTrip) obs.push({ k: `${bits.LO} after the trip`, v: `ASSERTED on the trip's own digital sample — this trip is what took the recloser to lockout. It was ${out.cyclingAtTrip ? 'mid-reclose-cycle' : 'not in lockout'} immediately before.` });
-  else if (out.lockoutAssertedAfterTrip) obs.push({ k: `${bits.LO} after the trip`, v: 'ASSERTED — the recloser went to lockout within this record' });
+  if (out.lockoutCausedByThisTrip) obs.push({ k: `${bits.LO} after the trip`, v: `ASSERTED on the trip's own sample — this trip caused the lockout (${out.cyclingAtTrip ? 'mid-reclose-cycle' : 'not in lockout'} just before).` });
+  else if (out.lockoutAssertedAfterTrip) obs.push({ k: `${bits.LO} after the trip`, v: 'ASSERTED — went to lockout in this record' });
   if (out.cycleStartedAfterTrip) obs.push({ k: `${bits.CY} after the trip`, v: out.lockoutAssertedAfterTrip
-    ? 'ASSERTED — a reclose cycle did start, then collapsed to lockout inside this same record before any open interval could run'
-    : 'ASSERTED — a reclose cycle started within this record; the open-interval timer is running' });
-  else if (bits.CY && out.cyclingAtEnd) obs.push({ k: `${bits.CY} at end of record`, v: 'ASSERTED — a reclose cycle is in progress' });
-  if (out.closedInRecord) obs.push({ k: `${bits.CLOSE} after the trip`, v: 'ASSERTED — a close command was actually issued inside this record' });
-  else if (bits.CLOSE) obs.push({ k: `${bits.CLOSE} in this record`, v: `never asserts${bits.RCSF ? ` (nor does ${bits.RCSF})` : ''} — no close was issued or attempted anywhere in this record. Useful as negative evidence: a record that looks like a reclose is not one unless this bit moves.` });
+    ? 'ASSERTED — a reclose cycle started, then went to lockout in this same record'
+    : 'ASSERTED — reclose cycle started; open-interval timer running' });
+  else if (bits.CY && out.cyclingAtEnd) obs.push({ k: `${bits.CY} at end of record`, v: 'ASSERTED — reclose cycle in progress' });
+  if (out.closedInRecord) obs.push({ k: `${bits.CLOSE} after the trip`, v: 'ASSERTED — a close was issued in this record' });
+  else if (bits.CLOSE) obs.push({ k: `${bits.CLOSE} in this record`, v: `never asserts${bits.RCSF ? ` (nor does ${bits.RCSF})` : ''} — no close was issued or attempted in this record.` });
   if (out.closeFailInRecord) obs.push({ k: `${bits.CF} after the trip`, v: 'ASSERTED — close failure' });
   if (bits.BKR) obs.push({ k: `${bits.BKR} at end of record`, v: stateAt(bits.BKR, endIdx).state ? 'closed' : 'open' });
 
@@ -936,11 +936,11 @@ function rcIdentifyRecordTrigger(P, hasTrip) {
 // "supervision/status term" — calling CC that sent readers looking for a status change when
 // the record was a close attempt.
 function rcTriggerKindText(term) {
-  if (/^CC\d?$/.test(term || '')) return 'a close command from a communications port, not a trip. This record is a close attempt; see the Close Attempt card in the Diagnostics tab.';
-  if (/^CF(3P)?$/.test(term || '')) return 'a close failure: a close request timed out with no breaker-closed confirmation. See the Close Attempt card in the Diagnostics tab.';
-  if (/^(CL|CLOSE)(3P)?$/.test(term || '')) return 'the close logic, not a trip. This record is a close attempt; see the Close Attempt card in the Diagnostics tab.';
-  if (/^OC\d?$/.test(term || '')) return 'an open command from a communications port.';
-  return 'a supervision/status term, not a trip and not a close.';
+  if (/^CC\d?$/.test(term || '')) return 'a remote close command, not a trip. See the Close Attempt card in the Diagnostics tab.';
+  if (/^CF(3P)?$/.test(term || '')) return 'a close failure (close request timed out with no breaker-closed confirmation). See the Close Attempt card in the Diagnostics tab.';
+  if (/^(CL|CLOSE)(3P)?$/.test(term || '')) return 'the close logic, not a trip. See the Close Attempt card in the Diagnostics tab.';
+  if (/^OC\d?$/.test(term || '')) return 'a remote open command.';
+  return 'a supervision/status term, not a trip or a close.';
 }
 
 // The site's own words for an SV, when they wrote any — "SV06T" means nothing to a reader,
@@ -969,7 +969,7 @@ function describeWhyFalse(res) {
     return `Held down by ${bad.map(l => `${l.negated ? 'NOT ' : ''}${l.name}${l.negated ? ' (it IS asserted)' : ' (not asserted)'}`).join(' and ')}.`;
   }
   // For an OR of branches, none of them is true — say so compactly.
-  return `None of its ${res.branches.length} alternative terms is satisfied.`;
+  return `None of its ${res.branches.length} alternatives is satisfied.`;
 }
 
 function describeWhyTrue(res) {
@@ -1025,12 +1025,12 @@ function buildRecloseVerdict(out, gr, sch, P, A) {
       return V('disabled', cc.verdict.tone || 'bad', cc.verdict.headline, cc.verdict.detail, { custom: true });
     }
     return V('disabled', 'bad', 'Will NOT auto-close — reclosing is disabled',
-      `The reclosing element is switched off on this device (E79 := ${sch.E79raw}). No automatic close will be attempted after this trip, or after any trip. The recloser stays open until somebody closes it — front-panel pushbutton, SCADA, or a field visit.`);
+      `Reclosing is off (E79 := ${sch.E79raw}). The recloser stays open until someone closes it (pushbutton, SCADA, or site visit).`);
   }
 
   const recoveryNote = sch.resetFromLockoutDelay != null
-    ? ` Automatic reclosing does not resume until the device is closed manually and stays closed for ${formatDuration(sch.resetFromLockoutDelay)} (79RSLD).`
-    : ' Automatic reclosing does not resume until the device is closed manually.';
+    ? ` Auto-reclosing resumes only after a manual close that stays closed for ${formatDuration(sch.resetFromLockoutDelay)} (79RSLD).`
+    : ' Auto-reclosing resumes only after a manual close.';
 
   // No trip in this record at all. Everything the 79 element is doing here was decided by an
   // EARLIER record, and the gates below — all of which are phrased around "this trip" — are
@@ -1039,39 +1039,39 @@ function buildRecloseVerdict(out, gr, sch, P, A) {
   if (out.hasTrip === false) {
     const trg = out.recordTrigger;
     const why = trg && trg.term
-      ? ` This record was triggered by ${rcGloss(P, trg.term)} out of the ER equation${trg.msAfterStart != null ? `, ${trg.msAfterStart.toFixed(0)} ms in` : ''} — ${rcTriggerKindText(trg.term)}`
+      ? ` Record triggered by ${rcGloss(P, trg.term)} (ER${trg.msAfterStart != null ? `, ${trg.msAfterStart.toFixed(0)} ms in` : ''}): ${rcTriggerKindText(trg.term)}`
       : '';
     const closeNote = out.bits.CLOSE && !out.closedInRecord
-      ? ` ${out.bits.CLOSE} never asserts anywhere in this record, so no close was issued or attempted here.`
+      ? ` ${out.bits.CLOSE} never asserts; no close was attempted here.`
       : '';
     if (out.inLockoutAtEnd) {
-      return V('carried-lockout', 'bad', 'No trip in this record — the recloser is in lockout, carried in from an earlier event',
-        `${out.bits.LO} is asserted for the whole record and nothing in this file changes it.${recoveryNote}${why}${closeNote}`);
+      return V('carried-lockout', 'bad', 'No trip in this record — recloser in lockout from an earlier event',
+        `${out.bits.LO} is on for the whole record.${recoveryNote}${why}${closeNote}`);
     }
     if (out.cyclingAtEnd) {
       const stallNote = out.stalledAtEnd && out.stallHoldersDurable.length
-        ? ` The open-interval timer is stalled: ${out.gates.find(g => g.key === 'STL')?.sel || '79STL'} is held up by ${out.stallHoldersDurable.map(h => `${h.negated ? 'NOT ' : ''}${rcGloss(P, h.name)}`).join(' and ')}, so the countdown to the close is frozen rather than running.`
+        ? ` Open-interval timer stalled: ${out.gates.find(g => g.key === 'STL')?.sel || '79STL'} held by ${out.stallHoldersDurable.map(h => `${h.negated ? 'NOT ' : ''}${rcGloss(P, h.name)}`).join(' and ')}, so the countdown is frozen.`
         : '';
-      return V('carried-cycle', 'warn', 'No trip in this record — a reclose cycle started by an earlier event is still running',
-        `${out.bits.CY} is asserted throughout, with the shot counter at SH${out.shotAtEnd != null ? out.shotAtEnd : out.shotAtTrip}. The sequence was initiated before this record begins, so nothing here starts or stops it.${stallNote}${why}${closeNote}`);
+      return V('carried-cycle', 'warn', 'No trip in this record — reclose cycle from an earlier event still running',
+        `${out.bits.CY} on throughout, shot counter at SH${out.shotAtEnd != null ? out.shotAtEnd : out.shotAtTrip}; the sequence started before this record.${stallNote}${why}${closeNote}`);
     }
     return V('carried-state', 'unknown', 'No trip in this record — nothing here starts or ends a reclose sequence',
-      `${out.tripLabel || 'The trip bit'} never asserts in this file, so the 79 states shown are carried in from a previous event.${why}${closeNote}`);
+      `${out.tripLabel || 'The trip bit'} never asserts; the 79 states shown are carried in from an earlier event.${why}${closeNote}`);
   }
 
   if (out.inLockoutAtTrip) {
     return V('already-lockout', 'bad', 'Will NOT auto-close — already in lockout before this trip',
-      `${out.bits.LO} was already asserted on the digital sample before this trip, so the recloser was in lockout going in.${recoveryNote}`);
+      `${out.bits.LO} was already on before this trip.${recoveryNote}`);
   }
 
   const recovery = sch.resetFromLockoutDelay != null
-    ? ` Once it is closed manually, the breaker has to stay closed for ${formatDuration(sch.resetFromLockoutDelay)} (79RSLD) before automatic reclosing is armed again.`
+    ? ` After a manual close, the breaker must stay closed ${formatDuration(sch.resetFromLockoutDelay)} (79RSLD) before auto-reclosing re-arms.`
     : '';
 
   const dtl = out.gates.find(g => g.key === 'DTL');
   if (dtl && dtl.status === 'blocked') {
     return V('lockout', 'bad', 'Will NOT auto-close — this trip drives it to lockout',
-      `${dtl.summary} The breaker stays open until it is closed manually.${recovery}`);
+      `${dtl.summary} Breaker stays open until closed manually.${recovery}`);
   }
 
   if (out.lockoutAssertedAfterTrip) {
@@ -1084,24 +1084,24 @@ function buildRecloseVerdict(out, gr, sch, P, A) {
     const bkrWasOpen = out.breakerOpenBeforeTrip === true;
     let mechanism = '';
     if (advanced && dtl && dtl.status !== 'blocked') {
-      mechanism = ` The shot counter stepped SH${out.shotAtTrip} → SH${out.shotAtEnd} on the same event without any close being issued`
-        + (bkrWasOpen ? ', because the trip arrived while the interrupter was already open — mid open interval, so there was no close for the counter to be counting' : '')
+      mechanism = ` Shot counter stepped SH${out.shotAtTrip} → SH${out.shotAtEnd} with no close issued`
+        + (bkrWasOpen ? ' (the trip came mid open interval, with the interrupter already open)' : '')
         + '. '
         + (out.shotsCappedByOI
-          ? `With 79OI${out.shotAtEnd + 1} := OFF there is no open interval for shot ${out.shotAtEnd + 1} to time, so the step lands directly in lockout. ${out.gates.find(g => g.key === 'DTL')?.sel || '79DTL'} did not assert — this is the sequence running out, not a drive-to-lockout.`
-          : `${out.gates.find(g => g.key === 'DTL')?.sel || '79DTL'} did not assert, so this is the sequence advancing to its end rather than a drive-to-lockout.`);
+          ? `With 79OI${out.shotAtEnd + 1} := OFF that step lands in lockout; ${out.gates.find(g => g.key === 'DTL')?.sel || '79DTL'} did not assert — the sequence ran out.`
+          : `${out.gates.find(g => g.key === 'DTL')?.sel || '79DTL'} did not assert — the sequence reached its end.`);
     }
     return V('lockout', 'bad',
       out.lockoutCausedByThisTrip
         ? 'Will NOT auto-close — this trip took the recloser to lockout'
         : 'Will NOT auto-close — the recloser went to lockout in this record',
-      `${out.bits.LO} asserts ${out.lockoutCausedByThisTrip ? 'on the trip’s own digital sample' : 'after the trip'} inside this record${out.cyclingAtTrip ? `, out of an in-progress reclose cycle (${out.bits.CY} was asserted going in)` : ''}.${mechanism} Whatever the settings allow in principle, this particular event ended in lockout.${recovery}`);
+      `${out.bits.LO} asserts ${out.lockoutCausedByThisTrip ? 'on the trip’s own sample' : 'after the trip'}${out.cyclingAtTrip ? `, out of a running reclose cycle (${out.bits.CY} was on)` : ''}.${mechanism}${recovery}`);
   }
 
   const ri = out.gates.find(g => g.key === 'RI');
   if (ri && ri.status === 'blocked') {
     return V('no-initiate', 'bad', 'Will NOT auto-close — this trip does not initiate a reclose',
-      `${ri.summary} The reclose element stays in Reset with the breaker open; it is not counting toward a close.`);
+      `${ri.summary} The 79 stays in Reset with the breaker open; no close is being timed.`);
   }
   const ris = out.gates.find(g => g.key === 'RIS');
   if (ris && ris.status === 'blocked') {
@@ -1111,7 +1111,7 @@ function buildRecloseVerdict(out, gr, sch, P, A) {
 
   if (out.attemptsRemaining === 0 && out.shotKnown && out.shots) {
     return V('exhausted', 'bad', 'Will NOT auto-close — all reclose attempts already used',
-      `The shot counter was already at SH${out.shotAtTrip} of ${out.shots} when this trip occurred, so there is no attempt left in the sequence. This trip takes the recloser to lockout.`);
+      `Shot counter was already at SH${out.shotAtTrip} of ${out.shots} at this trip; no attempts left, so this trip locks out.`);
   }
 
   // The open-interval timer is frozen. Everything downstream — the shot schedule, the clock
@@ -1126,23 +1126,23 @@ function buildRecloseVerdict(out, gr, sch, P, A) {
       .map(h => rcResolveTermText(P, A, h.name, out.endIdx))
       .filter(Boolean).join('; ');
     const oi = out.plan[0];
-    return V('stalled', 'warn', 'Will NOT auto-close on schedule — the open-interval timer is stalled',
-      `${stl ? stl.sel : '79STL'} is asserted at the end of the record via ${holders}, which freezes the open-interval countdown. `
+    return V('stalled', 'warn', 'Will NOT auto-close on schedule — open-interval timer is stalled',
+      `${stl ? stl.sel : '79STL'} is on at record end via ${holders}, freezing the open-interval countdown. `
       + (oi && oi.openIntervalSec != null
-        ? `${oi.setting} = ${formatDuration(oi.openIntervalSec)}, but that clock is not running — the close is not "due" at any particular time, and no wall-clock estimate is quoted for it. `
+        ? `${oi.setting} = ${formatDuration(oi.openIntervalSec)}, but that timer is not running, so no close time is estimated. `
         : '')
-      + (resolved ? `What is holding it: ${resolved}. ` : '')
-      + `The recloser sits in ${out.bits.CY || '79CY'} with the interrupter open for as long as this holds`
-      + (sch.closeSupLimitOff ? ' — and with 79CLSD := OFF there is no time limit that would eventually convert the wait into a lockout.' : '.')
+      + (resolved ? `Holding it: ${resolved}. ` : '')
+      + `The recloser waits in ${out.bits.CY || '79CY'}, open, while this holds`
+      + (sch.closeSupLimitOff ? ' (79CLSD := OFF, so no time limit forces lockout).' : '.')
       + (out.stallHoldersDurable.length && out.recordTrigger && out.recordTrigger.isTrip
-        ? ' If the same condition also caused the trip, expect the stall to persist as long as the trip cause does.' : ''));
+        ? ' If the same condition caused the trip, expect the stall to last as long as it does.' : ''));
   }
 
   // From here the sequence is running. The only question left is what the close waits on.
   const cls = out.gates.find(g => g.key === 'CLS');
   const next = out.plan[0];
   const whenText = next
-    ? `Attempt ${next.shot} of ${out.shots} is due ${next.openIntervalSec != null ? `${formatDuration(next.openIntervalSec)} after the trip${next.clock ? ` — about ${next.clock}` : ''}` : 'after its open interval'} (${next.setting}).`
+    ? `Attempt ${next.shot} of ${out.shots} due ${next.openIntervalSec != null ? `${formatDuration(next.openIntervalSec)} after the trip${next.clock ? ` (~${next.clock})` : ''}` : 'after its open interval'} (${next.setting}).`
     : '';
   const remainText = out.attemptsRemaining
     ? `${out.attemptsRemaining} attempt${out.attemptsRemaining === 1 ? '' : 's'} remaining of ${out.shots}.`
@@ -1153,22 +1153,22 @@ function buildRecloseVerdict(out, gr, sch, P, A) {
       .map(l => rcResolveTermText(P, A, l.name, out.endIdx))
       .filter(Boolean).join('; ');
     const held = (cls.heldBy || []).length
-      ? ` It is currently held down by ${cls.heldBy.map(l => `${l.negated ? 'NOT ' : ''}${rcGloss(P, l.name)}`).join(' and ')}.${resolvedHold ? ` Underneath that: ${resolvedHold}.` : ''}`
+      ? ` Held by ${cls.heldBy.map(l => `${l.negated ? 'NOT ' : ''}${rcGloss(P, l.name)}`).join(' and ')}.${resolvedHold ? ` Underneath: ${resolvedHold}.` : ''}`
       : '';
-    return V('armed-held', 'warn', 'Will attempt to auto-close — but the close is currently held by supervision',
-      `${whenText} ${remainText} Close supervision (${cls.sel}) was not satisfied when this record ended, and the close is not issued until it is — the open interval expiring is not enough on its own.${held} Whether the close actually goes out depends on line conditions after this record, which it cannot see.`);
+    return V('armed-held', 'warn', 'Will attempt to auto-close — close currently held by supervision',
+      `${whenText} ${remainText} Close supervision (${cls.sel}) was not met at record end; the close waits for it after the open interval.${held}`);
   }
   if (cls && cls.pass === true && cls.equation) {
     return V('armed', 'ok', 'Will auto-close',
-      `${whenText} ${remainText} Close supervision (${cls.sel}) was satisfied at the end of this record; assuming line conditions hold, the close goes out when the open interval expires.`);
+      `${whenText} ${remainText} Close supervision (${cls.sel}) was met at record end; if it holds, the close goes out when the open interval expires.`);
   }
   if (cls && cls.pass === true && !cls.equation) {
     return V('armed', 'ok', 'Will auto-close',
-      `${whenText} ${remainText} No close-supervision permissive is configured, so the close is issued the moment the open interval expires — there is no line condition for it to wait on.`);
+      `${whenText} ${remainText} No close supervision configured; the close goes out when the open interval expires.`);
   }
   if (out.enabled === true) {
     return V('armed', 'ok', 'Will auto-close',
-      `${whenText} ${remainText} No close-supervision permissive stands in the way.`);
+      `${whenText} ${remainText} No close supervision in the way.`);
   }
   // No usable 79 block. If the close equation still shows a way in, report that instead of a
   // blank "could not be determined" — the reader's question is "does it come back", and the
@@ -1177,7 +1177,7 @@ function buildRecloseVerdict(out, gr, sch, P, A) {
     return V(out.custom.verdict.kind, out.custom.verdict.tone, out.custom.verdict.headline, out.custom.verdict.detail, { custom: true });
   }
   return V('unknown', 'unknown', 'Reclose behaviour could not be determined',
-    'This file does not carry enough of the reclosing settings block to say what the recloser will do next.');
+    'Not enough reclosing settings in this file to say what happens next.');
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -1215,7 +1215,7 @@ function rcLeafChip(leaf, P) {
   const bg = !leaf.known ? 'transparent' : (good ? 'var(--green-dim)' : 'var(--red-dim)');
   const mark = !leaf.known ? '?' : (good ? '✓' : '✕');
   const stateWord = !leaf.known ? 'not in this record' : (leaf.state ? 'asserted' : 'not asserted');
-  return `<span title="${escapeAttr(`${leaf.name} is ${stateWord}${leaf.negated ? ' — and this term uses NOT, so it needs the bit LOW' : ''}`)}"
+  return `<span title="${escapeAttr(`${leaf.name} is ${stateWord}${leaf.negated ? ' (NOT: needs it off)' : ''}`)}"
     style="display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:4px;font-family:var(--mono);font-size:11px;color:${color};background:${bg};border:1px solid ${color}33;margin:2px 4px 2px 0;">
     ${leaf.negated ? '<span style="opacity:0.75">NOT</span> ' : ''}${leaf.name} <span style="font-weight:700">${mark}</span></span>`;
 }
@@ -1255,21 +1255,21 @@ function buildReclosePlanTable(RC, P) {
   const live = RC.planIsLive;
   return `<div class="card ${live ? 'blue-accent' : ''}"><div class="card-header">📅 ${live ? 'Reclose Sequence — What Happens Next' : 'Reclose Sequence as Configured — Not Running for This Event'}</div>
     ${live ? '' : `<div style="background:var(--red-dim);border:1px solid #5c1414;border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:var(--text-dim);line-height:1.55;">
-      <b style="color:var(--red)">None of the attempts below will be made for this trip.</b> ${RC.verdict.headline.replace(/^Will NOT auto-close — /, 'Reason: ')}. The schedule is shown because it is what this device would do on a trip that <em>does</em> initiate a reclose — useful for judging whether the block was the right outcome.
+      <b style="color:var(--red)">None of the attempts below will be made for this trip.</b> ${RC.verdict.headline.replace(/^Will NOT auto-close — /, 'Reason: ')}. Shown for reference: what this device does on a trip that initiates a reclose.
     </div>`}
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;line-height:1.6;">
       ${RC.shotKnown
-        ? `The shot counter was at <b style="color:var(--text)">SH${RC.shotAtTrip}</b> when this trip occurred, so the sequence resumes at attempt ${RC.startShot + 1}.`
-        : `No shot-counter bit (SH0…SH4) is carried in this record, so the sequence below is shown from the start — if the recloser had already used attempts before this trip, the remaining count is smaller than shown.`}
-      "Time after trip" is cumulative and assumes the worst case: every close is followed immediately by another trip, so the intervals stack. If any close holds, the sequence stops there and the reset timer takes over.
+        ? `Shot counter was at <b style="color:var(--text)">SH${RC.shotAtTrip}</b> at this trip; the sequence resumes at attempt ${RC.startShot + 1}.`
+        : `No shot-counter bits (SH0…SH4) in this record; shown from attempt 1, so fewer attempts may remain.`}
+      "Time after trip" assumes every close re-trips (worst case).
     </p>
     <div class="table-scroll"><table class="data-table"><thead><tr>
       <th>Attempt</th><th>Setting</th><th>Open interval</th><th>Time after trip</th><th>Approx. clock</th><th>Close is…</th>
     </tr></thead><tbody>${rows}</tbody></table></div>
     <div style="margin-top:10px;padding:10px 12px;background:var(--red-dim);border:1px solid #5c1414;border-radius:6px;font-size:12px;color:var(--text-dim);line-height:1.55;">
-      <b style="color:var(--red)">After attempt ${RC.shots}:</b> if the fault is still there and the device trips again, the shot counter is exhausted and the recloser goes to <b style="color:var(--red)">lockout</b> — it stays open until somebody closes it.
+      <b style="color:var(--red)">After attempt ${RC.shots}:</b> another trip goes to <b style="color:var(--red)">lockout</b>; it stays open until someone closes it.
     </div>
-    ${RC.tripClockMs != null ? `<div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Clock times are derived from this record's own timestamp plus the open intervals, so they're approximate — anything that stalls the open-interval timer or holds close supervision pushes them later.</div>` : ''}
+    ${RC.tripClockMs != null ? `<div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Clock times are approximate; a stall or held supervision pushes them later.</div>` : ''}
   </div>`;
 }
 
@@ -1281,10 +1281,10 @@ function buildRecloseSchemeCard(RC, P) {
     if (v == null) return;
     rows.push([`79OI${i + 1}`, typeof v === 'number' ? formatDuration(v) : String(v), `Open interval before reclose attempt ${i + 1}`]);
   });
-  if (sch.resetDelay != null) rows.push(['79RSD', formatDuration(sch.resetDelay), 'Reset time from Cycle — how long the breaker must stay closed after a reclose before the shot counter clears back to zero']);
-  if (sch.resetFromLockoutDelay != null) rows.push(['79RSLD', formatDuration(sch.resetFromLockoutDelay), 'Reset time from Lockout — how long the breaker must stay closed after a manual close before automatic reclosing is armed again']);
-  if (sch.closeSupLimitOff) rows.push(['79CLSD', 'OFF', 'Close supervision limit — OFF, so the recloser waits indefinitely for close supervision instead of locking out']);
-  else if (sch.closeSupLimit != null) rows.push(['79CLSD', formatDuration(sch.closeSupLimit), 'Close supervision limit — if supervision is not satisfied within this time after the open interval expires, the recloser goes to lockout']);
+  if (sch.resetDelay != null) rows.push(['79RSD', formatDuration(sch.resetDelay), 'Reset from Cycle — time closed after a reclose before the shot counter clears']);
+  if (sch.resetFromLockoutDelay != null) rows.push(['79RSLD', formatDuration(sch.resetFromLockoutDelay), 'Reset from Lockout — time closed after a manual close before auto-reclosing re-arms']);
+  if (sch.closeSupLimitOff) rows.push(['79CLSD', 'OFF', 'Close supervision limit — OFF: waits indefinitely instead of locking out']);
+  else if (sch.closeSupLimit != null) rows.push(['79CLSD', formatDuration(sch.closeSupLimit), 'Close supervision limit — not satisfied within this time after the open interval means lockout']);
 
   const eqRows = RECLOSE_EQ_SPECS.filter(s => sch.eq && sch.eq[s.key]).map(s => `<tr>
       <td style="font-family:var(--mono);color:var(--accent);white-space:nowrap;vertical-align:top;">${sch.eqName[s.key]}</td>
@@ -1295,7 +1295,7 @@ function buildRecloseSchemeCard(RC, P) {
       </td></tr>`).join('');
 
   return `<div class="card"><div class="card-header">⚙️ Reclosing Scheme as Configured</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">Decoded from this file's own settings block — the complete ANSI 79 configuration on this device, independent of what happened in this particular event.</p>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">ANSI 79 settings from this file, independent of this event.</p>
     ${rows.length ? `<table class="data-table"><thead><tr><th>Setting</th><th>Value</th><th>What it controls</th></tr></thead><tbody>
       ${rows.map(([k, v, d]) => `<tr><td style="color:var(--accent);font-family:var(--mono);white-space:nowrap;">${k}</td><td style="white-space:nowrap;font-weight:600;">${v}</td><td style="font-family:var(--sans);color:var(--text-dim)">${d}</td></tr>`).join('')}
     </tbody></table>` : '<p style="color:var(--text-dim);font-size:12.5px;">No numeric 79 settings found in this file.</p>'}
@@ -1315,9 +1315,9 @@ function buildRecloseEndCard(RC, P) {
         <div style="font-size:12px;color:var(--text-dim);line-height:1.55;">${p.detail}</div></div>`).join('')}` : ''}
     ${hasReset ? `<div style="font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--green);margin:16px 0 8px;">Returning to normal</div>
       <div style="background:var(--green-dim);border:1px solid #0a3d2a;border-radius:6px;padding:10px 12px;font-size:12px;color:var(--text-dim);line-height:1.6;">
-        ${reset.fromCycleSec != null ? `<div><b style="color:var(--green)">After a successful reclose:</b> the breaker must stay closed for <b style="color:var(--text)">${formatDuration(reset.fromCycleSec)}</b> (79RSD) before the shot counter clears back to SH0 and the full set of attempts is available again. A trip inside that window continues the same sequence at the next shot instead of starting over.</div>` : ''}
-        ${reset.fromLockoutSec != null ? `<div style="margin-top:7px;"><b style="color:var(--green)">After a manual close out of lockout:</b> the breaker must stay closed for <b style="color:var(--text)">${formatDuration(reset.fromLockoutSec)}</b> (79RSLD) before automatic reclosing is armed again.</div>` : ''}
-        ${reset.blockedBy ? `<div style="margin-top:7px;"><b style="color:var(--yellow)">Reset can be held off:</b> <span style="font-family:var(--mono)">${reset.blockedBy.sel}</span> := <span style="font-family:var(--mono)">${reset.blockedBy.eq.split('#')[0].trim()}</span> blocks the reset timer while asserted, keeping the shot counter where it is.</div>` : ''}
+        ${reset.fromCycleSec != null ? `<div><b style="color:var(--green)">After a successful reclose:</b> the breaker must stay closed for <b style="color:var(--text)">${formatDuration(reset.fromCycleSec)}</b> (79RSD) before the shot counter clears to SH0. A trip inside that window continues the same sequence.</div>` : ''}
+        ${reset.fromLockoutSec != null ? `<div style="margin-top:7px;"><b style="color:var(--green)">After a manual close out of lockout:</b> the breaker must stay closed for <b style="color:var(--text)">${formatDuration(reset.fromLockoutSec)}</b> (79RSLD) before auto-reclosing re-arms.</div>` : ''}
+        ${reset.blockedBy ? `<div style="margin-top:7px;"><b style="color:var(--yellow)">Reset can be held off:</b> <span style="font-family:var(--mono)">${reset.blockedBy.sel}</span> := <span style="font-family:var(--mono)">${reset.blockedBy.eq.split('#')[0].trim()}</span> blocks the reset timer while true.</div>` : ''}
       </div>` : ''}
     ${RC.notes.length ? RC.notes.map(n => `<div style="margin-top:12px;padding:10px 12px;background:var(--yellow-dim);border:1px solid #5c4506;border-radius:6px;font-size:12px;color:var(--text-dim);line-height:1.55;">${n}</div>`).join('') : ''}
   </div>`;
@@ -1326,12 +1326,11 @@ function buildRecloseEndCard(RC, P) {
 function buildRecloseObservedCard(RC, P) {
   if (!RC.observed.length) return '';
   return `<div class="card"><div class="card-header">👁️ What This Record Actually Shows</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">The 79 relay-word bits as recorded — the device's own account of where it was in the sequence, as distinct from what the settings say it should do.</p>
     <table class="data-table"><tbody>
       ${RC.observed.map(o => `<tr><td style="font-weight:600;color:var(--text);white-space:nowrap;font-family:var(--mono);font-size:11.5px;">${o.k}</td><td>${o.v}</td></tr>`).join('')}
     </tbody></table>
     <div style="margin-top:10px;font-size:11px;color:var(--text-muted);line-height:1.5;">
-      This record covers ${(RC.recordEndMsAfterTrip / 1000).toFixed(2)} s after the trip. Open intervals on this device are measured in tens to hundreds of seconds, so the close itself happens long after the last sample here — the sequence above is projected from the settings, not observed.
+      Record covers ${(RC.recordEndMsAfterTrip / 1000).toFixed(2)} s after the trip; the close comes later, so the sequence above is projected from settings, not observed.
     </div>
   </div>`;
 }
@@ -1371,14 +1370,11 @@ function buildRecloseTabHTML(P, A) {
   </div>`;
 
   const gateCard = RC.gates.length ? `<div class="card red-accent"><div class="card-header">✅ Conditions That Decide the Auto-Close</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:6px;line-height:1.6;">
-      Every gate the relay's own reclose logic puts between this trip and a close command, evaluated against the digital states in this record.
-    </p>
     <div class="tab-legend" style="margin-bottom:12px;">
-      <span>${rcStatusPill('settled')} decided by this record — condition satisfied</span>
-      <span>${rcStatusPill('blocked')} decided by this record — this is what stops the close</span>
-      <span>${rcStatusPill('pending')} checked after the record ends; the state shown is an indication, not the answer</span>
-      <span>${rcStatusPill('unknown')} references bits this file doesn't carry</span>
+      <span>${rcStatusPill('settled')} satisfied</span>
+      <span>${rcStatusPill('blocked')} stops the close</span>
+      <span>${rcStatusPill('pending')} checked after the record ends; state shown is an indication</span>
+      <span>${rcStatusPill('unknown')} uses bits not in this file</span>
     </div>
     <table class="data-table"><tbody>${buildRecloseGateRows(RC, P)}</tbody></table>
   </div>` : '';
@@ -1469,8 +1465,8 @@ function buildRecloseSequenceCard() {
       if (sorted[i] - sorted[i - 1] > 1) gaps.push([sorted[i - 1], sorted[i]]);
     }
     continuityNote = gaps.length
-      ? `<div class="evt-pattern-note" style="border-left-color:var(--warn,#d79b28);">⚠ Event numbers are <b>not</b> consecutive: ${gaps.map(([a, b]) => `${b - a - 1} record${b - a - 1 === 1 ? '' : 's'} missing between ${a} and ${b}`).join('; ')}. Anything that happened in those gaps — including a close — is not represented here, so absence of evidence is not evidence of absence.</div>`
-      : `<div class="evt-pattern-note">✔ Event numbers ${sorted[0]}–${sorted[sorted.length - 1]} are <b>consecutive with no gaps</b>. The relay generated no other event report in this window, so nothing is missing from the download: where these records show nothing happening, nothing happened.</div>`;
+      ? `<div class="evt-pattern-note" style="border-left-color:var(--warn,#d79b28);">⚠ Event numbers are <b>not</b> consecutive: ${gaps.map(([a, b]) => `${b - a - 1} record${b - a - 1 === 1 ? '' : 's'} missing between ${a} and ${b}`).join('; ')}. Anything in those gaps, including a close, is not shown here.</div>`
+      : `<div class="evt-pattern-note">✔ Event numbers ${sorted[0]}–${sorted[sorted.length - 1]} are <b>consecutive</b>: nothing is missing, so where these records show nothing, nothing happened.</div>`;
   }
 
   // ── Did the close that was due actually arrive? ──
@@ -1481,10 +1477,10 @@ function buildRecloseSequenceCard() {
     const gapMs = (a.ms != null && b.ms != null) ? b.ms - a.ms : null;
     const oi = a.openInterval;
     if (a.stalled) {
-      reconcile.push(`Record <b>${a.ref}</b> ends mid-reclose-cycle with its open-interval timer <b>stalled</b>, so its ${oi != null ? formatDuration(oi) + ' ' : ''}interval never begins counting. The next record (<b>${b.ref}</b>, ${rcFmtGap(gapMs)} later) shows ${b.closed ? 'a close command' : `no close — ${b.RC.bits && b.RC.bits.CLOSE ? b.RC.bits.CLOSE : 'CLOSE'} never asserts`}, which is what a stalled interval predicts.`);
+      reconcile.push(`Record <b>${a.ref}</b> ends mid-cycle with the open-interval timer <b>stalled</b> (${oi != null ? formatDuration(oi) + ' ' : ''}interval never starts). Next record (<b>${b.ref}</b>, ${rcFmtGap(gapMs)} later) shows ${b.closed ? 'a close command' : `no close — ${b.RC.bits && b.RC.bits.CLOSE ? b.RC.bits.CLOSE : 'CLOSE'} never asserts`}, as a stall predicts.`);
     } else if (oi != null && gapMs != null) {
       const due = gapMs >= oi * 1000;
-      reconcile.push(`Record <b>${a.ref}</b> ends mid-reclose-cycle with ${formatDuration(oi)} to run. The next record is ${rcFmtGap(gapMs)} later — ${due ? 'past' : 'before'} the close was due — and ${b.closed ? 'does show a close command' : 'shows no close command'}.${due && !b.closed ? ' A close that was due and did not appear is the thing to chase: either something held the open interval or the close supervision, or a record is missing.' : ''}`);
+      reconcile.push(`Record <b>${a.ref}</b> ends mid-cycle with ${formatDuration(oi)} to run. Next record is ${rcFmtGap(gapMs)} later (${due ? 'past' : 'before'} the close was due) and ${b.closed ? 'shows a close command' : 'shows no close command'}.${due && !b.closed ? ' A due close that never appeared is the thing to chase: a held open interval or supervision, or a missing record.' : ''}`);
     }
   }
 
@@ -1495,10 +1491,10 @@ function buildRecloseSequenceCard() {
     const relaySpan = withBoth[withBoth.length - 1].ms - withBoth[0].ms;
     const fileSpan = withBoth[withBoth.length - 1].fileMs - withBoth[0].fileMs;
     if (Math.abs(relaySpan - fileSpan) > 60000) {
-      clockNote = `<div class="evt-pattern-note" style="border-left-color:var(--warn,#d79b28);">⚠ The file-name timestamps span <b>${rcFmtGap(fileSpan)}</b> but the relay clock spans <b>${rcFmtGap(relaySpan)}</b>. The names are collection/download stamps, not event times${(() => {
+      clockNote = `<div class="evt-pattern-note" style="border-left-color:var(--warn,#d79b28);">⚠ File-name times span <b>${rcFmtGap(fileSpan)}</b> but the relay clock spans <b>${rcFmtGap(relaySpan)}</b>. File names are download stamps, not event times${(() => {
         const off = getSettingNum(withBoth[0].P, ['UTC_OFF']);
         return off != null ? `, and this relay's clock is set to UTC_OFF := ${off}` : '';
-      })()}. Reclose intervals must be reasoned about from the relay clock column — the file names will give the wrong answer.</div>`;
+      })()}. Use the relay clock column for reclose timing.</div>`;
     }
   }
 
@@ -1523,9 +1519,8 @@ function buildRecloseSequenceCard() {
 
   return `<div class="card"><div class="card-header">🧭 Reclose Sequence Across the Loaded Records</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;line-height:1.6;">
-      The 79 element carries its state from one record to the next, and the open intervals are
-      long enough that a whole reclose sequence happens in the gaps between them. Read down this
-      table, not across a single record.
+      The 79 state carries between records, and most of a reclose sequence happens in the gaps.
+      Read down this table.
     </p>
     <div style="overflow-x:auto;"><table class="data-table">
       <thead><tr>

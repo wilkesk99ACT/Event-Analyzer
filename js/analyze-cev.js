@@ -972,7 +972,7 @@ function analyzeCEV(P, prevEvent) {
       const vPart = hasOVseq ? (hasGroundOV && hasNegSeqOV ? 'Zero + Negative Sequence Overvoltage' : hasGroundOV ? 'Zero-Sequence Overvoltage' : 'Negative-Sequence Overvoltage')
                   : hasOV ? 'Overvoltage' : 'Undervoltage';
       causeText = `Combined Condition Trip (${vPart} + ${iPart})`;
-      causeDetail = topComment || `The trip logic required both a ${vPart.toLowerCase()} condition and a ${iPart.toLowerCase()} condition simultaneously via ${label}`;
+      causeDetail = topComment || `Needed ${vPart.toLowerCase()} and ${iPart.toLowerCase()} together, via ${label}`;
       if (hasGroundOV || hasNegSeqOV) family = hasGroundOV ? 'zeroSeqV' : 'negSeqV';
     } else if (hasPhaseOC && hasGroundOC) {
       causeText = 'Overcurrent Trip (Phase + Ground)';
@@ -994,7 +994,7 @@ function analyzeCEV(P, prevEvent) {
       const phases = [...new Set(uvAsserted.map(l => l.charAt(3)))].sort();
       const phaseStr = phases.length === 3 ? 'Three-Phase' : phases.length ? 'Phase ' + phases.join(',') : '';
       causeText = `Undervoltage Trip${phaseStr ? ' (' + phaseStr + ')' : ''}`;
-      causeDetail = topComment || 'Voltage dropped below undervoltage pickup and sustained through timer delay';
+      causeDetail = topComment || 'Voltage stayed below the undervoltage pickup through the timer delay';
     } else if (hasOV && !hasUV) {
       causeText = 'Overvoltage Trip';
       causeDetail = topComment || 'Voltage exceeded overvoltage pickup threshold via ' + label;
@@ -1028,7 +1028,9 @@ function analyzeCEV(P, prevEvent) {
       });
       const elPart = freqDesc.length ? `${freqDesc.join(', ')} asserted and reached the trip through ${label}.` : '';
       causeText = freqEls.length === 1 ? `Frequency Protection Trip (${freqEls[0]})` : causeText;
-      causeDetail = [elPart, topComment ? `Settings comment on ${svPath.length ? svPath[svPath.length - 1].label : label}: ${topComment}` : '']
+      // A long comment usually describes every path into the SV, not this trip — it stays in
+      // the SV Logic tab and the bit popup rather than the headline.
+      causeDetail = [elPart, topComment && topComment.length <= 100 ? `Settings comment on ${svPath.length ? svPath[svPath.length - 1].label : label}: ${topComment}` : '']
         .filter(Boolean).join(' ') || 'Frequency element timer expired via ' + label;
       family = 'freq';
     } else if (hasFreq && (hasUV || hasOV)) {
@@ -1051,7 +1053,7 @@ function analyzeCEV(P, prevEvent) {
       causeDetail = topComment || 'AC power source lost via ' + label;
     } else if (hasSleep) {
       causeText = 'Relay Going to Sleep (TOSLP)';
-      causeDetail = topComment || 'Relay entering sleep mode — trip to open breaker before power down';
+      causeDetail = topComment || 'Relay opened the breaker before going to sleep';
     } else if (hasBattery) {
       causeText = 'Battery Failure Trip';
       causeDetail = topComment || 'Battery failure detected';
@@ -1094,7 +1096,7 @@ function analyzeCEV(P, prevEvent) {
       const negPart = negElements.length ? `de-assertion of ${negElements.join(', ')}` : '';
       const parts = [posPart, negPart].filter(Boolean).join(' and ');
       causeText = `Logic/Status-Driven Trip (via ${label})`;
-      causeDetail = `No overcurrent, voltage, or frequency protection element is behind this — ${label} resolved entirely to internal status/latch points${parts ? ', via ' + parts : ''}. This is not a measured electrical fault condition; something in the relay's internal logic or a status/position input drove it instead.`;
+      causeDetail = `No protection element operated. ${label} was driven by internal logic or status inputs${parts ? ' (' + parts + ')' : ''}, not a measured fault.`;
     }
 
     if (!family && /3V0|ZERO.?SEQ|NEG.?SEQ|SEQUENCE VOLT/i.test(topComment)) {
@@ -1189,7 +1191,7 @@ function analyzeCEV(P, prevEvent) {
 
     if (immediateCauseNegated) {
       causeText = `Loss/De-assertion of ${immediateCause}`;
-      causeDetail = `${immediateCause} was NOT asserted (per the logic's NOT ${immediateCause} term), which drove the condition true`;
+      causeDetail = `${immediateCause} dropping out drove the trip (logic reads NOT ${immediateCause})`;
       causeChain.push({ label: immediateCause, desc: 'Condition de-asserted (drives result via NOT)', delay: 0 });
       isNonProtection = !RELAY_WORD_RE.test(immediateCause) || !/^(27|59|81|5[01]|67)/.test(immediateCause);
       resolvedNegElements = [immediateCause];
@@ -1291,14 +1293,14 @@ function analyzeCEV(P, prevEvent) {
       const isReceived = immediateCause.startsWith('RMB');
       causeText = isReceived ? `Communications Signal Received (${immediateCause})` : `Communications Signal Transmitted (${immediateCause})`;
       causeDetail = isReceived
-        ? `${immediateCause} is a Received MIRRORED BITS point — a signal received from an upstream or adjacent relay over a serial communications link, not a local measurement. This is characteristic of a coordinated/pilot tripping scheme: another device detected a condition and signaled this relay to trip.`
-        : `${immediateCause} is a Transmitted MIRRORED BITS point sent to another relay over a serial communications link.`;
+        ? `${immediateCause} is a signal received from another relay (MIRRORED BITS), not a local measurement.`
+        : `${immediateCause} is a MIRRORED BITS signal sent to another relay.`;
       const mbComments = findMirroredBitComments(P, immediateCause);
       if (mbComments.length === 1) {
-        causeDetail += ` A related settings comment on this same numbered channel: "${mbComments[0].source} := ... #${mbComments[0].comment}". Channel numbers are assigned independently per direction, so this is not necessarily the same logical relationship as ${immediateCause}.`;
+        causeDetail += ` Same-channel settings comment (may not describe ${immediateCause}): "${mbComments[0].source} := ... #${mbComments[0].comment}".`;
       } else if (mbComments.length > 1) {
         const list = mbComments.map(c => `"${c.source} := ... #${c.comment}"`).join('; ');
-        causeDetail += ` Multiple related settings comments share this channel number (not necessarily the same logical relationship as ${immediateCause}): ${list}.`;
+        causeDetail += ` Same-channel settings comments (may not describe ${immediateCause}): ${list}.`;
       }
       // Look for a companion term this bit is AND-paired with in the actual equation text
       // (a common security measure in pilot schemes — requiring two independent bits to
@@ -1309,7 +1311,7 @@ function analyzeCEV(P, prevEvent) {
         const pm = eqText.match(pairRe);
         const companion = pm ? (pm[1] || pm[2]) : null;
         if (companion) {
-          causeDetail += ` The trip logic requires this together with ${companion} (both must assert) — a common security measure in pilot schemes.`;
+          causeDetail += ` Trip also requires ${companion}.`;
           causeChain.push({ label: companion, desc: 'Paired communications bit (AND condition)', delay: 0 });
           break;
         }
@@ -1418,7 +1420,7 @@ function analyzeCEV(P, prevEvent) {
       });
 
       if (isCrossEvent) {
-        causeDetail += ' — condition was already present when this event record began';
+        causeDetail += ' — already present when this record began';
         if (prevEvent) {
           causeDetail += ` (possibly originating in prior event ${prevEvent.parsed.eventInfo.eventType || prevEvent.parsed.fileName})`;
         }
@@ -1427,7 +1429,7 @@ function analyzeCEV(P, prevEvent) {
       if (viaAggregate) {
         causeChain.push({ label: viaAggregate, desc: oredAggregateDescription(viaAggregate), delay: 0 });
         if (aggregateMembers.length > 1) causeDetail += ` (also asserted with it: ${aggregateMembers.slice(1).join(', ')})`;
-        causeDetail += ` — reached the trip equation through the aggregate bit ${viaAggregate}`;
+        causeDetail += ` — via aggregate bit ${viaAggregate}`;
       }
 
       // Always add the trip bit at the end
@@ -1496,7 +1498,7 @@ function analyzeCEV(P, prevEvent) {
       }
     } else {
       const causeText = 'Trip Detected (cause element not captured in digital data)';
-      const causeDetail = `${tripBitUsed} asserted but the specific triggering term could not be resolved from the trip logic against the reconstructed bit-state timeline. The SV Logic and Timeline tabs contain the underlying digital transitions and equation resolution.`;
+      const causeDetail = `${tripBitUsed} asserted, but the term that caused it could not be identified. Check the SV Logic and Timeline tabs.`;
       const eqLabel = tripEqSources.length ? tripEqSources.map(s => s.name).join(' / ') : (P.tripEquationName || 'TR');
       const causeChain = [{ label: eqLabel, desc: 'Trip equation', delay: 0 }, { label: tripBitUsed, desc: 'Trip', delay: 0 }];
       A.tripCause = { causeText, causeDetail, immediateCause: null, causeChain, tripTransition };
@@ -1555,7 +1557,7 @@ function analyzeCEV(P, prevEvent) {
       const { causeChain, family, isNonProtection, negElements } = classified;
       const causeText = classified.causeText;
       const causeDetail = classified.causeDetail
-        + ` — this triggered the relay's Event Report (${P.erEquationName || 'ER'}) logic, not a trip. No TRIP/TRIP3P bit asserted anywhere in this record.`;
+        + ` — this triggered an event report (${P.erEquationName || 'ER'}), not a trip. No trip bit asserted in this record.`;
 
       causeChain.push({ label: P.erEquationName || 'ER', desc: 'Event report recorded (no trip)', delay: 0 });
 
@@ -1679,9 +1681,9 @@ function analyzeCEV(P, prevEvent) {
       desc = `Frequency element ${asserts.some(l => freqLabels.includes(l)) ? 'picks up' : 'resets'}: ${freqLabels.join(', ')}`;
     } else if (hasDir) {
       const dirLabels = asserts.filter(l => /^(67[PGQ]?\d|F32[QVGP]?|R32[QVGP]?)/.test(l));
-      desc = `Directional element asserts: ${dirLabels.join(', ')} (forward/reverse per this relay's own polarity setting)`;
+      desc = `Directional element asserts: ${dirLabels.join(', ')} (direction per this relay's polarity setting)`;
     } else if (hasER) {
-      desc = 'Event Report triggered — recorded as a separate record, not itself a trip';
+      desc = 'Event report triggered (not a trip)';
     } else if (hasComm) {
       const commLabels = allChanged.filter(l => ['COMMLOSS','COMMFLT','COMMIDLE','LINKA','LINKFAIL'].includes(l));
       desc = `Communications status change: ${commLabels.map(l => `${asserts.includes(l) ? '+' : '-'}${l}`).join(', ')}`;
@@ -1837,7 +1839,7 @@ function analyzeCEV(P, prevEvent) {
           A.investigationFlags.push({
             severity: 'high',
             title: 'Close Command Issued — Breaker Never Confirmed Closed',
-            detail: `A close command (${tt(closeLabel, P)}, initiated by ${initiatedBy}) was issued at t=${(closeIdx * msPerSampleC).toFixed(0)} ms, but ${tt(bkrCloseLabel, P)} never asserts anywhere in the following ${recordEndMs.toFixed(0)} ms of record. This looks like a genuine failure of the breaker to close — the operating mechanism, the close coil circuit, or an interlock/permissive blocking the close — rather than an electrical condition on the line. Worth checking the breaker/recloser directly.`,
+            detail: `${tt(closeLabel, P)} (from ${initiatedBy}) at t=${(closeIdx * msPerSampleC).toFixed(0)} ms, but ${tt(bkrCloseLabel, P)} never asserts in the next ${recordEndMs.toFixed(0)} ms. Check the breaker mechanism, close coil, or a blocking interlock.`,
           });
         }
       }
@@ -1850,13 +1852,13 @@ function analyzeCEV(P, prevEvent) {
           A.investigationFlags.push({
             severity: 'high',
             title: 'Closed Into an Existing Fault',
-            detail: `${tt(firstProtPickup.label, P)} picked up ${pickupMs.toFixed(0)} ms after the close command — BEFORE ${tt(bkrCloseLabel, P)} confirmed the breaker fully closed (at ${closeTimeMs.toFixed(0)} ms). A fault indication appearing while the contacts were still traveling is consistent with prestrike arcing across the closing gap — a fault was already present on the line, and the breaker closed directly into it. The trip that followed, ${cyc} cycles after the close command via ${tt(tripElement, P)}, reads as the protection system doing its job, not a device malfunction.`,
+            detail: `${tt(firstProtPickup.label, P)} picked up ${pickupMs.toFixed(0)} ms after the close command, before ${tt(bkrCloseLabel, P)} confirmed closed (${closeTimeMs.toFixed(0)} ms). The fault was already on the line; the ${tt(tripElement, P)} trip ${cyc} cycles after the close is protection working as intended.`,
           });
         } else {
           A.investigationFlags.push({
             severity: 'medium',
             title: 'Breaker Closed, Then Re-Tripped Shortly After',
-            detail: `The breaker confirmed closed (${tt(bkrCloseLabel, P)}, ${closeTimeMs.toFixed(0)} ms after the close command), then tripped again via ${tt(tripElement, P)} ${cyc} cycles later. Unlike a prestrike pattern, no protection element picked up until after full closure was confirmed — consistent with a fault (or inrush) that appeared once the circuit was actually energized, or a condition local to the equipment being closed onto, rather than a fault already sitting on the line before contact.`,
+            detail: `${tt(bkrCloseLabel, P)} confirmed closed ${closeTimeMs.toFixed(0)} ms after the close command, then ${tt(tripElement, P)} tripped ${cyc} cycles after the close. No element picked up until after closing, so the fault (or inrush) appeared once the circuit was energized.`,
           });
         }
       }
@@ -1868,7 +1870,7 @@ function analyzeCEV(P, prevEvent) {
           A.investigationFlags.push({
             severity: 'medium',
             title: 'Slow Breaker Close Time',
-            detail: `${tt(bkrCloseLabel, P)} did not confirm closed until ${closeTimeMs.toFixed(0)} ms (~${closeCyc.toFixed(1)} cycles) after the close command — slower than a typical breaker's closing time. Worth comparing against this breaker's rated closing time if mechanism health is in question.`,
+            detail: `${tt(bkrCloseLabel, P)} did not confirm closed until ${closeTimeMs.toFixed(0)} ms (~${closeCyc.toFixed(1)} cycles) after the close command, slower than typical. Compare against the breaker's rated closing time.`,
           });
         }
       }
@@ -1896,11 +1898,11 @@ function analyzeCEV(P, prevEvent) {
           if (inrushLikely) {
             A.investigationFlags.push({
               severity: 'medium',
-              title: 'Current Spike Consistent With Inrush, Not Necessarily a Fault',
-              detail: `Phase ${inrush.phase} carried a peak of ${inrush.peak.toFixed(1)} A secondary right after the close command, with roughly ${inrush.pct2H.toFixed(0)}% second-harmonic content relative to the fundamental${inrush.asymmetry ? ` and a ${inrush.asymmetry.toFixed(1)}:1 peak asymmetry between half-cycles` : ''} — the same signature transformer differential relays use to restrain from tripping on inrush. This doesn't rule out a real fault, but the current shape by itself reads more like energizing a transformer's magnetizing inrush than a bolted fault, which normally carries much less harmonic content. Worth weighing against the specific element(s) that actually operated (see the trip cause above) before concluding this was a line fault.`,
+              title: 'Current Spike Looks Like Inrush, Not a Fault',
+              detail: `Phase ${inrush.phase} peaked at ${inrush.peak.toFixed(1)} A secondary after the close, with ~${inrush.pct2H.toFixed(0)}% second harmonic${inrush.asymmetry ? ` and ${inrush.asymmetry.toFixed(1)}:1 half-cycle asymmetry` : ''}. That looks like transformer inrush, not a fault; check which element tripped before calling it a line fault.`,
             });
           } else if (!inrush && spcC < 8) {
-            A.closeAttempt.currentSpike.note = 'Sample rate in this record (below 8 samples/cycle) is too coarse to reliably check for a 2nd-harmonic inrush signature.';
+            A.closeAttempt.currentSpike.note = 'Sample rate too low (under 8 samples/cycle) to check for inrush.';
           }
         }
       }
@@ -2005,9 +2007,9 @@ function analyzeCEV(P, prevEvent) {
     // ── Flag: trip resolved to internal logic/status bits, not a measured protection element ──
     if (cause.isNonProtection) {
       const bits = [...new Set([...(cause.negElements || []), cause.immediateCause].filter(Boolean))];
-      let detail = `The trip command traces back to internal relay logic/status point(s) — ${bits.join(', ')} — not a measured overcurrent, voltage, or frequency element. No 27/59/50/51/67/81 element is behind this trip. If the waveform around this event happens to resemble a familiar fault signature, that resemblance doesn't make it one — nothing here was actually measured as a fault.`;
+      let detail = `The trip traces to internal logic/status point(s) ${bits.join(', ')}, not a 27/59/50/51/67/81 element. Even if the waveform looks like a fault, none was measured.`;
       if ((cause.negElementsNeverTransitioned || []).length) {
-        detail += ` Notably, ${cause.negElementsNeverTransitioned.join(', ')} never change state anywhere in this record — whatever field condition they represent was already sitting at that same reading the whole time, so this record's digital data doesn't by itself show what made the internal logic flip.`;
+        detail += ` ${cause.negElementsNeverTransitioned.join(', ')} never change state in this record, so this record does not show what flipped the logic.`;
       }
       A.investigationFlags.push({
         severity: 'high',
@@ -2043,8 +2045,8 @@ function analyzeCEV(P, prevEvent) {
             && otherIAvg > 0.05 && i > otherIAvg * 0.4 && iNotElevated && iUnchanged) {
           A.investigationFlags.push({
             severity: 'high',
-            title: `Possible Loss of Potential — V${ph} Reads Near-Zero While I${ph} Doesn't`,
-            detail: `V${ph} measures ${v.toFixed(2)} V secondary — near zero, and far below V${others[0]} (${vVal(others[0]).toFixed(2)} V) and V${others[1]} (${vVal(others[1]).toFixed(2)} V). But I${ph} (${i.toFixed(2)} A sec) sits in the same range as the other phases' currents, not similarly collapsed or elevated. A real fault or open conductor on this phase would show up in both channels together — this pattern instead points to a failed voltage measurement (blown PT fuse, disconnected VT, bad relay input) rather than an actual system condition on this phase.`,
+            title: `Possible Loss of Potential — V${ph} Near Zero, I${ph} Normal`,
+            detail: `V${ph} reads ${v.toFixed(2)} V secondary vs. V${others[0]} ${vVal(others[0]).toFixed(2)} V and V${others[1]} ${vVal(others[1]).toFixed(2)} V, while I${ph} (${i.toFixed(2)} A sec) is normal. Likely a failed voltage measurement (blown PT fuse, disconnected VT, bad input), not a fault.`,
           });
         }
       });
@@ -2078,7 +2080,7 @@ function analyzeCEV(P, prevEvent) {
         A.investigationFlags.push({
           severity: 'high',
           title: 'Breaker Was Already Open — Not a Fault Interruption',
-          detail: `${bkrLabel} reads open for the entire record leading up to this trip, and measured current stayed near zero throughout (typical phase reading ~${medPhaseI.toFixed(2)} A sec, ground ~${medGroundI.toFixed(2)} A sec). This trip did not interrupt any load or fault current. Whatever operated here was reacting to something other than a fresh fault on an energized, closed circuit — e.g. a residual/backfeed condition, or the logic-driven path flagged above.`,
+          detail: `${bkrLabel} reads open for the whole record before the trip, and current stayed near zero (phase ~${medPhaseI.toFixed(2)} A sec, ground ~${medGroundI.toFixed(2)} A sec). The trip interrupted no load or fault current.`,
         });
       }
 
@@ -2099,7 +2101,7 @@ function analyzeCEV(P, prevEvent) {
             A.investigationFlags.push({
               severity: 'medium',
               title: 'Slow Breaker Operation — Possible Mechanism Issue',
-              detail: `${bkrLabel} did not confirm open until ${delayMs.toFixed(0)} ms (~${delayCyc.toFixed(1)} cycles) after the trip command — well beyond a healthy interrupter's typical clearing time. This points at the breaker/recloser mechanism itself (contact wear, low trip-coil/control-power energy, a sticking operating mechanism) rather than anything on the utility side.`,
+              detail: `${bkrLabel} did not confirm open until ${delayMs.toFixed(0)} ms (~${delayCyc.toFixed(1)} cycles) after the trip command, far slower than normal. Check the breaker mechanism (contact wear, trip-coil or control power, sticking mechanism).`,
             });
           }
         } else {
@@ -2112,7 +2114,7 @@ function analyzeCEV(P, prevEvent) {
             A.investigationFlags.push({
               severity: 'high',
               title: 'Breaker Did Not Confirm Open After Trip',
-              detail: `A trip was commanded, but ${bkrLabel} never shows an open confirmation in the ${recordEndMs.toFixed(0)} ms of record following the trip — well beyond a healthy interrupter's clearing time. Worth checking the breaker/recloser mechanism directly — this is a device-health question, not an electrical one.`,
+              detail: `${bkrLabel} never shows open in the ${recordEndMs.toFixed(0)} ms after the trip command. Check the breaker mechanism.`,
             });
           }
         }
@@ -2133,7 +2135,7 @@ function analyzeCEV(P, prevEvent) {
           A.investigationFlags.push({
             severity: 'medium',
             title: 'Voltage Present With Breaker Open — Possible DER Backfeed/Islanding',
-            detail: `${bkrLabel} reads open, but ${highPhases.map(x => `V${x.ph} (${x.v.toFixed(1)} V sec, ${(x.v / VNOM * 100).toFixed(0)}% of nominal)`).join(', ')} ${highPhases.length > 1 ? 'have' : 'has'} not collapsed. If these PTs are on the generation side of the open point, a de-energized section should read near zero — a sustained reading would mean on-site generation is still energizing this side, a DER/anti-islanding response question rather than a utility-side condition. If instead the PTs are on the utility source side of this device, voltage with the breaker open is expected and this is not an anomaly — the PT location determines which reading applies.`,
+            detail: `${bkrLabel} reads open, but ${highPhases.map(x => `V${x.ph} (${x.v.toFixed(1)} V sec, ${(x.v / VNOM * 100).toFixed(0)}% of nominal)`).join(', ')} ${highPhases.length > 1 ? 'have' : 'has'} not collapsed. If the PTs are on the generation side, on-site generation is still energizing it; if on the utility side, this is expected.`,
           });
         }
       }
@@ -2170,8 +2172,8 @@ function analyzeCEV(P, prevEvent) {
         const desc = uniq.map(e => `${tt(e.label, P)}${e.ms != null ? ` (${e.ms >= 0 ? '+' : ''}${e.ms.toFixed(0)} ms rel. to trip)` : ''}`).join(', ');
         A.investigationFlags.push({
           severity: 'info',
-          title: 'Directional Element Activity — Check Against This Relay\u2019s Polarity Convention',
-          detail: `${desc} asserted around this event. Directional (67/32) elements indicate which way current or power flowed relative to how THIS relay's CTs/PTs and direction settings are configured — not an inherent "utility" or "site" label. If this relay's forward direction is confirmed to point toward the utility source, a forward-direction assertion is consistent with the disturbance originating upstream; a reverse assertion is consistent with it originating on the site side of this device. Confirm that polarity convention in the relay's own settings/one-line before treating this as a location determination — the tool cannot verify it independently from the file.`,
+          title: 'Directional Element Activity — Check Polarity',
+          detail: `${desc} asserted around this event. Forward/reverse depends on this relay's CT/PT polarity and settings; confirm which way forward points before using it to locate the disturbance.`,
         });
       }
     }
@@ -2203,7 +2205,7 @@ function analyzeCEV(P, prevEvent) {
         A.investigationFlags.push({
           severity: 'medium',
           title: 'Sequence Voltage Without Elevated Current',
-          detail: `Trip resolved to a sequence-voltage element (${cause.immediateCause ? tt(cause.immediateCause, P) : 'zero/negative-sequence overvoltage'}); phase current stayed low throughout (max ${maxFaultI.toFixed(2)} A sec, vs. ${maxPreI.toFixed(2)} A sec pre-event) — not fault-level. Consistent with: an open/separated conductor, a disturbance originating elsewhere on the system, or (at a DER site) local inverters curtailing output in response to a voltage disturbance.`,
+          detail: `Trip came from a sequence-voltage element (${cause.immediateCause ? tt(cause.immediateCause, P) : 'zero/negative-sequence overvoltage'}) but phase current stayed low (max ${maxFaultI.toFixed(2)} A sec, vs. ${maxPreI.toFixed(2)} A sec pre-event), not fault-level. Possible causes: an open conductor, a disturbance elsewhere on the system, or inverters curtailing during a voltage disturbance.`,
         });
       }
     }

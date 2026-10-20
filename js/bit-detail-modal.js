@@ -18,7 +18,7 @@ function showBitDetail(label) {
   const freq = PARSED?.eventInfo?.freq || 60;
   const elInfo = PARSED ? explainElementBit(label, PARSED, freq) : null;
   const desc = elInfo ? elInfo.short : (getSVTooltip(label, PARSED)
-    || `This bit isn't in the tool's built-in reference. Its meaning will need to be checked against the relay's settings/logic documentation.`);
+    || `No built-in description for this bit. Check the relay settings.`);
   const svMatch = label.match(/^SV(\d+)(T?)$/);
   const sv = svMatch && PARSED ? (PARSED.svSettings || []).find(s => s.num === parseInt(svMatch[1])) : null;
   const state = currentBitState(label);
@@ -63,11 +63,6 @@ function showBitDetail(label) {
       <div><b style="color:var(--green);">When asserted (ON):</b> ${linkifyBitMentions(elInfo.on, PARSED)}</div>
       <div style="margin-top:8px;"><b style="color:var(--text-muted);">When de-asserted (OFF):</b> ${linkifyBitMentions(elInfo.off, PARSED)}</div>
     </div>`;
-  } else {
-    html += `<div style="background:var(--bg2);border-radius:6px;padding:10px 12px;margin-top:12px;font-size:12.5px;line-height:1.6;">
-      <div><b style="color:var(--green);">When asserted (ON):</b> the condition described above is present/true.</div>
-      <div style="margin-top:4px;"><b style="color:var(--text-muted);">When de-asserted (OFF):</b> that condition is not currently present — this is simply the absence of the described state, not a separate event on its own.</div>
-    </div>`;
   }
   if (sv) {
     const eqClean = sv.equation.split('#')[0].trim();
@@ -97,7 +92,7 @@ function showBitDetail(label) {
     </div>`;
   }
   if (inChain) {
-    html += `<div style="margin-top:10px;font-size:12px;color:var(--red);font-weight:600;">⚡ Part of the logic chain that produced this event's resolved cause.</div>`;
+    html += `<div style="margin-top:10px;font-size:12px;color:var(--red);font-weight:600;">⚡ Part of this event's trip chain.</div>`;
   }
   if (PARSED) {
     // TR itself, and anything wired directly into it, gets the full chain rather than the

@@ -6,7 +6,7 @@
 // Render one sequence-component consistency check (zero or negative) as an HTML block.
 function renderConsistencyCheckBlock(check, opts) {
   if (!check) {
-    return `<div style="padding:12px;color:var(--text-muted);font-size:12px;">No usable current channel found for this comparison in this file.</div>`;
+    return `<div style="padding:12px;color:var(--text-muted);font-size:12px;">No current channel available for this check.</div>`;
   }
   const compact = !!opts?.compact;
   const fmt = (v, d) => v == null ? '—' : v.toFixed(d ?? 2);
@@ -48,23 +48,19 @@ function renderConsistencyCheckBlock(check, opts) {
 
   if (check.flagged) {
     html += `<p style="margin-top:8px;font-size:${compact ? '11px' : '12px'};color:#fecaca;line-height:1.5;">
-      ${check.vLabel} sits at <b>${check.vSustainedPct.toFixed(0)}%</b> of its own pickup — clearly engaged and sustained —
-      while ${check.iLabel} sits at only <b>${check.iSustainedPct.toFixed(1)}%</b> of its own pickup. A real, sustained
-      ${check.kind === 'zero' ? 'zero-sequence voltage on a grounded system' : 'negative-sequence voltage'} should drive a roughly
-      proportional ${check.iLabel} — this large a gap is consistent with a disconnected or miswired
-      ${check.kind === 'zero' ? 'grounding transformer or ground CT' : 'current-sensing circuit, or an open phase'},
-      rather than the current genuinely being absent.
+      ${check.vLabel} is at <b>${check.vSustainedPct.toFixed(0)}%</b> of pickup but ${check.iLabel} is only
+      <b>${check.iSustainedPct.toFixed(1)}%</b>. Possible disconnected or miswired
+      ${check.kind === 'zero' ? 'grounding transformer or ground CT' : 'current circuit, or an open phase'}.
     </p>`;
   } else if (check.vSustainedPct != null && check.iSustainedPct != null
              && check.vSustainedPct >= 40 && check.iSustainedPct <= 8) {
     // The raw numbers show a mismatch, but a physics gate determined it isn't evidence of a
     // wiring problem in this specific situation — say why, rather than showing a bare pass.
     const reason = !check.breakerClosedMajority
-      ? `the breaker was open for most of this record, and no current flows through an open device regardless of the voltage present — so the missing ${check.iLabel} is expected here, not a wiring defect`
-      : `no ground overcurrent pickup exists in this relay's settings, which indicates this system isn't designed to carry ground current (e.g. behind a delta winding) — elevated ${check.vLabel} with no ${check.iLabel} is the expected, correct behavior on such a system, and is exactly why voltage-based ground protection is applied there`;
+      ? `the breaker was open, so no current is expected`
+      : `no ground overcurrent is set, so this system is not expected to carry ground current (e.g. behind a delta winding)`;
     html += `<p style="margin-top:8px;font-size:${compact ? '11px' : '12px'};color:var(--text-muted);line-height:1.5;">
-      Note: ${check.vLabel} is elevated (${check.vSustainedPct.toFixed(0)}% of reference) with ${check.iLabel} near zero,
-      but this is not flagged as a wiring inconsistency because ${reason}.
+      ${check.vLabel} is elevated (${check.vSustainedPct.toFixed(0)}% of reference) with ${check.iLabel} near zero. Not flagged: ${reason}.
     </p>`;
   }
 
@@ -78,10 +74,8 @@ function buildConsistencyChecksCard(P, A) {
   const negCheck = computeConsistencyCheck(P, A, 'neg');
   return `<div class="card red-accent"><div class="card-header">🩺 Physical Consistency Checks</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:14px;line-height:1.5;">
-      Cross-references each sequence VOLTAGE component against its corresponding sequence CURRENT, each measured relative to
-      its own protection element's pickup setting (or a sensible fallback when no matching pickup exists in this file). A real,
-      sustained sequence voltage should show up roughly proportionally in the matching current — a large, sustained gap between
-      the two is consistent with a CT wiring issue, a grounding transformer connection problem, or an open phase, distinct from a settings issue.
+      Sequence voltage should be matched by sequence current. A large sustained gap points to CT wiring, a grounding
+      transformer connection, or an open phase.
     </p>
     ${renderConsistencyCheckBlock(zeroCheck)}
     ${renderConsistencyCheckBlock(negCheck)}
@@ -127,7 +121,7 @@ function buildCloseAttemptCard(P, A) {
   rows.push(['Close command', `${tt(ca.closeLabel, P)} at t=${ca.closeMs.toFixed(0)} ms, initiated by ${ca.initiatedBy}`]);
   rows.push(['Breaker confirmation', ca.bkrConfirmed
     ? `${tt(ca.bkrCloseLabel, P)} confirmed closed ${ca.closeTimeMs.toFixed(0)} ms later (~${(ca.closeTimeMs / (1000 / (P.eventInfo.freq || 60))).toFixed(1)} cycles)`
-    : (ca.bkrCloseLabel ? `${tt(ca.bkrCloseLabel, P)} never confirmed closed in the rest of this record` : 'No breaker-status bit (52A/52A3P) found in this file to confirm against')]);
+    : (ca.bkrCloseLabel ? `${tt(ca.bkrCloseLabel, P)} never confirmed closed in the rest of this record` : 'No breaker-status bit (52A/52A3P) in this file')]);
   if (ca.tripElement) {
     const freqL = P.eventInfo.freq || 60;
     rows.push(['Following trip', `${tt(ca.tripElement, P)} asserted ${ca.tripDelayMs.toFixed(0)} ms after the close command (~${(ca.tripDelayMs / (1000 / freqL)).toFixed(1)} cycles)`]);
@@ -139,8 +133,8 @@ function buildCloseAttemptCard(P, A) {
       let spikeText = `peaked at ${cs.peakDuring.toFixed(1)} A sec (vs. ${cs.peakPre.toFixed(1)} A sec just before the close)`;
       if (cs.inrush) {
         spikeText += cs.inrushLikely
-          ? ` — ~${cs.inrush.pct2H.toFixed(0)}% 2nd-harmonic content on phase ${cs.inrush.phase}, consistent with transformer inrush rather than a bolted fault`
-          : ` — ~${cs.inrush.pct2H.toFixed(0)}% 2nd-harmonic content on phase ${cs.inrush.phase}, in the range typical of real fault current, not inrush`;
+          ? ` — ~${cs.inrush.pct2H.toFixed(0)}% 2nd harmonic on phase ${cs.inrush.phase}: likely transformer inrush`
+          : ` — ~${cs.inrush.pct2H.toFixed(0)}% 2nd harmonic on phase ${cs.inrush.phase}: typical of fault current`;
       } else if (cs.note) {
         spikeText += ` — ${cs.note}`;
       }
@@ -158,9 +152,6 @@ function buildCloseAttemptCard(P, A) {
       ${rows.map(([k, v]) => `<tr><td style="font-weight:600;color:var(--text);white-space:nowrap;">${k}</td><td>${v}</td></tr>`).join('')}
     </tbody></table>
     ${haveTrace ? `<div style="margin-top:14px;">${buildCloseTraceSections(P, A)}</div>` : ''}
-    <div style="margin-top:10px;font-size:11px;color:var(--text-muted)">
-      "Closed into an existing fault" means a protection element picked up while the contacts were still traveling (before the breaker confirmed closed) — a prestrike/arcing signature consistent with a fault already present on the line, not a breaker malfunction. "Re-tripped shortly after" means the pickup came only after full closure was confirmed — consistent with a fault or inrush that appeared once the circuit was actually energized. A "current spike" row with elevated 2nd-harmonic content points toward transformer magnetizing inrush rather than a real fault — the same basis transformer differential relays use to restrain from tripping on it.
-    </div>
   </div>`;
 }
 
@@ -180,7 +171,6 @@ function buildInvestigationPanel(P, A) {
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
       <span style="font-size:16px;">🔍</span>
       <span style="font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text);">Flagged for Further Investigation</span>
-      <span style="font-size:11px;color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:normal;">— worth a closer look; not a diagnosis or a to-do list</span>
     </div>
     ${flags.map(f => `
       <div style="background:${sevBg[f.severity] || sevBg.info};border:1px solid ${sevBorder[f.severity] || sevBorder.info};border-radius:8px;padding:12px 14px;margin-bottom:8px;">

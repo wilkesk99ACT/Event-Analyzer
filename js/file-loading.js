@@ -2,6 +2,8 @@
 
 let ALL_EVENTS = []; // Array of { parsed, analysis, fileName }
 let CURRENT_IDX = 0;
+let LOADED_FILES = []; // the raw File objects from the last drop/browse
+let LOAD_ERRORS = [];  // per-file parse errors from the last load
 
 function getTimestampMs(ts) {
   return new Date(ts.year, ts.month - 1, ts.day, ts.hour, ts.min, ts.sec, ts.msec).getTime();
@@ -57,7 +59,7 @@ async function unzipEntries(arrayBuffer) {
   for (let i = bytes.length - 22; i >= scanFloor; i--) {
     if (view.getUint32(i, true) === 0x06054b50) { eocdOffset = i; break; }
   }
-  if (eocdOffset === -1) throw new Error('Not a valid ZIP archive (no End Of Central Directory record found)');
+  if (eocdOffset === -1) throw new Error('Not a valid ZIP archive');
 
   const entryCount = view.getUint16(eocdOffset + 10, true);
   let cdOffset = view.getUint32(eocdOffset + 16, true);
@@ -91,7 +93,7 @@ async function unzipEntries(arrayBuffer) {
       outBytes = compData; // stored — no compression
     } else if (entry.method === 8) {
       if (typeof DecompressionStream === 'undefined') {
-        throw new Error('This browser cannot inflate ZIP entries (needs the DecompressionStream API — try a recent Chrome, Edge, or Firefox).');
+        throw new Error('This browser cannot open ZIP files. Use a recent Chrome, Edge, or Firefox.');
       }
       const stream = new Blob([compData]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
       outBytes = new Uint8Array(await new Response(stream).arrayBuffer());
@@ -138,9 +140,13 @@ function processFiles(files) {
   const fileArray = Array.from(files);
   const results = [];
   const errors = [];
+  // Kept as-loaded so "Report a bug" can bundle the exact files the user dropped.
+  LOADED_FILES = fileArray;
+  LOAD_ERRORS = errors;
 
   const finish = () => {
     if (results.length === 0) {
+      document.getElementById('errorReportLink').style.display = 'block';
       document.getElementById('errorMsg').textContent = 'Failed to parse file(s): ' + errors.join('; ');
       document.getElementById('errorMsg').style.display = 'block';
       return;
@@ -166,6 +172,7 @@ function processFiles(files) {
     document.getElementById('upload-screen').style.display = 'none';
     document.getElementById('analysis-screen').style.display = 'block';
     document.getElementById('errorMsg').style.display = 'none';
+    document.getElementById('errorReportLink').style.display = 'none';
 
     renderEventSelector();
     selectEvent(0);
@@ -185,7 +192,7 @@ function processFiles(files) {
       try {
         const stem = cfgFile.name.replace(/\.cfg$/i, '');
         const datFile = fileArray.find(f => f.name.replace(/\.dat$/i, '') === stem && /\.dat$/i.test(f.name));
-        if (!datFile) { errors.push(`${cfgFile.name}: no matching .dat file found`); return; }
+        if (!datFile) { errors.push(`${cfgFile.name}: no matching .dat file`); return; }
         const cfgText = await readFileAsText(cfgFile);
 
         // Same bundle, two very different relays. The .cfg names the device on its first line
@@ -252,7 +259,7 @@ function processFiles(files) {
         const cevEntries = entries.filter(e => /\.(cev|txt)$/i.test(e.name));
         if (cevEntries.length === 0) {
           const listed = entries.map(e => e.name).join(', ') || 'nothing';
-          errors.push(`${file.name}: this archive holds no event record this tool can read. It contains ${listed}. A .CEV file, or a COMTRADE .cfg with a matching .dat, is needed.`);
+          errors.push(`${file.name}: no readable event record (contains ${listed}). Needs a .CEV, or a .cfg with matching .dat.`);
           return;
         }
         for (const entry of cevEntries) {

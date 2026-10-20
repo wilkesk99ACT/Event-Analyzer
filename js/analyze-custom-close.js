@@ -38,11 +38,11 @@ const CC_TERM_CLASSES = [
   { re: /^PB\d+_PUL$/,            cls: 'operator', what: 'front-panel pushbutton press' },
   { re: /^PB\d+_LED$/,            cls: 'status',   what: 'pushbutton lamp' },
   { re: /^PB\d+$/,                cls: 'operator', what: 'front-panel pushbutton' },
-  { re: /^LB\d+$/,                cls: 'operator', what: 'local bit — set from the front panel or a communications port' },
-  { re: /^(CC|OC)(\d|[ABC])?$/,   cls: 'operator', what: 'close or open command from a port — SCADA or the front port' },
+  { re: /^LB\d+$/,                cls: 'operator', what: 'local bit (front panel or port)' },
+  { re: /^(CC|OC)(\d|[ABC])?$/,   cls: 'operator', what: 'port command (SCADA or front port)' },
   { re: /^(RB|RMB)\d+[A-D]?$/,    cls: 'external', what: 'bit from another device over communications' },
-  { re: /^IN\d{3}$/,              cls: 'external', what: 'contact input — driven by external wiring' },
-  { re: /^LT\d+$/,                cls: 'latch',    what: 'latch bit — a mode the site switches on and leaves on' },
+  { re: /^IN\d{3}$/,              cls: 'external', what: 'contact input (external wiring)' },
+  { re: /^LT\d+$/,                cls: 'latch',    what: 'latch bit (mode switch)' },
   { re: /^SV\d+T$/,               cls: 'timer',    what: 'SELogic timer output' },
   { re: /^SV\d+$/,                cls: 'svar',     what: 'SELogic variable' },
   { re: /^SC\d+/,                 cls: 'counter',  what: 'SELogic counter' },
@@ -255,7 +255,7 @@ function ccEvalTerm(P, t, idx, comparisons) {
     // An analog comparison. The tool shows it and does not pretend to evaluate it: the setting
     // is in relay units, the record is in another, and guessing between them is how a tool
     // reports a close as ready when it is not.
-    return Object.assign(base, { state: null, known: false, satisfied: null, what: 'analog comparison — not evaluated from this record', analog: true });
+    return Object.assign(base, { state: null, known: false, satisfied: null, what: 'analog comparison, not evaluated', analog: true });
   }
   const b = bitStateAtAnalogIdx(P, t.name, idx);
   const sv = ccSvByName(P, t.name);
@@ -286,7 +286,7 @@ function analyzeCustomClose(P, A) {
   let closes = sch.closeEquations || [];
   if (!closes.length && sch.eq && sch.eq.CL) closes = [{ name: sch.eqName.CL || 'CL', eq: sch.eq.CL }];
   if (!closes.length) {
-    out.notes.push('This file carries no close equation (CL3P, CL, CLA, CLB or CLC), so the tool cannot say how this device closes.');
+    out.notes.push('No close equation (CL3P, CL, CLA, CLB or CLC) in this file.');
     return out;
   }
 
@@ -302,7 +302,7 @@ function analyzeCustomClose(P, A) {
     }
     if (!ast.node) {
       out.equations.push({ name: ce.name, eq: ce.eq, raw: ast.raw, unreadable: true, branches: [] });
-      out.notes.push(`${ce.name} could not be read as a Boolean equation, so it is shown as written and not analysed.`);
+      out.notes.push(`${ce.name} could not be read; shown as written, not analyzed.`);
       return;
     }
     const state = { truncated: false };
@@ -375,11 +375,11 @@ function analyzeCustomClose(P, A) {
     out.readyAtEnd = out.blockingDurable.length ? false : (lead.unknown.length ? null : true);
   }
 
-  if (out.truncated) out.notes.push('This close equation has more branches than the tool expands. The paths below are part of the picture, not all of it.');
+  if (out.truncated) out.notes.push('Too many branches to expand fully; the paths below are not the complete set.');
 
   const unresolved = out.paths.flatMap(p => p.terms).filter(t => t.unresolved).map(t => t.name);
   if (unresolved.length) {
-    out.notes.push(`These terms are used in the close logic but their equations are not in this file: ${[...new Set(unresolved)].join(', ')}. The tool cannot say what drives them.`);
+    out.notes.push(`Equations not in this file for: ${[...new Set(unresolved)].join(', ')}; what drives them is unknown.`);
   }
 
   // ULCL cancels a close after the relay issues it.
@@ -387,7 +387,7 @@ function analyzeCustomClose(P, A) {
   unlatches.forEach(u => {
     if (typeof rcEvalEquation !== 'function') return;
     const r = rcEvalEquation(P, u.eq, endIdx);
-    if (r && r.value === true) out.notes.push(`${u.name} is asserted at the end of the record. While it stays asserted, the relay cancels a close as soon as it gives it.`);
+    if (r && r.value === true) out.notes.push(`${u.name} is on at record end; while it stays on, the relay cancels any close it issues.`);
   });
 
   out.verdict = ccBuildVerdict(out, P);
@@ -411,61 +411,56 @@ function ccBuildVerdict(cc, P) {
   const delayText = () => {
     if (!lead || !lead.delay) return '';
     const star = lead.delay.assumed ? '*' : '';
-    return ` The longest timer on that path is ${ccFormatMs(lead.delay.ms)}${star} (${lead.delay.setting} = ${lead.delay.raw}).`;
+    return ` Longest timer: ${ccFormatMs(lead.delay.ms)}${star} (${lead.delay.setting} = ${lead.delay.raw}).`;
   };
   const unitsNote = () => (lead && lead.delay && lead.delay.assumed)
-    ? ' * No timer ran inside this record, so the tool cannot confirm the units of the setting. It reads the value as cycles.' : '';
+    ? ' *Units unconfirmed by this record; read as cycles.' : '';
   const stateText = () => {
     let s = '';
     if (cc.readyAtEnd === false) {
       const names = [...new Set(cc.blockingDurable.map(b => `${b.negated ? 'NOT ' : ''}${b.name}`))];
       const shown = names.slice(0, 3).join(', ');
-      s += ` At the last sample of the record, ${shown}${names.length > 3 ? ` and ${names.length - 3} more condition(s)` : ''} held the close back.`;
+      s += ` At record end, ${shown}${names.length > 3 ? ` and ${names.length - 3} more condition(s)` : ''} held the close back.`;
     }
-    else if (cc.readyAtEnd === true) s += ' At the last sample of the record, every condition on that path was met.';
-    if (cc.blockingTransient && cc.blockingTransient.length) s += ` ${cc.blockingTransient.map(b => b.name).join(' and ')} was still asserted when the record ended. The relay holds its trip output for a set minimum time, so that clears by itself.`;
+    else if (cc.readyAtEnd === true) s += ' At record end, every condition on that path was met.';
+    if (cc.blockingTransient && cc.blockingTransient.length) s += ` ${cc.blockingTransient.map(b => b.name).join(' and ')} was still on at record end; it clears by itself after the minimum trip time.`;
     return s;
   };
 
   if (lead && off79) {
     return V('custom-auto', 'warn',
-      'This device can close by itself. Custom logic does it, not the 79 element.',
-      `E79 := ${cc.e79raw}. The ANSI 79 reclosing element is off, so the Reclosing tab above has no sequence to show. `
-      + `The close equation ${names} has a path that needs no operator action. ${(lead.trigger[0] && lead.trigger[0].name) || lead.eqName} starts it.`
-      + (lead.delay && lead.delay.comment ? ` The site comment on that timer reads: ${lead.delay.comment}.` : '')
-      + delayText() + ' The close still waits for the conditions listed below.' + stateText()
-      + ' This record ends long before the close is due, so the tool cannot say if the close happened.' + unitsNote());
+      'Can close by itself — custom logic, not the 79 element',
+      `E79 := ${cc.e79raw} (79 off), but ${names} has a path that needs no operator, started by ${(lead.trigger[0] && lead.trigger[0].name) || lead.eqName}${lead.delay && lead.delay.comment ? ` ("${lead.delay.comment}")` : ''}.`
+      + delayText() + stateText() + unitsNote());
   }
   if (lead && cc.enabled79 === true) {
     return V('custom-plus-79', 'warn',
-      'This device has two automatic close paths.',
-      `The ANSI 79 element is on (E79 := ${cc.e79raw}). The close equation ${names} also has a path that needs no operator action. ${(lead.trigger[0] && lead.trigger[0].name) || lead.eqName} starts it.`
-      + delayText() + ' Read the two together. A device can close from the custom path after the 79 element has gone to lockout.' + unitsNote());
+      'Two automatic close paths: the 79 element and custom logic',
+      `79 is on (E79 := ${cc.e79raw}), and ${names} also has a path that needs no operator, started by ${(lead.trigger[0] && lead.trigger[0].name) || lead.eqName}.`
+      + delayText() + ' The custom path can close the device even after the 79 goes to lockout.' + unitsNote());
   }
   if (lead) {
     return V('custom-auto-unknown79', 'warn',
-      'This device can close by itself through custom logic.',
-      `This file has no E79 setting, so the tool cannot say if the 79 element is used. The close equation ${names} has a path that needs no operator action. ${(lead.trigger[0] && lead.trigger[0].name) || lead.eqName} starts it.`
+      'Can close by itself through custom logic',
+      `No E79 setting in this file. ${names} has a path that needs no operator, started by ${(lead.trigger[0] && lead.trigger[0].name) || lead.eqName}.`
       + delayText() + unitsNote());
   }
   if (cc.hasExternal && off79) {
     const ext = cc.paths.filter(p => p.kind === 'external').flatMap(p => p.trigger.map(t => t.name));
     return V('external', 'unknown',
-      'An external signal can close this device.',
-      `E79 := ${cc.e79raw}. The 79 element is off. The close equation ${names} can be started by ${[...new Set(ext)].join(', ')}. `
-      + 'What drives that signal is outside this file, so the tool cannot say if the close is automatic or manual.');
+      'An external signal can close this device',
+      `E79 := ${cc.e79raw} (79 off). ${names} can be started by ${[...new Set(ext)].join(', ')}; what drives that signal is outside this file.`);
   }
   if (cc.hasOperator && off79) {
     const ops = cc.paths.filter(p => p.kind === 'operator').flatMap(p => p.trigger.map(t => t.name));
     return V('manual-only', 'bad',
-      'Only an operator can close this device.',
-      `E79 := ${cc.e79raw}. The 79 element is off. Every path in the close equation ${names} needs an operator action: ${[...new Set(ops)].join(', ')}. `
-      + 'The device stays open until a person closes it.');
+      'Only an operator can close this device',
+      `E79 := ${cc.e79raw} (79 off). Every path in ${names} needs an operator action (${[...new Set(ops)].join(', ')}); the device stays open until someone closes it.`);
   }
   if (off79) {
     return V('manual-only', 'bad',
-      'The tool found no automatic close path.',
-      `E79 := ${cc.e79raw}. The 79 element is off, and no path in the close equation ${names} goes true without an operator action or an external signal.`);
+      'No automatic close path found',
+      `E79 := ${cc.e79raw} (79 off). No path in ${names} closes without an operator action or an external signal.`);
   }
   return null;
 }
@@ -493,9 +488,9 @@ function ccTermChip(t, P) {
   const mark = t.satisfied == null ? '?' : (t.satisfied ? '✓' : '✕');
   const title = `${t.name} — ${t.what || 'relay word bit'}. `
     + (t.equation ? `${t.name} := ${t.equation}. ` : '')
-    + (t.analog ? 'The tool does not evaluate analog comparisons from the record.'
-      : (t.known ? `It is ${t.state ? 'asserted' : 'not asserted'} at the end of the record.` : 'This record does not carry this bit.'))
-    + (t.negated ? ' The equation uses NOT, so the close needs this bit low.' : '');
+    + (t.analog ? 'Analog comparison, not evaluated.'
+      : (t.known ? `${t.state ? 'On' : 'Off'} at record end.` : 'Not in this record.'))
+    + (t.negated ? ' NOT: the close needs this bit off.' : '');
   const label = (!t.analog && typeof tt === 'function') ? tt(t.name, P) : t.name;
   return `<span title="${typeof escapeAttr === 'function' ? escapeAttr(title) : title}"
     style="display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:4px;font-family:var(--mono);font-size:11px;color:${color};background:${bg};border:1px solid ${color}33;margin:2px 4px 2px 0;">
@@ -510,16 +505,16 @@ function ccBranchBlock(b, P) {
   if (trig) chips.push(`<div class="timing-chip"><span class="label">Started by:</span> <span class="value">${b.edge ? b.edge + ' ' : ''}${trig}</span></div>`);
   if (b.route.length > 1) chips.push(`<div class="timing-chip"><span class="label">Route:</span> <span class="value">${b.eqName} → ${b.route.join(' → ')}</span></div>`);
   const ready = b.kind === 'seal-in' ? ''
-    : `<div class="timing-chip"><span class="label">At the end of the record:</span> <span class="value">${b.ready === true ? 'every condition met' : (b.ready === false ? b.blocking.length + ' condition(s) not met' : 'not all conditions are recorded')}</span></div>`;
+    : `<div class="timing-chip"><span class="label">At record end:</span> <span class="value">${b.ready === true ? 'every condition met' : (b.ready === false ? b.blocking.length + ' condition(s) not met' : 'some conditions not recorded')}</span></div>`;
 
   return `<div style="background:${k.bg};border:1px solid ${k.border};border-radius:6px;padding:11px 13px;margin-bottom:9px;">
     <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:6px;">
       <span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${k.color};">${b.eqName}${b.route.length ? ' ← ' + b.route[b.route.length - 1] : ''}</span>
       <span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:0.06em;color:${k.color};border:1px solid ${k.color}55;">${k.text}</span>
     </div>
-    ${b.delay && b.delay.comment ? `<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">Site comment on the timer: ${b.delay.comment}</div>` : ''}
+    ${b.delay && b.delay.comment ? `<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">Timer comment: ${b.delay.comment}</div>` : ''}
     <div class="trip-timing" style="margin:0 0 7px;">${chips.join('')}${ready}</div>
-    <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:3px;">Conditions on this path, as recorded at the last sample:</div>
+    <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:3px;">Conditions at last sample:</div>
     <div>${b.terms.map(t => ccTermChip(t, P)).join('')}</div>
   </div>`;
 }
@@ -543,10 +538,10 @@ function buildCustomCloseCard(P, A) {
     return `<div style="margin-top:14px;">
       <div class="code-block" style="font-size:11.5px;padding:8px 10px;">${e.name} := ${eqHTML}</div>
       ${e.comment ? `<div style="font-size:11.5px;color:var(--text-muted);margin:5px 0 8px;">Site comment: ${e.comment}</div>` : '<div style="height:8px"></div>'}
-      ${e.disabled ? `<div style="font-size:12px;color:var(--text-dim);">This equation is set to ${e.raw}. It cannot close the device.</div>` : ''}
-      ${e.unreadable ? `<div style="font-size:12px;color:var(--text-dim);">The tool could not read this equation. It is shown above as the file writes it.</div>` : ''}
+      ${e.disabled ? `<div style="font-size:12px;color:var(--text-dim);">Set to ${e.raw}; cannot close the device.</div>` : ''}
+      ${e.unreadable ? `<div style="font-size:12px;color:var(--text-dim);">Could not be read; shown as written.</div>` : ''}
       ${branches.map(b => ccBranchBlock(b, P)).join('')}
-      ${e.branches.length > 8 ? `<div style="font-size:11px;color:var(--text-muted);">${e.branches.length - 8} more path(s) are not shown.</div>` : ''}
+      ${e.branches.length > 8 ? `<div style="font-size:11px;color:var(--text-muted);">${e.branches.length - 8} more path(s) not shown.</div>` : ''}
     </div>`;
   }).join('');
 
@@ -561,9 +556,7 @@ function buildCustomCloseCard(P, A) {
     </div>
     ${eqBlocks}
     <div style="margin-top:12px;padding:10px 12px;border:1px solid var(--card-border);border-radius:6px;font-size:11px;color:var(--text-muted);line-height:1.55;">
-      Green = the condition was met at the last sample of this record. Red = it was not. Grey = the record does not carry it, or it is an analog comparison the tool does not evaluate.
-      The close falls after this record ends, so these states show that moment only.
-      The tool reports what the close logic permits. It does not predict a close. A latch bit (LT) is read as a mode switch, not as an operator action.
+      States at last sample: green met, red not met, grey not recorded or analog. Latch bits (LT) are read as mode switches.
     </div>
     ${cc.notes.map(n => `<div style="margin-top:10px;padding:10px 12px;background:var(--yellow-dim);border:1px solid #5c4506;border-radius:6px;font-size:12px;color:var(--text-dim);line-height:1.55;">${n}</div>`).join('')}
   </div>`;

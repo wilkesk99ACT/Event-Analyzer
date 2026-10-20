@@ -64,9 +64,9 @@ function renderLLGLegend() {
     <span>${swatch('background:var(--bg2);border:1px solid var(--card-border);box-shadow:0 0 0 2px var(--accent);')} Bit you clicked</span>
     <span>${dashSample(LLG_NOT_DASH)} Negated (NOT)</span>
     <span>${dashSample(LLG_TRIG_DASH)} Edge-triggered (R_TRIG/F_TRIG)</span>
-    <span>${mergeSample} Bracket (&amp;) marks inputs AND-ed together (colored by whether ALL are met); inputs with no bracket are alternative OR inputs</span>
-    <span>🖱️ Hover any line to see exactly what it connects</span>
-    <span>⏱️ A timed connection (a base bit → its timed output, or an SV's own pickup/dropout into itself) animates the color traveling along the line while that timer is actually running</span>
+    <span>${mergeSample} AND inputs (no bracket = OR)</span>
+    <span>🖱️ Hover a line for details</span>
+    <span>⏱️ Timer running: color moves along the line</span>
   </div>`;
 }
 
@@ -106,7 +106,7 @@ function renderBlinkerPair(clickedLabel, P) {
   const rightCls = `${stateCls(timedLabel)} ${clickedLabel === timedLabel ? 'llg-center' : ''}`;
 
   return `<div class="llg-diagram-outer" style="margin-top:12px;">
-    ${renderLLGHeader('Logic chart — what feeds this bit, and what it feeds into: <span style="color:var(--text-muted);">(blinker — no diagnostic meaning)</span>', false)}
+    ${renderLLGHeader('Inputs and outputs <span style="color:var(--text-muted);">(blinker; ignore)</span>', false)}
     ${renderLLGLegend()}
     <div class="llg-diagram-body" id="llgSourceBody" style="position:relative;padding:26px 0 22px;">
       <svg viewBox="0 0 220 74" preserveAspectRatio="none" style="position:absolute;top:0;left:0;width:100%;height:100%;overflow:visible;pointer-events:none;">
@@ -527,7 +527,7 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
     if (pu > 0 && pu < minRes) bits.push(`pickup ${pu} cyc`);
     if (dof > 0 && dof < minRes) bits.push(`dropout ${dof} cyc`);
     if (!bits.length) return null;
-    return `${bits.join(', ')} faster than this file's digital recording resolution (${minRes.toFixed(2)} cyc/sample) — appears instantaneous here`;
+    return `${bits.join(', ')} is faster than the record can show (${minRes.toFixed(2)} cyc/sample); looks instant here`;
   }
 
   // ── Port distribution ──
@@ -772,7 +772,7 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
     const st = currentBitState(e.from);
     const color = (st && st.state) ? 'var(--red)' : 'var(--text-muted)';
     // A little loop that leaves the right edge, arcs out and back — visually "returns to self".
-    linesHTML += `<path d="M ${x} ${y} q ${FB_R * 1.6} ${-FB_R}, ${FB_R * 1.6} ${FB_R} q 0 ${FB_R * 1.6}, ${-FB_R * 1.6} ${FB_R * 0.9}" fill="none" stroke="${color}" stroke-width="1.5" stroke-dasharray="${LLG_NOT_DASH}"><title>Feedback: ${e.from}${e.mod ? ' (' + e.mod + ')' : ''} — this bit's own timed output loops back into its logic</title></path>`;
+    linesHTML += `<path d="M ${x} ${y} q ${FB_R * 1.6} ${-FB_R}, ${FB_R * 1.6} ${FB_R} q 0 ${FB_R * 1.6}, ${-FB_R * 1.6} ${FB_R * 0.9}" fill="none" stroke="${color}" stroke-width="1.5" stroke-dasharray="${LLG_NOT_DASH}"><title>Feedback: ${e.from}${e.mod ? ' (' + e.mod + ')' : ''} — timed output loops back into its own logic</title></path>`;
   });
 
   let boxesHTML = '';
@@ -802,7 +802,7 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
   LLG_CURRENT = { graph, P, tripFocus };
 
   return `<div class="llg-diagram-outer" style="margin-top:12px;">
-    ${renderLLGHeader('Logic chart — what feeds this bit, and what it feeds into:', tripFocus)}
+    ${renderLLGHeader('Inputs and outputs', tripFocus)}
     ${renderLLGLegend()}
     ${renderLogicTimeline(P)}
     <div class="llg-wrap llg-diagram-body" id="llgSourceBody" style="display:block;">

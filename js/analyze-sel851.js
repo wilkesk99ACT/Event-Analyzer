@@ -331,11 +331,11 @@ function analyzeSel851(P) {
     A.verdict = {
       level: 'info', code: 'NO_SETTINGS',
       headline: 'This trip cannot be checked — the archive has no settings',
-      detail: `The relay tripped at ${fmtT(A.tripIdx)}. This archive has no .hdr file, so there is no trip equation and no element settings to check the trip against. The waveforms, the bit states and the timeline are all available. Export the event again from SEL Grid Configurator or the relay web server to get the .hdr file.`,
+      detail: `The relay tripped at ${fmtT(A.tripIdx)}. No .hdr file, so there are no settings to check against. Re-export the event from SEL Grid Configurator or the relay web server to get it.`,
     };
     addFinding('info', 'NO_SETTINGS',
       'No settings are available for this record',
-      'An SEL-851 .evzip normally holds three files: .cfg, .dat and .hdr. This one has no .hdr. Without it the tool can show what the relay did, but it cannot say whether that agrees with how the relay is set.');
+      'This .evzip has no .hdr file. The record shows what the relay did, but not whether it matches the settings.');
     A.breaker = sel851CheckBreaker(P, A, msPerSample, addFinding, fmtT);
     sel851CheckScaling(P, A, Q, addFinding);
     A.tripCause = { element: null, label: 'Not checked — no settings in this archive', idx: A.tripIdx, seconds: tSec(A.tripIdx), measuredText: null, eventTypeFromRelay: P.eventInfo.eventType };
@@ -373,11 +373,11 @@ function analyzeSel851(P) {
     if (commandBits.length) {
       addFinding('info', 'EXTERNAL_COMMAND',
         'The trip came from a command, not a protection element',
-        `No term of ${P.tripEquationName} was true at ${fmtT(A.tripIdx)}, but ${commandBits.join(', ')} was asserted. This was an operator or SCADA trip. Protection did not cause it.`);
+        `No term of ${P.tripEquationName} was true at ${fmtT(A.tripIdx)}, but ${commandBits.join(', ')} was asserted: an operator or SCADA trip.`);
     } else {
       addFinding('error', 'NO_INITIATOR',
         'The trip started with no protection element asserted',
-        `Trip_01 asserted at ${fmtT(A.tripIdx)}, but every branch of ${P.tripEquationName} read 0 at that sample, and no local, remote or communications trip command was asserted either. The recorded cause is missing. Possible causes: the initiating bit is not in the event report channel list, the trip came through a path this record does not capture, or the relay asserted its trip output for a reason outside the trip equation.`);
+        `Trip_01 asserted at ${fmtT(A.tripIdx)}, but every branch of ${P.tripEquationName} read 0 and no trip command was asserted. Likely the initiating bit is not a recorded channel, or the trip came from outside the trip equation.`);
     }
   }
 
@@ -414,7 +414,7 @@ function analyzeSel851(P) {
   if (strayTimeouts.length) {
     addFinding('info', 'NOT_IN_EQUATION',
       'An element timed out but cannot trip the breaker',
-      `${strayTimeouts.join(', ')} timed out during this record, but none of these appear in ${P.tripEquationName}. They cannot cause a trip as the relay is set. This is normal for an alarm-only element.`);
+      `${strayTimeouts.join(', ')} timed out but ${strayTimeouts.length > 1 ? 'are' : 'is'} not in ${P.tripEquationName}, so cannot trip. Normal for an alarm-only element.`);
   }
 
   // ══════════════════════════════════════════════════════════════════
@@ -444,11 +444,11 @@ function analyzeSel851(P) {
     if (healthyWhileAsserted) {
       addFinding('info', 'LOP_ASSERTED_THROUGHOUT',
         'The loss-of-potential bit was asserted for the whole record',
-        `60LOP.PU read 1 at every sample, including the window before the disturbance where the measured voltage was ${A.scaling.measuredLLsec.toFixed(1)} V secondary against an expected ${A.scaling.expectedLLsec.toFixed(1)} V, balanced and healthy. A loss-of-potential bit that stays up while the voltage is healthy is not tracking the voltage. This record cannot show whether a standing VT problem exists or the bit reports something else. Check the Sequential Events Recorder for when 60LOP.PU last changed.`);
+        `60LOP.PU stayed at 1 even while voltage was healthy before the disturbance (${A.scaling.measuredLLsec.toFixed(1)} V secondary vs. ${A.scaling.expectedLLsec.toFixed(1)} V expected). Check the Sequential Events Recorder for when it last changed.`);
     } else {
       addFinding('check', 'LOP_ACTIVE',
         'Loss of potential was asserted during a voltage trip',
-        `60LOP.PU read 1 at ${fmtT(A.tripIdx)}, while ${voltageInitiators.join(', ')} caused the trip. Loss of potential means the relay judged its voltage inputs unreliable. ${wasAlreadyUp ? 'The bit was already asserted when the record opened, so this record cannot show what set it.' : `The bit asserted at ${fmtT(lopRise)}.`} A voltage element that operates while this bit is up can be measuring a VT problem instead of a system problem. Possible causes: a blown VT fuse, an open VT secondary, or a lost VT connection. Check 60LOP.Blk and the VT circuit.`);
+        `60LOP.PU read 1 at ${fmtT(A.tripIdx)}, while ${voltageInitiators.join(', ')} caused the trip. ${wasAlreadyUp ? 'It was already on when the record opened.' : `It asserted at ${fmtT(lopRise)}.`} The trip may reflect a VT problem (blown fuse, open secondary) rather than a system problem; check 60LOP.Blk and the VT circuit.`);
     }
   }
 
@@ -529,15 +529,15 @@ function sel851EvaluateElement(P, A, Q, meta, split, term, fam, initiated, msPer
   ev.qtyUnit = fam && meta[fam.qty] ? meta[fam.qty].unit : '';
 
   if (!fam) {
-    ev.notes.push(`This tool does not have a measured quantity mapped for the ${split.family} family, so its pickup was not checked against the waveforms.`);
+    ev.notes.push(`Pickup not checked: no measured quantity mapped for ${split.family}.`);
     return ev;
   }
   if (!series) {
-    ev.notes.push(`The channels needed for ${fam.qty} are not in this record, so this element's pickup was not checked against the waveforms.`);
+    ev.notes.push(`Pickup not checked: channels for ${fam.qty} not in this record.`);
     return ev;
   }
   if (!Number.isFinite(pickup)) {
-    ev.notes.push(`No ${el}.PUVal setting is present in the header, so this element's pickup was not checked.`);
+    ev.notes.push(`Pickup not checked: no ${el}.PUVal setting in the header.`);
     return ev;
   }
 
@@ -560,7 +560,7 @@ function sel851EvaluateElement(P, A, Q, meta, split, term, fam, initiated, msPer
       const marginPct = pickup !== 0 ? Math.abs((m - pickup) / pickup) * 100 : 0;
       addFinding('error', 'BELOW_PICKUP',
         `${el} timed out while its measured value was inside pickup`,
-        `${el} asserted TmOut at ${fmtT(tmOutIdx)}. Its pickup is ${pickup} ${ev.qtyUnit} (operate ${dir === 'below' ? 'under' : 'over'} pickup), but the ${ev.qtyDesc} measured from this record's own waveforms was ${fmtV(m)} at that sample, which is ${marginPct.toFixed(1)}% on the wrong side. These two must agree. Possible causes: the CT or VT ratio setting does not match the installed ratio, a channel is mapped to the wrong phase, the element is set in different units than assumed here, or the element was driven by a different quantity than the one shown.`);
+        `${el} asserted TmOut at ${fmtT(tmOutIdx)}. Its pickup is ${pickup} ${ev.qtyUnit} (operate ${dir === 'below' ? 'under' : 'over'} pickup), but the measured ${ev.qtyDesc} was ${fmtV(m)}, ${marginPct.toFixed(1)}% on the wrong side. Check the CT/VT ratio settings and channel mapping.`);
     }
   }
 
@@ -578,7 +578,7 @@ function sel851EvaluateElement(P, A, Q, meta, split, term, fam, initiated, msPer
       if (!ev.delayAgrees) {
         addFinding('check', 'DELAY_MISMATCH',
           `${el} did not time out after its set delay`,
-          `${el}.PU asserted at ${fmtT(puIdx)} and ${el}.TmOut asserted at ${fmtT(tmOutIdx)}, which is ${observed.toFixed(4)} s apart. The ${el}.PUDly setting is ${delay} s. The difference is ${Math.abs(observed - delay).toFixed(4)} s, outside the ${tol.toFixed(4)} s this tool allows for processing and window effects. Possible causes: the settings in this header are not the settings that were active when the event happened, the element dropped out and picked up again inside the window, or the pickup bit was already asserted before the record opened.`);
+          `${el}.PU asserted at ${fmtT(puIdx)} and ${el}.TmOut asserted at ${fmtT(tmOutIdx)}: ${observed.toFixed(4)} s vs. ${el}.PUDly = ${delay} s (off by ${Math.abs(observed - delay).toFixed(4)} s). Possibly different settings were active, or the pickup reset or was already on at record start.`);
       }
     } else if (fam.timed === 'curve') {
       const r = sel851IntegrateCurve(curve, timeDial, series, pickup, puIdx, msPerSample, rstMod);
@@ -589,12 +589,12 @@ function sel851EvaluateElement(P, A, Q, meta, split, term, fam, initiated, msPer
         if (!ev.delayAgrees) {
           addFinding('check', 'CURVE_MISMATCH',
             `${el} did not operate on its curve`,
-            `${el} operated ${observed.toFixed(4)} s after pickup. Curve ${curve} at time dial ${timeDial}, integrated against the current measured in this record, gives ${r.seconds.toFixed(4)} s. Possible causes: a different setting group was active, the reset mode is not instantaneous, or the curve setting shown here is not the one that ran.`);
+            `${el} operated ${observed.toFixed(4)} s after pickup; curve ${curve} at TD ${timeDial} predicts ${r.seconds.toFixed(4)} s. Possibly a different setting group or reset mode was active.`);
         }
       } else if (r && r.idx === null) {
-        ev.notes.push(`Curve ${curve} at time dial ${timeDial} does not reach operate within this record. The record covers ${(series.length * msPerSample / 1000).toFixed(3)} s, which is shorter than the element needs at the current measured here.`);
+        ev.notes.push(`Curve ${curve} at TD ${timeDial} would not operate within this ${(series.length * msPerSample / 1000).toFixed(3)} s record.`);
       } else {
-        ev.notes.push(`No operate-time estimate: curve ${curve || 'not set'} with reset mode ${rstMod || 'not set'} is outside the models this tool applies.`);
+        ev.notes.push(`No operate-time estimate for curve ${curve || 'not set'}, reset mode ${rstMod || 'not set'}.`);
       }
     }
   }
@@ -608,7 +608,7 @@ function sel851EvaluateElement(P, A, Q, meta, split, term, fam, initiated, msPer
     if (frac > 0.10) {
       addFinding('check', 'PICKUP_NOT_HELD',
         `${el} timed out although its measured value came back inside pickup`,
-        `Between pickup and timeout, the ${ev.qtyDesc} was inside the ${pickup} ${ev.qtyUnit} pickup for ${(frac * 100).toFixed(0)}% of the window. An element with a definite-time delay should reset when the value returns inside pickup. Possible causes: the element uses a dropout delay this tool does not model, or the quantity compared here is not the quantity the element used.`);
+        `The ${ev.qtyDesc} was back inside the ${pickup} ${ev.qtyUnit} pickup for ${(frac * 100).toFixed(0)}% of the timing window; a definite-time element should have reset.`);
     }
   }
 
@@ -616,7 +616,7 @@ function sel851EvaluateElement(P, A, Q, meta, split, term, fam, initiated, msPer
   if (tmOutIdx != null && enabled === false) {
     addFinding('error', 'ELEMENT_DISABLED',
       `${el} operated while its enable setting says it is off`,
-      `${el}.TmOut asserted at ${fmtT(tmOutIdx)}, but ${split.family}.Ena reads "${S[`${split.family}.Ena`]}", which does not enable level ${split.level}. Possible causes: the header settings are not the settings that were active during the event, or the settings were changed after the event.`);
+      `${el}.TmOut asserted at ${fmtT(tmOutIdx)}, but ${split.family}.Ena reads "${S[`${split.family}.Ena`]}", which does not enable level ${split.level}. The header settings may not be the ones active during the event.`);
   }
   if (tmOutIdx != null && torqCtl !== undefined && torqCtl !== '1') {
     const tcBit = `${el}.TorqCtl`;
@@ -625,7 +625,7 @@ function sel851EvaluateElement(P, A, Q, meta, split, term, fam, initiated, msPer
     if (tcState === false) {
       addFinding('error', 'TORQUE_OFF',
         `${el} operated while its torque control was 0`,
-        `${tcBit} read 0 at ${fmtT(tmOutIdx)}, which supervises the element off, yet ${el}.TmOut asserted. The torque control equation is "${torqCtl}". These two cannot both be right.`);
+        `${tcBit} read 0 at ${fmtT(tmOutIdx)}, (element supervised off), yet ${el}.TmOut asserted. Torque control: "${torqCtl}".`);
     }
   }
 
@@ -642,7 +642,7 @@ function sel851CheckBreaker(P, A, msPerSample, addFinding, fmtT) {
   if (!s52a) {
     addFinding('info', 'NO_52A',
       'Breaker position is not in this record',
-      'Bkr_01.52A_Sta is not among the recorded channels, so this record cannot show whether the breaker opened.');
+      'Bkr_01.52A_Sta is not recorded, so breaker opening cannot be confirmed.');
     return out;
   }
   out.wasClosed = s52a[A.tripIdx] === 1;
@@ -660,7 +660,7 @@ function sel851CheckBreaker(P, A, msPerSample, addFinding, fmtT) {
     const recordEnd = (s52a.length - 1 - A.tripIdx) * msPerSample / 1000;
     addFinding('error', 'BREAKER_NO_OPEN',
       'The breaker did not open before the record ended',
-      `Trip asserted at ${fmtT(A.tripIdx)} and Bkr_01.52A_Sta was still 1 at the end of the record, ${recordEnd.toFixed(3)} s later.${Number.isFinite(bfDly) ? ` The breaker failure delay BF_01.PUDly is ${bfDly} s.` : ''} Possible causes: the breaker failed to operate, the trip coil circuit is open, or the 52a contact is not reporting position correctly. Check the Sequential Events Recorder for what happened after this record ended.`);
+      `Trip asserted at ${fmtT(A.tripIdx)} and Bkr_01.52A_Sta was still 1 at the end of the record, ${recordEnd.toFixed(3)} s later.${Number.isFinite(bfDly) ? ` BF_01.PUDly is ${bfDly} s.` : ''} Check the breaker, trip coil circuit and 52a contact, and the Sequential Events Recorder for what followed.`);
     return out;
   }
   out.clearSeconds = (out.openIdx - A.tripIdx) * msPerSample / 1000;
@@ -669,7 +669,7 @@ function sel851CheckBreaker(P, A, msPerSample, addFinding, fmtT) {
   if (cycles > 8) {
     addFinding('check', 'BREAKER_SLOW',
       'The breaker took longer than expected to open',
-      `The breaker opened ${out.clearSeconds.toFixed(4)} s after the trip, which is ${cycles.toFixed(1)} cycles. A healthy distribution breaker normally opens in about 3 to 5 cycles. Possible causes: a slow or worn mechanism, low control voltage, or a 52a contact that reports late.`);
+      `The breaker opened ${out.clearSeconds.toFixed(4)} s (${cycles.toFixed(1)} cycles) after the trip; 3 to 5 cycles is typical. Check the mechanism, control voltage and 52a contact.`);
   }
   return out;
 }
@@ -704,7 +704,7 @@ function sel851CheckScaling(P, A, Q, addFinding) {
     out.status = 'no-window';
     addFinding('info', 'NO_PREFAULT_WINDOW',
       'There is no quiet window before the disturbance',
-      'This record starts too close to the disturbance to measure a healthy pre-event voltage, so the instrument transformer scaling could not be cross-checked against the nominal settings.');
+      'The record starts too close to the disturbance to check VT/CT scaling against nominal.');
     return;
   }
 
@@ -727,11 +727,11 @@ function sel851CheckScaling(P, A, Q, addFinding) {
     // them directly when the numbers fit rather than leaving the reader to spot the ratio.
     const ratio = measured / expected;
     let hint = '';
-    if (Math.abs(ratio - Math.sqrt(3)) < 0.12) hint = ` The measured value is about sqrt(3) times the expected value. This is the signature of a phase-to-neutral and phase-to-phase mix-up in Sys.VNom or VTP.Rat.`;
-    else if (Math.abs(ratio - 1 / Math.sqrt(3)) < 0.06) hint = ` The measured value is about 1/sqrt(3) of the expected value. This is the signature of a phase-to-neutral and phase-to-phase mix-up in Sys.VNom or VTP.Rat.`;
+    if (Math.abs(ratio - Math.sqrt(3)) < 0.12) hint = ` About sqrt(3) high: likely a phase-to-neutral/phase-to-phase mix-up in Sys.VNom or VTP.Rat.`;
+    else if (Math.abs(ratio - 1 / Math.sqrt(3)) < 0.06) hint = ` About 1/sqrt(3) low: likely a phase-to-neutral/phase-to-phase mix-up in Sys.VNom or VTP.Rat.`;
     addFinding('error', 'SCALING_SUSPECT',
       'Measured voltage does not match the nominal settings',
-      `Before the disturbance, the highest phase-to-phase voltage in this record was ${measured.toFixed(1)} V secondary. Sys.VNom of ${R.VNomKv} kV with VTP.Rat of ${R.PTP} gives an expected ${expected.toFixed(1)} V secondary. That is ${errPct > 0 ? '+' : ''}${errPct.toFixed(1)}% off.${hint} Every voltage pickup comparison in this record rests on this basis. Possible causes: the VT ratio setting does not match the installed VT, Sys.VNom does not match the system, or the system was not at nominal voltage before the event.`);
+      `Pre-event phase-to-phase voltage was ${measured.toFixed(1)} V secondary; Sys.VNom ${R.VNomKv} kV / VTP.Rat ${R.PTP} gives ${expected.toFixed(1)} V (${errPct > 0 ? '+' : ''}${errPct.toFixed(1)}%).${hint} Voltage pickup checks depend on this.`);
   }
 }
 
@@ -781,11 +781,11 @@ function sel851CheckFaultOrigin(P, A, Q, addFinding, fmtT) {
   if (belowAllOc) {
     addFinding('info', 'NO_FAULT_CURRENT',
       'Voltage fell with no fault current through this relay',
-      `Before the disturbance the highest phase current was ${(pre * A.CTR).toFixed(1)} A primary. The highest during the disturbance was ${(peak * A.CTR).toFixed(1)} A primary, or ${peak.toFixed(3)} A secondary. The lowest enabled phase overcurrent pickup on this relay is ${lowestOcName} at ${lowestOcPickup} A secondary, and the peak reached ${(ocFraction * 100).toFixed(0)}% of it, so no phase overcurrent element picked up. A fault on the protected feeder raises current through these CTs. This one did not. The voltage disturbance came from outside this relay's zone, and the relay responded to a system condition rather than clearing a fault.`);
+      `The disturbance came from outside this relay's zone. Peak phase current was ${(peak * A.CTR).toFixed(1)} A primary (${(pre * A.CTR).toFixed(1)} A before), only ${(ocFraction * 100).toFixed(0)}% of the lowest pickup (${lowestOcName}, ${lowestOcPickup} A secondary).`);
   } else if (ratio != null && ratio >= 2 && !belowAllOc) {
     addFinding('info', 'FAULT_CURRENT_PRESENT',
       'Current rose while voltage fell',
-      `The highest phase current reached ${(peak * A.CTR).toFixed(1)} A primary at ${fmtT(peakIdx)}, which is ${ratio.toFixed(2)} times the pre-event value, while voltage fell. This is consistent with a fault drawing current through this relay's CTs.`);
+      `The highest phase current reached ${(peak * A.CTR).toFixed(1)} A primary at ${fmtT(peakIdx)}, (${ratio.toFixed(2)}x pre-event) while voltage fell, consistent with a fault through this relay.`);
   }
 }
 
@@ -815,7 +815,7 @@ function sel851BuildVerdict(P, A) {
       level: 'error',
       code: 'NOT_REASONABLE',
       headline: 'This trip does not agree with the relay settings',
-      detail: `The relay tripped because ${causeText}. ${errs.length === 1 ? 'One check disagrees' : `${errs.length} checks disagree`} with what the settings and the waveforms in this file say should have happened: ${errs.map(e => e.title).join('; ')}. Read the findings below before accepting the recorded cause.`,
+      detail: `The relay tripped because ${causeText}. ${errs.length === 1 ? 'One check disagrees' : `${errs.length} checks disagree`}: ${errs.map(e => e.title).join('; ')}. See Findings.`,
     };
   }
   if (worst === 'check') {
@@ -824,14 +824,14 @@ function sel851BuildVerdict(P, A) {
       level: 'check',
       code: 'REASONABLE_WITH_QUESTIONS',
       headline: 'The trip agrees with the settings, but some details need review',
-      detail: `The relay tripped because ${causeText}.${primary && primary.evaluated ? ' The measured values support it.' : ''} ${checks.length === 1 ? 'One detail does not' : `${checks.length} details do not`} match what this tool expected: ${checks.map(c => c.title).join('; ')}.`,
+      detail: `The relay tripped because ${causeText}.${primary && primary.evaluated ? ' The measured values support it.' : ''} To review: ${checks.map(c => c.title).join('; ')}.`,
     };
   }
   if (!primary && !cmd) {
     return {
       level: 'check', code: 'CAUSE_UNRESOLVED',
       headline: 'The trip cause could not be resolved',
-      detail: `Trip_01 asserted, but this record does not show which element started it. ${A.equationTerms.length ? `The trip equation ${P.tripEquationName} was checked term by term and none read 1.` : 'No trip equation is present in the header.'}`,
+      detail: `Trip_01 asserted, but no element is shown starting it. ${A.equationTerms.length ? `No term of ${P.tripEquationName} read 1.` : 'No trip equation in the header.'}`,
     };
   }
   const checkedCount = A.elements.filter(e => e.evaluated).length;
@@ -840,8 +840,8 @@ function sel851BuildVerdict(P, A) {
   let coverage = '';
   if (checkedCount) {
     coverage = ` Of the ${totalCount} element${totalCount === 1 ? '' : 's'} in the trip equation, ${operatedCount === 0 ? 'none operated' : operatedCount === 1 ? 'one operated' : `${operatedCount} operated`}` +
-      `${operatedCount ? `, and ${operatedCount === 1 ? 'its pickup and delay were' : 'their pickups and delays were'} checked against the waveforms in this file and agree` : ''}.` +
-      `${checkedCount < totalCount ? ` ${totalCount - checkedCount} could not be checked against the waveforms; see the Elements tab for why.` : ''}`;
+      `${operatedCount ? `; pickup${operatedCount === 1 ? '' : 's'} and delay${operatedCount === 1 ? '' : 's'} agree with the record` : ''}.` +
+      `${checkedCount < totalCount ? ` ${totalCount - checkedCount} could not be checked (see Elements).` : ''}`;
   }
   return {
     level: 'ok', code: 'REASONABLE',

@@ -225,7 +225,7 @@ function exportNodeAsPNG(node, filename) {
     ctx.fillRect(0, 0, width, height);
     llgRenderDomToCanvas(node, ctx, rect);
     canvas.toBlob(blob => {
-      if (!blob) { alert('Could not generate the image in this browser — try its built-in screenshot tool instead.'); return; }
+      if (!blob) { alert('Could not create the image in this browser. Use a screenshot instead.'); return; }
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = filename;
@@ -235,6 +235,6 @@ function exportNodeAsPNG(node, filename) {
     }, 'image/png');
   } catch (err) {
     console.error('Logic chart export failed:', err);
-    alert('Could not generate the image in this browser — try its built-in screenshot tool instead.');
+    alert('Could not create the image in this browser. Use a screenshot instead.');
   }
 }

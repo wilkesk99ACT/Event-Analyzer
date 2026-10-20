@@ -55,7 +55,7 @@ function renderSel851Banner() {
       ${P.analogData.length} samples at ${(P.cfg.rates[0]?.sampFreq || 0).toFixed(0)} Hz &nbsp;·&nbsp;
       ${P.digitalLabels.length} named bits
     </div>
-    ${!P._debug.hdrPresent ? `<div style="margin-top:10px;padding:8px 12px;background:var(--yellow-dim);border-radius:6px;font-size:12px;color:var(--yellow);">This archive has no .hdr file. Without it there are no settings and no trip equation, so the trip cannot be checked for reasonableness. Only the waveforms and bit states are available.</div>` : ''}
+    ${!P._debug.hdrPresent ? `<div style="margin-top:10px;padding:8px 12px;background:var(--yellow-dim);border-radius:6px;font-size:12px;color:var(--yellow);">No .hdr file, so no settings or trip equation: the trip cannot be checked. Waveforms and bit states only.</div>` : ''}
   </div>`;
 }
 
@@ -135,8 +135,7 @@ function sel851VerdictPanel(P, A) {
     const order = { error: 0, check: 1, info: 2, ok: 3 };
     const sorted = [...A.findings].sort((a, b) => order[a.level] - order[b.level]);
     h += `<div class="card ${A.findings.some(f => f.level === 'error') ? 'red-accent' : A.findings.some(f => f.level === 'check') ? 'yellow-accent' : 'blue-accent'}">
-      <div class="card-header">🩺 Findings</div>
-      <p style="font-size:12px;color:var(--text-dim);margin-bottom:14px;">Each finding names two things in this file that must agree, and says whether they do. A finding tells you what disagrees and what could cause it. It does not tell you what to do.</p>`;
+      <div class="card-header">🩺 Findings</div>`;
     for (const f of sorted) {
       const fs = SEL851_VERDICT_STYLE[f.level] || SEL851_VERDICT_STYLE.info;
       h += `<div style="border-left:3px solid ${fs.color};background:rgba(255,255,255,0.02);padding:10px 14px;margin-bottom:10px;border-radius:0 6px 6px 0;">
@@ -154,13 +153,13 @@ function sel851VerdictPanel(P, A) {
   // 4. The trip equation, term by term
   if (P.tripEquation) {
     h += `<div class="card blue-accent"><div class="card-header">📋 Trip equation at the moment of the trip</div>
-      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">${sel851Esc(P.tripEquationName)} is the equation the relay uses to decide to trip. Each term is shown with the state it read at that sample.</p>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">Each term of ${sel851Esc(P.tripEquationName)} and its state at the trip.</p>
       <div style="font-family:var(--mono);font-size:11px;background:#0a0e17;padding:12px;border-radius:6px;color:var(--text-dim);line-height:1.7;word-break:break-word;margin-bottom:12px;">${sel851Esc(P.tripEquation)}</div>
       <table class="data-table"><thead><tr><th>Term</th><th>State at trip</th><th>In this record?</th></tr></thead><tbody>
       ${(A.equationTermStates || []).map(t => `<tr>
         <td style="font-family:var(--mono);color:${t.state ? 'var(--red)' : 'var(--text-dim)'}">${sel851Esc(t.name)}</td>
         <td>${t.known ? badge(!!t.state, t.state ? '1' : '0') : '<span class="badge badge-yellow"><span class="badge-dot"></span>NOT RECORDED</span>'}</td>
-        <td style="color:var(--text-muted)">${t.known ? 'Yes' : 'No — this bit is not a recorded channel'}</td>
+        <td style="color:var(--text-muted)">${t.known ? 'Yes' : 'No'}</td>
       </tr>`).join('')}
       </tbody></table></div>`;
   }
@@ -171,7 +170,7 @@ function sel851VerdictPanel(P, A) {
     const good = sc.status === 'agrees';
     h += `<div class="card ${good ? 'green-accent' : sc.status === 'disagrees' ? 'red-accent' : 'blue-accent'}">
       <div class="card-header">📐 Measurement basis</div>
-      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">Element pickups on this relay are in secondary units. Every measured value in this tool is taken from the raw sampled waveforms and divided by the ratio settings below. This is what those numbers rest on.</p>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">Pickups are in secondary units. Measured values are converted with these ratios.</p>
       <table class="data-table"><tbody>
         <tr><td style="width:38%;color:var(--text-muted)">VT ratio (VTP.Rat)</td><td>${P.ratios.PTP ?? 'not set'} &nbsp;·&nbsp; connection ${sel851Esc(P.ratios.vtConn || 'not set')}</td></tr>
         <tr><td style="color:var(--text-muted)">CT ratio (CTP.Rat)</td><td>${P.ratios.CTP ?? 'not set'} &nbsp;·&nbsp; nominal secondary ${P.ratios.CTPsec ?? '?'} A</td></tr>
@@ -179,8 +178,8 @@ function sel851VerdictPanel(P, A) {
         ${sc.expectedLLsec != null ? `<tr><td style="color:var(--text-muted)">Expected phase-to-phase secondary</td><td>${sc.expectedLLsec.toFixed(1)} V</td></tr>` : ''}
         ${sc.measuredLLsec != null ? `<tr><td style="color:var(--text-muted)">Measured before the disturbance</td><td style="color:${good ? 'var(--green)' : 'var(--red)'}">${sc.measuredLLsec.toFixed(1)} V${sc.errorPct != null ? ` (${sc.errorPct > 0 ? '+' : ''}${sc.errorPct.toFixed(1)}%)` : ''}</td></tr>` : ''}
       </tbody></table>
-      ${sc.status === 'no-window' ? `<p style="font-size:11px;color:var(--yellow);margin-top:10px;">This record has no quiet window before the disturbance, so the scaling could not be cross-checked.</p>` : ''}
-      ${sc.status === 'no-nominal' ? `<p style="font-size:11px;color:var(--yellow);margin-top:10px;">Sys.VNom or VTP.Rat is missing, so the scaling could not be cross-checked.</p>` : ''}
+      ${sc.status === 'no-window' ? `<p style="font-size:11px;color:var(--yellow);margin-top:10px;">No quiet period before the disturbance; scaling not cross-checked.</p>` : ''}
+      ${sc.status === 'no-nominal' ? `<p style="font-size:11px;color:var(--yellow);margin-top:10px;">Sys.VNom or VTP.Rat missing; scaling not cross-checked.</p>` : ''}
     </div>`;
   }
 
@@ -192,11 +191,11 @@ function sel851VerdictPanel(P, A) {
 function sel851ElementsPanel(P, A) {
   let h = `<div class="tab-panel" id="panel-sel851-elements">`;
   if (!A.elements || !A.elements.length) {
-    h += `<p style="color:var(--text-dim);font-size:13px;padding:0 4px;">No protection elements from the trip equation could be evaluated for this record.</p></div>`;
+    h += `<p style="color:var(--text-dim);font-size:13px;padding:0 4px;">No trip-equation elements could be evaluated.</p></div>`;
     return h;
   }
   h += `<div class="card blue-accent"><div class="card-header">🛡️ Elements in the trip equation</div>
-  <p style="font-size:12px;color:var(--text-dim);margin-bottom:14px;">Each row compares the relay's setting against the value measured from this record's own waveforms. "Started the trip" marks the element whose output was true when the relay decided to trip.</p>
+  <p style="font-size:12px;color:var(--text-dim);margin-bottom:14px;">Setting vs. measured value for each element. "Started the trip" = output was on at the trip.</p>
   <table class="data-table"><thead><tr>
     <th>Element</th><th>Type</th><th>Enabled</th><th>Pickup</th>
     <th>Measured when it operated</th><th>Set delay</th><th>Measured delay</th><th>Started the trip</th>
@@ -235,7 +234,7 @@ function sel851ElementsPanel(P, A) {
     traces.push({ label: 'pickup', color: '#f87171', values: series.map(() => primary.pickup) });
     h += `<div class="card red-accent"><div class="card-header">📈 ${sel851Esc(primary.element)} operating quantity against its pickup</div>
       ${renderMagnitudeChartSVG(traces, { msPerSample: P.msPerSample, yUnit: primary.qtyUnit, forceZeroBaseline: true, triggerIdx: primary.puIdx ?? undefined, tripIdx: A.tripIdx })}
-      <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">Blue is the ${sel851Esc(primary.qtyDesc)}, computed from the raw sampled waveforms in this file with a one-cycle Fourier window. Red is the ${primary.pickup} ${sel851Esc(primary.qtyUnit)} pickup setting.</p>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">Blue: ${sel851Esc(primary.qtyDesc)}. Red: ${primary.pickup} ${sel851Esc(primary.qtyUnit)} pickup.</p>
     </div>`;
   }
   h += `</div>`;
@@ -246,7 +245,7 @@ function sel851ElementsPanel(P, A) {
 function sel851TimelinePanel(P, A) {
   let h = `<div class="tab-panel" id="panel-sel851-timeline">
     <div class="card red-accent"><div class="card-header">⏱️ Digital Event Timeline</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">Every change of state among the ${P.digitalLabels.length} named relay bits in this record, in order. The ${P.cfg.numDigital - P.digitalLabels.length} unused bit positions the relay declares are not shown.</p>`;
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">Every state change of the ${P.digitalLabels.length} named relay bits, in order.</p>`;
 
   {
     h += `<div style="font-size:11px;color:var(--text-muted);margin-bottom:12px;padding:8px 12px;background:rgba(255,255,255,0.02);border-radius:6px;">
@@ -279,7 +278,7 @@ function sel851VoltagePanel(P, A) {
         { label: 'VBC', color: '#22c55e', values: Q._vbc },
         { label: 'VCA', color: '#3b82f6', values: Q._vca },
       ], { msPerSample: P.msPerSample, yUnit: 'V', forceZeroBaseline: true, tripIdx: A.tripIdx })}
-      <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">Divide by nothing further — these are already secondary volts, scaled by VTP.Rat = ${P.ratios.PTP ?? '?'}. Multiply by ${P.ratios.PTP ?? '?'} for primary volts.</p>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">Secondary volts. Multiply by VTP.Rat = ${P.ratios.PTP ?? '?'} for primary.</p>
     </div>`;
   }
   if (Q._va) {
@@ -297,14 +296,12 @@ function sel851VoltagePanel(P, A) {
     if (Q.v3v0) traces.push({ label: '3V0', color: '#f59e0b', values: Q.v3v0 });
     h += `<div class="card blue-accent"><div class="card-header">⚡ Sequence voltage (V secondary)</div>
       ${renderMagnitudeChartSVG(traces, { msPerSample: P.msPerSample, yUnit: 'V', forceZeroBaseline: true, tripIdx: A.tripIdx })}
-      <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">V1 is the positive-sequence voltage. 3V0 is the zero-sequence voltage, taken as the sum of the three phase phasors. A balanced disturbance moves V1 and leaves 3V0 near zero.</p>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">V1 = positive sequence, 3V0 = zero sequence. A balanced disturbance moves V1 and leaves 3V0 near zero.</p>
     </div>`;
   }
   if (Q.freq) {
     h += `<div class="card blue-accent"><div class="card-header">📊 Frequency (Hz)</div>
-      ${renderMagnitudeChartSVG([{ label: 'Freq', color: '#a78bfa', values: Q.freq }], { msPerSample: P.msPerSample, yUnit: 'Hz', forceZeroBaseline: false, tripIdx: A.tripIdx })}
-      <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">This is the relay's own frequency channel, used as written. There is no waveform to re-derive it from.</p>
-    </div>`;
+      ${renderMagnitudeChartSVG([{ label: 'Freq', color: '#a78bfa', values: Q.freq }], { msPerSample: P.msPerSample, yUnit: 'Hz', forceZeroBaseline: false, tripIdx: A.tripIdx })}    </div>`;
   }
   h += `</div>`;
   return h;
@@ -322,7 +319,7 @@ function sel851CurrentPanel(P, A) {
         { label: 'IB', color: '#22c55e', values: Q._ib.map(v => v * ctr) },
         { label: 'IC', color: '#3b82f6', values: Q._ic.map(v => v * ctr) },
       ], { msPerSample: P.msPerSample, yUnit: 'A', forceZeroBaseline: true, tripIdx: A.tripIdx })}
-      <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">Primary amps, from the raw waveforms. Divide by CTP.Rat = ${ctr} to compare against a pickup setting.</p>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">Primary amps. Divide by CTP.Rat = ${ctr} to compare with pickups.</p>
     </div>`;
   }
   const seqTraces = [];
@@ -333,7 +330,7 @@ function sel851CurrentPanel(P, A) {
   if (seqTraces.length) {
     h += `<div class="card blue-accent"><div class="card-header">⚡ Ground and sequence current (A primary)</div>
       ${renderMagnitudeChartSVG(seqTraces, { msPerSample: P.msPerSample, yUnit: 'A', forceZeroBaseline: true, tripIdx: A.tripIdx })}
-      <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">3I0 is derived from the three phase currents. IGnd and IN are separate measured channels. If the derived and measured values disagree widely on a healthy system, one of the CT connections is wrong.</p>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">3I0 is calculated; IGnd and IN are measured. A wide gap between them on a healthy system points to a CT wiring error.</p>
     </div>`;
   }
   if (A.faultOrigin) {
@@ -345,7 +342,7 @@ function sel851CurrentPanel(P, A) {
         <tr><td style="color:var(--text-muted)">Ratio</td><td>${F.ratio != null ? F.ratio.toFixed(2) + '×' : '—'}</td></tr>
         ${F.lowestOcPickup != null ? `<tr><td style="color:var(--text-muted)">Lowest enabled overcurrent pickup</td><td>${sel851Esc(F.lowestOcName)} at ${F.lowestOcPickup} A secondary (${(F.lowestOcPickup * (A.CTR || 1)).toFixed(0)} A primary)</td></tr>` : ''}
       </tbody></table>
-      <p style="font-size:12px;color:var(--text-dim);margin-top:10px;">A fault on the protected feeder raises current through these CTs. A disturbance elsewhere on the system lowers voltage without raising current here.</p>
+      <p style="font-size:12px;color:var(--text-dim);margin-top:10px;">A fault on this feeder raises current here. A disturbance elsewhere lowers voltage without raising current.</p>
     </div>`;
   }
   h += `</div>`;
@@ -357,11 +354,10 @@ function sel851SettingsPanel(P, A) {
   let h = `<div class="tab-panel" id="panel-sel851-settings">`;
   const hdr = P.hdr;
   if (!hdr || !Object.keys(hdr.values).length) {
-    h += `<p style="color:var(--text-dim);font-size:13px;padding:0 4px;">This archive has no .hdr file, so no settings are available.</p></div>`;
+    h += `<p style="color:var(--text-dim);font-size:13px;padding:0 4px;">No .hdr file, so no settings available.</p></div>`;
     return h;
   }
-  h += `<div class="card blue-accent"><div class="card-header">⚙️ Relay settings from the .hdr file</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">These are the settings the relay wrote into this event record. They are grouped exactly as the relay wrote them.</p>`;
+  h += `<div class="card blue-accent"><div class="card-header">⚙️ Relay settings from the .hdr file</div>`;
   for (const section of Object.keys(hdr.sections)) {
     const keys = hdr.sections[section];
     if (!keys.length) continue;

@@ -178,7 +178,7 @@ function buildCurrentMagChart(P, A, compact, heightOverride) {
   }
 
   const svg = renderMagnitudeChartSVG(traces, { msPerSample, yUnit: unit, forceZeroBaseline: true, triggerIdx: triggerIdxFull, tripIdx: tripIdxFull });
-  return `<div class="card blue-accent"><div class="card-header">〰️ Current Magnitude (RMS envelope)</div>${svg}
+  return `<div class="card blue-accent"><div class="card-header">〰️ Current Magnitude</div>${svg}
     <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">${magMethodNote(P)}</div>
   </div>`;
 }
@@ -222,7 +222,7 @@ function buildVoltageMagChart(P, A, compact, heightOverride) {
   }
 
   const svg = renderMagnitudeChartSVG(traces, { msPerSample, yUnit: unit, forceZeroBaseline: false, triggerIdx: triggerIdxFull, tripIdx: tripIdxFull });
-  return `<div class="card blue-accent"><div class="card-header">🔌 Voltage Magnitude (RMS envelope)</div>${svg}
+  return `<div class="card blue-accent"><div class="card-header">🔌 Voltage Magnitude</div>${svg}
     <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">${magMethodNote(P)}</div>
   </div>`;
 }
@@ -359,7 +359,7 @@ function renderBooleanFlagsSVG(rows, opts, P) {
     if (row.pinned && !row.intervals.length) {
       rowsHTML += `<text x="${(marginLeft + 6).toFixed(1)}" y="${(cy + 3.2).toFixed(1)}" font-size="${(fontSize - 1.5).toFixed(1)}" fill="var(--text-muted)" font-style="italic">never asserts in this record</text>`;
     } else if (row.pinned && !row.intervals.some(([s, e]) => e >= startMs && s <= endMs)) {
-      rowsHTML += `<text x="${(marginLeft + 6).toFixed(1)}" y="${(cy + 3.2).toFixed(1)}" font-size="${(fontSize - 1.5).toFixed(1)}" fill="var(--text-muted)" font-style="italic">asserts outside this zoom window</text>`;
+      rowsHTML += `<text x="${(marginLeft + 6).toFixed(1)}" y="${(cy + 3.2).toFixed(1)}" font-size="${(fontSize - 1.5).toFixed(1)}" fill="var(--text-muted)" font-style="italic">asserts outside this zoom</text>`;
     }
     rowsHTML += `<text x="${marginLeft - 8}" y="${(cy + 3.2).toFixed(1)}" text-anchor="end" font-size="${fontSize}" font-family="var(--mono)" fill="${row.pinned ? 'var(--yellow)' : 'var(--text-dim)'}" class="svg-bit-label" onclick="event.stopPropagation(); showBitDetail('${row.label.replace(/'/g, "\\'")}');"><title>${(P ? (getSVTooltip(row.label, P) || '') : '').replace(/"/g, '&quot;') || 'Click for details'}</title>${row.label}</text>`;
   });
@@ -404,14 +404,14 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
     traces.push({ label: '3V0.Mag', color: '#f59e0b', values: mag });
     title = 'Zero-Sequence Voltage (3V0)';
     yUnit = detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], 'V');
-    note = '3V0 is the instantaneous sum of the three phase voltages — near zero when balanced, and the quantity 59G/59N/59YN elements actually monitor.';
+    note = '3V0: near zero when balanced. Monitored by 59G/59N/59YN.';
   }
   if (family === 'negSeqV' || family === 'zeroSeqV+negSeqV') {
     const v2 = computeNegSeqMagnitude(...seqPhaseOrder(P, data.map(r => r.VAY), data.map(r => r.VBY), data.map(r => r.VCY)), samplesPerCycle, MAGS);
     traces.push({ label: 'V2.Mag', color: '#a78bfa', values: v2 });
     title = traces.length > 1 ? 'Zero + Negative-Sequence Voltage' : 'Negative-Sequence Voltage (V2)';
     yUnit = detectChannelUnit(P, ['VA', 'VAY', 'VB', 'VBY'], 'V');
-    note = 'V2 is the negative-sequence voltage, computed via a Fortescue transform from each phase\'s fundamental-frequency phasor — the quantity 59Q elements monitor.';
+    note = 'V2: phase imbalance. Monitored by 59Q.';
   }
   if (family === 'groundI') {
     const unit = detectChannelUnit(P, ['IA'], 'A');
@@ -422,7 +422,7 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
     if (!traces.length) return ''; // neither channel actually populated in this file
     title = 'Ground / Neutral Current';
     yUnit = unit;
-    note = 'IN/IG are the ground-path currents that 50G/51G (ground) elements monitor directly, distinct from the phase currents above.';
+    note = 'Ground-path current. Monitored by 50G/51G.';
   }
   if (family === 'negSeqI') {
     const unit = detectChannelUnit(P, ['IA'], 'A');
@@ -433,14 +433,14 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
     traces.push({ label: '3I2.Mag', color: '#a78bfa', values: i3i2 });
     title = 'Negative-Sequence Current (3I2)';
     yUnit = unit;
-    note = '3I2 is three times the negative-sequence current, calculated with a Fortescue transform. SEL 50Q/51Q pickups are set in 3I2. A phase-current chart does not show this quantity.';
+    note = '3I2: current imbalance. 50Q/51Q pickups are set in 3I2.';
   }
   if (family === 'freq') {
     traces.push({ label: 'FREQ', color: '#22c55e', values: data.map(r => r.FREQ || 0) });
     title = 'Frequency';
     yUnit = 'Hz';
     forceZeroBaseline = false;
-    note = 'System frequency as tracked by the relay — the quantity 81D (level) and 81R (rate-of-change) elements monitor.';
+    note = 'Frequency as tracked by the relay. Monitored by 81D and 81R.';
   }
 
   if (!traces.length) return '';
@@ -454,7 +454,7 @@ function buildRelevantQuantityChart(P, A, compact, heightOverride) {
     const pk = A.cursorData?.iDataIsPrimary ? TM.pickupPri : TM.pickupSec;
     traces.push({ label: `${TM.element}P pickup`, color: '#ef4444', dash: '5,4', values: new Array(traces[0].values.length).fill(pk) });
     title += ` vs ${TM.element} pickup`;
-    note += ` The dashed line is the ${TM.element} pickup (${TM.pickupSec} A sec).`;
+    note += ` Dashed line: ${TM.element} pickup (${TM.pickupSec} A sec).`;
   }
 
   if (compact) {

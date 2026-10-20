@@ -238,14 +238,14 @@ function buildSVFlagsChart(P, A, compact) {
     return !(m && labels.includes(`SV${m[1]}`));
   });
   const pinnedNote = pinnedSet.size
-    ? `<span class="sv-legend-item svflags-legend-note">Rows in amber were added manually and are not part of the resolved trip cause.</span>` : '';
+    ? `<span class="sv-legend-item svflags-legend-note">Amber rows were added by you; not part of the trip cause.</span>` : '';
   const legendHTML = `<div class="sv-legend">${legendLabels.map(l => {
     const svM = l.match(/^SV(\d+)T?$/);
     const sv = svM ? (P.svSettings || []).find(s => s.num === parseInt(svM[1])) : null;
     let short;
     if (sv) {
       const info = describeSVLogic(sv);
-      short = info.isBlinker ? 'Blinker (self-oscillating; flashes a target/LED — no diagnostic meaning)'
+      short = info.isBlinker ? 'Blinker (flashes an LED; ignore)'
         : info.comment || (info.referencedName ? `Wraps ${info.referencedName}` : `Logic variable ${sv.label}`);
     } else {
       const el = explainElementBit(l, P, freqForLegend);
@@ -282,6 +282,6 @@ function buildSVFlagsChart(P, A, compact) {
 
   const svg = renderBooleanFlagsSVG(rows, { totalMs, triggerMs, tripMs, marginLeft: 110 }, P);
   return `<div class="card blue-accent"><div class="card-header">🔗 SV / Trip Chain Flags</div>${svg}${svflagsPickerHTML(P, A)}${legendHTML}
-    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Boolean state of each element in the resolved trip-cause chain, reconstructed from digital transitions across the full record. Use <b>+ Add bit</b> to plot any other bit in the record alongside it.</div>
+    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">On/off state of each bit in the trip chain. Use <b>+ Add bit</b> to plot others.</div>
   </div>`;
 }

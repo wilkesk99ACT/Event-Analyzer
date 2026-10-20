@@ -33,7 +33,7 @@ function renderEventSelector() {
   });
   const recurring = Object.entries(causeCounts).filter(([, n]) => n > 1);
   let patternNote = recurring.length
-    ? `<div class="evt-pattern-note">🔁 ${recurring.map(([c, n]) => `"${c}" × ${n}`).join(' · ')} in this sequence — an ongoing condition, not an isolated event.</div>`
+    ? `<div class="evt-pattern-note">🔁 ${recurring.map(([c, n]) => `"${c}" × ${n}`).join(' · ')} in this sequence — recurring, not a one-off.</div>`
     : '';
 
   // Real fault current recurring at multiple reclose/re-energization points: some event types
@@ -53,7 +53,7 @@ function renderEventSelector() {
   });
   if (realFaultEvents.length >= 2) {
     const types = realFaultEvents.map(e => e.parsed.eventInfo.eventType);
-    patternNote += `<div class="evt-pattern-note">⚠ Real, elevated fault current recorded at ${realFaultEvents.length} separate reclose points in this sequence (${types.join(', ')})${new Set(types).size > 1 ? ' — different phases each time' : ''}. Recurring across independent attempts points to a persisting condition on this circuit.</div>`;
+    patternNote += `<div class="evt-pattern-note">⚠ Fault current at ${realFaultEvents.length} reclose attempts (${types.join(', ')})${new Set(types).size > 1 ? ', different phases' : ''}. Likely a persistent fault on this circuit.</div>`;
   }  sel.innerHTML = `<div style="display:flex;align-items:center;gap:4px;overflow-x:auto;white-space:nowrap;padding-bottom:2px;">
     <span style="font-size:11px;color:var(--text-muted);font-weight:600;flex-shrink:0;">EVENTS:</span>${buttons}
   </div>${patternNote}`;
@@ -85,7 +85,7 @@ function selectEvent(idx) {
   if (PARSED.format === 'sel851' && PARSED.ratios.VNomKv) {
     const vLn = (PARSED.ratios.VNomKv * 1000) / Math.sqrt(3);
     vPriText = `Nominal V(L-N) primary = ${(vLn / 1000).toFixed(2)} kV`;
-    vPriTitle = `Sys.VNom is ${PARSED.ratios.VNomKv} kV phase-to-phase, so phase-to-neutral is ${vLn.toFixed(0)} V. This relay states its nominal voltage directly, so no inference is needed.`;
+    vPriTitle = `Sys.VNom ${PARSED.ratios.VNomKv} kV L-L = ${vLn.toFixed(0)} V L-N.`;
   }
   if (PARSED.format !== 'form6' && PARSED.format !== 'sel851') {
     if (PARSED.settings.PTRY) ratios.push(`PTR=${PARSED.settings.PTRY}`);
@@ -109,12 +109,12 @@ function selectEvent(idx) {
       const unresolved = PARSED.vnomIsPhaseToPhase == null;
       vPriText = `Expected V(L-N) primary ≈ ${vPriStr}${unresolved ? ' *' : inferredFromSibling ? ' †' : ''}`;
       vPriTitle = inferredFromSibling
-        ? `Expected phase-to-neutral primary voltage ≈ ${PARSED.vnomIsPhaseToPhase ? '(VNOM ÷ sqrt(3)) × PTR' : 'VNOM × PTR'} = ${vPri.toFixed(1)} V (${vPriStr}). † This file's own pre-fault voltage samples could not confirm the VNOM L-L/L-N convention (e.g. bus was still de-energized or mid-recovery through most of the pre-fault window), so it was inferred from event ${PARSED.vnomInferredFromSibling} — the same relay, same CTR/PTR/VNOM settings. Cross-check against the measured voltage in the Voltages tab if this event's own energization looks incomplete.`
+        ? `Expected L-N primary ≈ ${PARSED.vnomIsPhaseToPhase ? '(VNOM ÷ √3) × PTR' : 'VNOM × PTR'} = ${vPri.toFixed(1)} V (${vPriStr}). † VNOM convention taken from event ${PARSED.vnomInferredFromSibling} (same relay); check the Voltages tab.`
         : PARSED.vnomIsPhaseToPhase === true
-        ? `Expected phase-to-neutral primary voltage ≈ (VNOM ÷ sqrt(3)) × PTR = (${PARSED.settings.VNOM} ÷ 1.732) × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). This file's VNOM is nominal phase-to-PHASE secondary voltage (detected from its own VA/VB/VC samples vs VNOM × PTR), so the sqrt(3) is divided back out.`
+        ? `Expected L-N primary ≈ (VNOM ÷ √3) × PTR = (${PARSED.settings.VNOM} ÷ 1.732) × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). VNOM is L-L on this relay.`
         : unresolved
-          ? `Expected phase-to-neutral primary voltage ≈ VNOM × PTR = ${PARSED.settings.VNOM} × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). * Could not confirm from this file's own voltage samples whether VNOM is phase-to-neutral or phase-to-phase — assuming the more common phase-to-neutral convention. Treat this figure with caution and cross-check against the measured pre-fault voltage in the Voltages tab.`
-          : `Expected phase-to-neutral primary voltage ≈ VNOM × PTR = ${PARSED.settings.VNOM} × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). Confirmed from this file's own voltage samples that VNOM is already phase-to-neutral.`;
+          ? `Expected L-N primary ≈ VNOM × PTR = ${PARSED.settings.VNOM} × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). * VNOM assumed L-N; could not confirm. Check the Voltages tab.`
+          : `Expected L-N primary ≈ VNOM × PTR = ${PARSED.settings.VNOM} × ${ptrForVnom} = ${vPri.toFixed(1)} V (${vPriStr}). VNOM is L-N on this relay.`;
     }
   }
   document.getElementById('topBarRatios').textContent = ratios.join(' | ');

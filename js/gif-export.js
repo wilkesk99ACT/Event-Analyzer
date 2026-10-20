@@ -120,7 +120,7 @@ async function downloadLogicChartGIF() {
     document.body.appendChild(a); a.click(); a.remove();
   } catch (err) {
     console.error('GIF export failed:', err);
-    alert('Could not generate the GIF in this browser. The scrubber and play button still work for stepping through the event.');
+    alert('Could not create the GIF in this browser. Use the play button and scrubber instead.');
   } finally {
     // Restore the view to wherever the scrubber was.
     setLogicChartViewIdx(savedViewIdx);

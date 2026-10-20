@@ -235,7 +235,7 @@ async function downloadMainGIF() {
     document.body.appendChild(a); a.click(); a.remove();
   } catch (err) {
     console.error('Main GIF export failed:', err);
-    alert('Could not generate the GIF in this browser. The play button and scrubber still work for stepping through the event.');
+    alert('Could not create the GIF in this browser. Use the play button and scrubber instead.');
   } finally {
     SVFLAGS_HIDE_PICKER = false;
     BANNER_CHART_WIDTH = savedBannerWidth;
