@@ -1,31 +1,44 @@
 
+// Tabs come in two groups. "Start here" holds the tabs that answer the operator's questions on
+// almost every event; "Reference" holds the raw data used to check those answers. Showing all of
+// them at the same weight made it hard for a first-time reader to know where to look. The first
+// primary tab is the default, so each format's content renderer marks that panel active.
+function renderTabBar(primary, reference, onSwitch) {
+  const btn = (t, isActive) =>
+    `<button class="tab-btn ${isActive ? 'active' : ''}" data-tab="${t.id}"${t.hint ? ` title="${t.hint}"` : ''}>${t.icon} ${t.label}</button>`;
+  document.getElementById('tabBar').innerHTML =
+    `<div class="tab-group tab-group-primary"><span class="tab-group-label">Start here</span>${primary.map((t, i) => btn(t, i === 0)).join('')}</div>` +
+    (reference.length
+      ? `<div class="tab-group tab-group-reference"><span class="tab-group-label">Reference</span>${reference.map(t => btn(t, false)).join('')}</div>`
+      : '');
+
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('.tab-btn').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      document.getElementById('panel-' + b.dataset.tab)?.classList.add('active');
+      if (onSwitch) onSwitch(b.dataset.tab);
+    });
+  });
+}
+
 function renderTabs() {
   if (PARSED.format === 'form6') { renderForm6Tabs(); return; }
   if (PARSED.format === 'sel851') { renderSel851Tabs(); return; }
-  const tabs = [
-    { id: 'timeline', label: 'Event Timeline', icon: '📍' },
+  renderTabBar([
+    { id: 'protection', label: 'Protection', icon: '🛡️', hint: 'Pickup, measured value and multiple of pickup for every element' },
+    { id: 'diagnostics', label: 'Diagnostics', icon: '🩺', hint: 'Close readiness, close attempt and physical consistency checks' },
+    { id: 'reclose', label: 'Reclosing', icon: '🔄', hint: 'Whether the device comes back by itself, and how' },
+    { id: 'timeline', label: 'Event Timeline', icon: '📍', hint: 'Every relay bit change, in order' },
+  ], [
     { id: 'voltages', label: 'Voltages', icon: '🔌' },
     { id: 'currents', label: 'Currents', icon: '〰️' },
-    { id: 'protection', label: 'Protection', icon: '🛡️' },
-    { id: 'diagnostics', label: 'Diagnostics', icon: '🩺' },
-    { id: 'reclose', label: 'Reclosing', icon: '🔄' },
     { id: 'sv', label: 'SV Logic', icon: '🔗' },
     { id: 'freq', label: 'Frequency', icon: '📊' },
     { id: 'equations', label: 'Equations', icon: '📋' },
-  ];
-
-  document.getElementById('tabBar').innerHTML = tabs.map(t =>
-    `<button class="tab-btn ${t.id === 'timeline' ? 'active' : ''}" data-tab="${t.id}">${t.icon} ${t.label}</button>`
-  ).join('');
-
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      document.getElementById('panel-' + btn.dataset.tab)?.classList.add('active');
-      if (btn.dataset.tab === 'timeline' && CURSOR_IDX != null) scrollTimelineToCursor(CURSOR_IDX);
-    });
+  ], tab => {
+    if (tab === 'timeline' && CURSOR_IDX != null) scrollTimelineToCursor(CURSOR_IDX);
   });
 }
 
@@ -43,7 +56,7 @@ function renderContent() {
 
   // ── Timeline ──
   const tripRelevant = getTripRelevantLabels(P, A);
-  html += `<div class="tab-panel active" id="panel-timeline">
+  html += `<div class="tab-panel" id="panel-timeline">
     <div class="card red-accent">
       <div class="card-header">⏱️ Digital Event Timeline</div>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:16px;">
@@ -143,7 +156,7 @@ function renderContent() {
   html += `</tbody></table></div></div>`;
 
   // ── Protection ──
-  html += `<div class="tab-panel" id="panel-protection">
+  html += `<div class="tab-panel active" id="panel-protection">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
       <span id="protectionInstantLabel" style="font-size:12px;color:var(--text-dim);font-family:var(--mono);"></span>
       <span style="font-size:11px;color:var(--text-muted);cursor:pointer;" onclick="refreshProtectionTab(null)" title="Reset to trip instant">Move the chart cursor to see values at that instant. Click to reset to trip.</span>

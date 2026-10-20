@@ -21,23 +21,13 @@ function renderForm6Banner() {
 }
 
 function renderForm6Tabs() {
-  const tabs = [
+  renderTabBar([
     { id: 'form6-waveforms', label: 'Waveforms', icon: '〰️' },
+    { id: 'form6-protection', label: 'Protection', icon: '🛡️', hint: 'Pickup settings against measured values' },
     { id: 'form6-digital', label: 'Digital Channels', icon: '📍' },
-    { id: 'form6-protection', label: 'Protection', icon: '🛡️' },
+  ], [
     { id: 'form6-settings', label: 'Settings', icon: '⚙️' },
-  ];
-  document.getElementById('tabBar').innerHTML = tabs.map(t =>
-    `<button class="tab-btn ${t.id === 'form6-waveforms' ? 'active' : ''}" data-tab="${t.id}">${t.icon} ${t.label}</button>`
-  ).join('');
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      document.getElementById('panel-' + btn.dataset.tab)?.classList.add('active');
-    });
-  });
+  ]);
 }
 
 function renderForm6Content() {

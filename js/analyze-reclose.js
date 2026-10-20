@@ -1557,7 +1557,7 @@ function buildRecloseBannerBlock(P, A) {
   } else if (RC.enabled === true && RC.shots) {
     bits.push(`${RC.shots}-shot scheme, not being run for this event`);
   }
-  return `<div style="margin-top:14px;background:${tone.bg};border:1px solid ${tone.border};border-radius:8px;padding:12px 14px;">
+  return `<div class="tour-reclose" style="margin-top:14px;background:${tone.bg};border:1px solid ${tone.border};border-radius:8px;padding:12px 14px;">
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
       <span style="font-size:15px;">${tone.icon}</span>
       <span style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-muted);">Auto-Reclose</span>

@@ -167,7 +167,7 @@ function buildInvestigationPanel(P, A) {
   const sevColor = { high: 'var(--red)', medium: 'var(--yellow)', info: 'var(--accent)' };
   const sevBg = { high: 'var(--red-dim)', medium: 'var(--yellow-dim)', info: 'var(--accent-dim)' };
   const sevBorder = { high: '#5c1414', medium: '#5c4506', info: '#123a5c' };
-  return `<div style="margin-top:14px;">
+  return `<div class="tour-flags" style="margin-top:14px;">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
       <span style="font-size:16px;">🔍</span>
       <span style="font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text);">Flagged for Further Investigation</span>
@@ -187,7 +187,7 @@ function buildConsistencyWarningBanner(P, A) {
   const negCheck = computeConsistencyCheck(P, A, 'neg');
   const flaggedChecks = [zeroCheck, negCheck].filter(c => c && c.flagged);
   if (!flaggedChecks.length) return '';
-  return `<div style="margin-top:14px;">
+  return `<div class="tour-flags" style="margin-top:14px;">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
       <span style="font-size:16px;">🩺</span>
       <span style="font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--red);">Physical Consistency Warning</span>

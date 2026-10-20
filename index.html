@@ -50,6 +50,7 @@
         <div id="topBarVPri" style="font-size:13px;font-weight:700;color:#5ac8fa"></div>
       </div>
       <button class="btn btn-bug" onclick="openBugReport()">🐞 Report a bug</button>
+      <button class="btn" onclick="startTour()" title="Walk through how to read an event">Tour</button>
       <button class="btn" onclick="toggleHelp(true)">Help</button>
       <button class="btn" onclick="resetApp()">New Files</button>
     </div>
@@ -86,6 +87,7 @@
         <div class="help-tab-panel active" id="helptab-quickstart">
           <p style="color:var(--text-muted);font-style:italic;">Results come from the relay's own record and settings.
           Confirm against the diagram and tabs before acting.</p>
+          <p><button class="btn" onclick="startTour()">&#9654; Take the guided tour</button></p>
           <h3>Reading an event</h3>
           <ol>
             <li><b>Headline</b> — the likely trip cause.</li>
@@ -117,12 +119,17 @@
 
         <!-- ── Analysis Tabs ── -->
         <div class="help-tab-panel" id="helptab-tabs">
+          <h3>Start here</h3>
           <ul>
+            <li><b>&#128737;&#65039; Protection</b> — overcurrent pickup, measured value, and multiple of pickup.</li>
+            <li><b>&#129658; Diagnostics</b> — close readiness, close attempt, and sequence voltage vs. sequence current checks (CT wiring, grounding, open phase).</li>
+            <li><b>&#128260; Reclosing</b> — whether the device comes back by itself, and what it waits on.</li>
             <li><b>&#128205; Event Timeline</b> — every bit change, in order, labeled.</li>
+          </ul>
+          <h3>Reference</h3>
+          <ul>
             <li><b>&#128268; Voltages</b> — pre-fault vs. fault voltage, and voltage-element pickups vs. measured.</li>
             <li><b>&#12336;&#65039; Currents</b> — pre-fault vs. fault current per channel.</li>
-            <li><b>&#128737;&#65039; Protection</b> — overcurrent pickup, measured value, and multiple of pickup.</li>
-            <li><b>&#129656; Diagnostics</b> — sequence voltage vs. sequence current checks (CT wiring, grounding, open phase).</li>
             <li><b>&#128279; SV Logic</b> — SV timers/variables in the trip equation, with delays.</li>
             <li><b>&#128202; Frequency</b> — frequency-element pickups vs. measured.</li>
             <li><b>&#128203; Equations</b> — raw SELogic trip, fault, and reclose equations.</li>
@@ -239,6 +246,7 @@
 <script src="js/canvas-export.js"></script>
 <script src="js/bit-detail-modal.js"></script>
 <script src="js/bug-report.js"></script>
+<script src="js/walkthrough.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>

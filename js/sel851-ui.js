@@ -63,25 +63,15 @@ function renderSel851Banner() {
 // TABS
 // ══════════════════════════════════════════════════════════════════════
 function renderSel851Tabs() {
-  const tabs = [
-    { id: 'sel851-verdict', label: 'Verdict', icon: '⚖️' },
-    { id: 'sel851-elements', label: 'Elements', icon: '🛡️' },
-    { id: 'sel851-timeline', label: 'Event Timeline', icon: '📍' },
+  renderTabBar([
+    { id: 'sel851-verdict', label: 'Verdict', icon: '⚖️', hint: 'Whether the trip agrees with the settings' },
+    { id: 'sel851-elements', label: 'Elements', icon: '🛡️', hint: 'Each element in the trip equation, setting against measured' },
+    { id: 'sel851-timeline', label: 'Event Timeline', icon: '📍', hint: 'Every relay bit change, in order' },
+  ], [
     { id: 'sel851-voltages', label: 'Voltages', icon: '🔌' },
     { id: 'sel851-currents', label: 'Currents', icon: '〰️' },
     { id: 'sel851-settings', label: 'Settings', icon: '⚙️' },
-  ];
-  document.getElementById('tabBar').innerHTML = tabs.map(t =>
-    `<button class="tab-btn ${t.id === 'sel851-verdict' ? 'active' : ''}" data-tab="${t.id}">${t.icon} ${t.label}</button>`
-  ).join('');
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      document.getElementById('panel-' + btn.dataset.tab)?.classList.add('active');
-    });
-  });
+  ]);
 }
 
 // ══════════════════════════════════════════════════════════════════════

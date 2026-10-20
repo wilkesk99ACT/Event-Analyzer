@@ -176,6 +176,7 @@ function processFiles(files) {
 
     renderEventSelector();
     selectEvent(0);
+    maybeStartTour();
 
     if (errors.length) console.warn('Some files had errors:', errors);
   };
