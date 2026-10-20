@@ -141,7 +141,8 @@ function tourSteps(format) {
     { target: '#mainChartedLogicSlot', title: '2. Check the logic path',
       body: `Read left to right, from the first condition to the trip command.
         <ul><li><b>Green</b> — true at the trip. <b>Grey</b> — false, shown only when it explains the result.</li>
-        <li>A bracket with <b>&amp;</b> means all of them had to be true; without it, any one was enough.</li>
+        <li>A <b>vertical bar</b> across several input lines is an AND: all of them had to be true.
+          Lines that <b>join and merge into one</b> are an OR: any one was enough.</li>
         <li>Hover a box for its equation. Click it for its own logic and history.</li></ul>` },
     { target: '.tour-flags', title: '3. Read the flags',
       fallbackBody: `<b>Nothing is flagged on this event.</b> When something is, a yellow or red panel appears

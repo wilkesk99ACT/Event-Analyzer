@@ -261,7 +261,7 @@ function buildCustomAnalogChartsHTML(P, A) {
 function customAnalogChartsInnerHTML(P, A) {
   const charts = CUSTOM_CHART_IDS.map(id => buildCustomAnalogChart(P, A, id, true)).join('');
   const addBar = SVFLAGS_HIDE_PICKER ? ''
-    : `<div class="ana-add-chart-bar"><button type="button" class="charted-bit-btn" onclick="event.stopPropagation(); addCustomAnalogChart();">+ Add analog chart</button></div>`;
+    : `<div class="ana-add-chart-bar"><button type="button" class="ana-add-btn" onclick="event.stopPropagation(); addCustomAnalogChart();">+ Add analog chart</button></div>`;
   return charts + addBar;
 }
 // Rebuilds every extra chart. Used only when a chart is added or removed — picks within a chart go
@@ -297,7 +297,7 @@ function analogPickerHTML(kind) {
   if (SVFLAGS_HIDE_PICKER || !PARSED) return '';
   return `<div class="svflags-bit-bar">
     <div class="timing-chip charted-bit-chip ana-add-chip">
-      <button type="button" class="charted-bit-btn" onclick="event.stopPropagation(); toggleAnalogDropdown('${kind}');">+ Add quantity ▾</button>
+      <button type="button" class="ana-add-btn" onclick="event.stopPropagation(); toggleAnalogDropdown('${kind}');">+ Add quantity ▾</button>
       <div class="charted-bit-dropdown ana-dropdown" id="anaDropdown-${kind}" style="display:none;">
         <input type="text" class="charted-bit-search" id="anaSearch-${kind}" placeholder="Search quantities…" oninput="renderAnalogOptions('${kind}', this.value)">
         <div class="ana-list-hint">Sorted by relevance to this event</div>

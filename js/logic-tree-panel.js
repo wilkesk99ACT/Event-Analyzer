@@ -767,7 +767,7 @@ let OPEN_PICKER_DD = null;
 
 function positionPickerDropdown(dd) {
   if (!dd || dd.style.display === 'none') return;
-  const anchor = dd.parentElement && dd.parentElement.querySelector('.charted-bit-btn');
+  const anchor = dd.parentElement && dd.parentElement.querySelector('.charted-bit-btn, .ana-add-btn');
   if (!anchor) return;
   const GAP = 6, EDGE = 8, LIST_MAX = 220, LIST_MIN = 96;
   const list = dd.querySelector('.charted-bit-list');
