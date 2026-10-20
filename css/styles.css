@@ -534,6 +534,10 @@ body.dragging-file #drop-overlay { display: flex; }
 .llg-box.llg-terminal { font-weight: 700; }
 .llg-box.llg-terminal.llg-true { border-color: var(--red); color: var(--red); background: var(--red-dim); }
 .llg-box.llg-center { box-shadow: 0 0 0 2px var(--accent); }
+/* Element turned off in settings (E50P := N, pickup := OFF, ...) — can never assert, so it is
+   drawn as a faded, dashed "ghost" with its name struck through. */
+.llg-box.llg-disabled { border-style: dashed; border-color: var(--text-muted); background: transparent; opacity: 0.55; }
+.llg-box.llg-disabled, .llg-box.llg-disabled * { text-decoration: line-through; text-decoration-color: var(--text-muted); }
 /* The custom dark ::after tooltip (see .has-tip above) is absolutely positioned relative to
    the hovered span and gets clipped by .llg-wrap's horizontal-scroll overflow — including
    clipped upward into the heading right above this row, since setting only overflow-x forces

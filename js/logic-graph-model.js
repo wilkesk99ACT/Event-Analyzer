@@ -126,6 +126,115 @@ function isBlinkerLabel(label, P) {
   return describeSVLogic(sv).isBlinker;
 }
 
+// ── Disabled protection elements ──
+// A Relay Word bit whose element is turned off in settings (E50P := N, 27YP3P := OFF, E81 below
+// the element's level, an SV beyond ESV, ...) can never assert, so anything it feeds in the logic
+// is dead weight. Returns a short human-readable reason ("E50P := N") when the settings PROVE the
+// element is off, or null otherwise — a missing setting is treated as "unknown", never as off, so
+// a relay model this doesn't recognise simply gets no markings rather than wrong ones.
+const LLG_DISABLED_CACHE = new WeakMap();
+function llgSettingValue(P, name) {
+  const text = P.settingsText || '';
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = text.match(new RegExp(`(?:^|[\\s,])${esc}\\s*:=\\s*([^\\s#]+)`, 'm'));
+  return m ? m[1].trim().toUpperCase() : null;
+}
+// Enable value says "off": N / OFF / 0.
+const llgIsOffValue = v => v != null && /^(N|NO|OFF|0)$/.test(v);
+// For a numbered element, an enable like E81 := 3 (or "E6", seen on SEL-651R) limits how many
+// levels exist; returns that count, or null when the value isn't a level count (Y, VY, ...).
+const llgEnableCount = v => { const m = v && v.match(/^[A-Z]?(\d+)$/); return m ? parseInt(m[1]) : null; };
+
+function llgDisabledReason(label, P) {
+  if (!P || !label) return null;
+  let cache = LLG_DISABLED_CACHE.get(P);
+  if (!cache) { cache = new Map(); LLG_DISABLED_CACHE.set(P, cache); }
+  if (cache.has(label)) return cache.get(label);
+  cache.set(label, null); // cycle guard for the SV-equation recursion below
+  const reason = llgComputeDisabledReason(label, P, cache);
+  cache.set(label, reason);
+  return reason;
+}
+
+function llgComputeDisabledReason(label, P, cache) {
+  const val = name => llgSettingValue(P, name);
+  // Checks an enable setting; `level` (optional) is the element's own level number.
+  const enableOff = (name, level) => {
+    const v = val(name);
+    if (v == null) return null;
+    if (llgIsOffValue(v)) return `${name} := ${v}`;
+    const n = llgEnableCount(v);
+    if (level != null && n != null && level > n) return `${name} := ${v} (level ${level} not enabled)`;
+    return null;
+  };
+  const pickupOff = name => (val(name) === 'OFF' ? `${name} := OFF` : null);
+  let m;
+
+  // Instantaneous / definite-time overcurrent: 50P1, 50P1T, 67G2T, 50A1 (per-phase on 651R) ...
+  if ((m = label.match(/^(50|67)([PGQNABC])(\d)(P|T)?$/))) {
+    const [, , t, lvl] = m;
+    const type = /[ABC]/.test(t) ? 'P' : t;
+    return enableOff(`E50${type}`, +lvl) || pickupOff(`50${type}${lvl}P`);
+  }
+  // Time overcurrent: 51P, 51PT, 51P1T (751), 51AT (651R, E51ABC), 51G1T, 51QT ...
+  if ((m = label.match(/^51([PGQNABC])(\d?)(T|R|P)?$/))) {
+    const [, t, lvl] = m;
+    if (/[ABC]/.test(t)) return enableOff('E51ABC');
+    const r = lvl ? (enableOff(`E51${t}${lvl}`) || (val(`E51${t}${lvl}`) == null ? enableOff(`E51${t}`, +lvl) : null))
+                  : enableOff(`E51${t}`);
+    return r || (lvl ? pickupOff(`51${t}${lvl}P`) : null);
+  }
+  // Voltage elements with a terminal letter (SEL-651R style): 27YA1, 27YAB2, 59YN1, 59ZQ1 ...
+  if ((m = label.match(/^(27|59)([YZ])(AB|BC|CA|A|B|C|N|Q|V|G)(\d)T?$/))) {
+    const [, e, term, kind, lvl] = m;
+    const ev = val('EVOLT');
+    if (ev != null && (llgIsOffValue(ev) || !ev.includes(term))) return `EVOLT := ${ev} (${term}-terminal elements off)`;
+    const key = /^[ABC]$/.test(kind) ? 'P' : /^(AB|BC|CA)$/.test(kind) ? 'PP' : kind;
+    return pickupOff(`${e}${term}${key}${lvl}P`);
+  }
+  // Voltage elements without a terminal letter (351/751 style): 27P1, 27A1, 59PP1, 59G1T, 59Q1 ...
+  if ((m = label.match(/^(27|59)(PP|AB|BC|CA|A|B|C|P|G|Q|N|S|V)(\d)T?$/))) {
+    const [, e, kind, lvl] = m;
+    const key = /^[ABC]$/.test(kind) ? 'P' : /^(AB|BC|CA)$/.test(kind) ? 'PP' : kind;
+    return enableOff(`E${e}`, +lvl) || pickupOff(`${e}${key}${lvl}P`);
+  }
+  // Frequency: 81D1, 81D1T, 81R1T ...
+  if ((m = label.match(/^81D(\d)T?$/))) return enableOff('E81', +m[1]) || pickupOff(`81D${m[1]}P`);
+  if ((m = label.match(/^81RF?(\d)?/))) return enableOff(/^81RF/.test(label) ? 'E81RF' : 'E81R', m[1] ? +m[1] : null);
+  // Other whole-function enables.
+  if (/^32/.test(label)) return enableOff('E32');
+  if (/^25(A|C|S|$)/.test(label) || label === 'SF') return enableOff('E25');
+  if (/^79/.test(label)) return enableOff('E79');
+  if (/^SOTF/.test(label)) return enableOff('ESOTF');
+  if (/^LOP/.test(label)) return enableOff('ELOP');
+  if (/^ZLOAD|^ZLIN|^ZLOUT/.test(label)) return enableOff('ELOAD');
+  // SELogic resources beyond the enabled count: SV31 with ESV := 30, LT08 with ELAT := 7 ...
+  if ((m = label.match(/^SV(\d+)T?$/))) {
+    const r = enableOff('ESV', +m[1]);
+    if (r) return r;
+    return llgDeadSVReason(+m[1], P, cache);
+  }
+  if ((m = label.match(/^LT(\d+)$/))) return enableOff('ELAT', +m[1]);
+  if ((m = label.match(/^SC(\d+)(QU|QD|R|LD)?$/))) return enableOff('ESC', +m[1]);
+  return null;
+}
+
+// An SV can also be dead because of its own equation: "SVnn := 0", or an equation built ONLY
+// from disabled elements with no NOT anywhere (NOT of a dead bit is always TRUE, so any NOT makes
+// the result uncertain — those are deliberately left alone).
+function llgDeadSVReason(num, P, cache) {
+  const sv = (P.svSettings || []).find(s => s.num === num);
+  if (!sv || sv.equation == null) return null;
+  const eq = String(sv.equation).replace(/#.*$/, '').trim();
+  if (/^0$/.test(eq)) return `SV${String(num).padStart(2, '0')} := 0`;
+  if (/\bNOT\b|[<>=]/.test(eq)) return null;
+  const bits = (eq.match(/\b[A-Z][A-Z0-9_]*\b|\b\d+[A-Z][A-Z0-9_]*\b/g) || [])
+    .filter(t => !/^(AND|OR|R_TRIG|F_TRIG)$/.test(t));
+  if (!bits.length) return null;
+  if (bits.every(b => llgDisabledReason(b, P))) return 'every input to its equation is disabled';
+  return null;
+}
+
 function isTerminalBit(label, P) {
   return ['TRIP', 'TRIP3P', 'TRIPA', 'TRIPB', 'TRIPC', 'CLOSE', 'CLOSE3P', 'CLOSEA', 'CLOSEB', 'CLOSEC', 'ER']
     .includes(label) || label === (P.tripEquationName || 'TR') || label === (P.erEquationName || 'ER')

@@ -62,6 +62,7 @@ function renderLLGLegend() {
     <span>${swatch('background:var(--red-dim);border:1px solid var(--red);')} Asserted</span>
     <span>${swatch('background:var(--bg2);border:1px solid var(--card-border);')} Not asserted / unknown</span>
     <span>${swatch('background:var(--bg2);border:1px solid var(--card-border);box-shadow:0 0 0 2px var(--accent);')} Bit you clicked</span>
+    <span>${swatch('background:transparent;border:1px dashed var(--text-muted);opacity:0.7;')} <s>Disabled in settings</s> (never asserts)</span>
     <span>${dashSample(LLG_NOT_DASH)} Negated (NOT)</span>
     <span>${dashSample(LLG_TRIG_DASH)} Edge-triggered (R_TRIG/F_TRIG)</span>
     <span>${mergeSample} AND inputs (no bracket = OR)</span>
@@ -497,7 +498,7 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
       const dash = edgeDash(e && e.mod);
       const title = `<title>${edgeTitleText(e)} — ${note}</title>`;
       return `<path d="${d}" fill="none" stroke="transparent" stroke-width="12">${title}</path>` +
-        `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.5"${dash ? ` stroke-dasharray="${dash}"` : ''}>${title}</path>`;
+        `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.5"${dash ? ` stroke-dasharray="${dash}"` : ''}${edgeFade(e)}>${title}</path>`;
     }
     const total = pathLength(d);
     const fillLen = phase.frac * total;
@@ -632,12 +633,21 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
   // just the bare modifier text on its own. A wide invisible hit-area copy is drawn under every
   // edge now too (previously only modified edges got one), since a bare 1.5px stroke is a tiny
   // target to actually land a cursor on regardless of whether it's dashed.
-  const edgeTitleText = e => `${e && e.mod ? e.mod + ' ' : ''}${e ? e.from : '?'} → ${e ? e.to : '?'}`.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  // An edge out of a disabled element carries a constant FALSE. A plain (or edge-triggered) input
+  // therefore never contributes and is faded; a NOT of it is a constant TRUE, so it keeps full
+  // strength, and either way the hover title says why.
+  const srcOffReason = e => e ? llgDisabledReason(llgDisplayLabel(e.from), P) : null;
+  const edgeFade = e => (srcOffReason(e) && !/\bNOT\b/.test(e.mod || '')) ? ' stroke-opacity="0.3"' : '';
+  const edgeTitleText = e => {
+    const off = srcOffReason(e);
+    const note = off ? ` — ${e.from} is disabled (${off}), always ${/\bNOT\b/.test(e.mod || '') ? 'TRUE through this NOT' : 'FALSE'}` : '';
+    return `${e && e.mod ? e.mod + ' ' : ''}${e ? e.from : '?'} → ${e ? e.to : '?'}${note}`.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  };
   const edgeTitleTag = e => `<title>${edgeTitleText(e)}</title>`;
   const hitArea = (d, e) => `<path d="${d}" fill="none" stroke="transparent" stroke-width="12">${edgeTitleTag(e)}</path>`;
   const edgeLine = (d, color, e) => {
     const dash = edgeDash(e && e.mod);
-    return `${hitArea(d, e)}<path d="${d}" fill="none" stroke="${color}" stroke-width="1.5"${dash ? ` stroke-dasharray="${dash}"` : ''}>${edgeTitleTag(e)}</path>`;
+    return `${hitArea(d, e)}<path d="${d}" fill="none" stroke="${color}" stroke-width="1.5"${dash ? ` stroke-dasharray="${dash}"` : ''}${edgeFade(e)}>${edgeTitleTag(e)}</path>`;
   };
 
   // ── Fork-join for parenthesized sub-expressions ──
@@ -786,8 +796,11 @@ function renderLocalLogicGraph(graph, P, tripFocus) {
     // muted default if false/unknown.
     let stateCls = isTrue ? 'llg-true' : '';
     if (isTerm) stateCls += ' llg-terminal';
+    const offReason = !isTrue && llgDisabledReason(displayLbl, P);
+    if (offReason) stateCls += ' llg-disabled';
+    const offTitle = offReason ? ` title="Disabled in settings — ${offReason.replace(/"/g, '&quot;')}. This element never asserts and does not contribute to the scheme."` : '';
     const centerCls = lbl === graph.center ? 'llg-center' : '';
-    boxesHTML += `<div class="llg-box ${stateCls} ${centerCls}" style="position:absolute;left:${p.x}px;top:${p.y}px;width:${BOX_W}px;height:${BOX_H}px;display:flex;align-items:center;justify-content:center;overflow:hidden;text-overflow:ellipsis;">${tt(displayLbl, P)}</div>`;
+    boxesHTML += `<div class="llg-box ${stateCls} ${centerCls}"${offTitle} style="position:absolute;left:${p.x}px;top:${p.y}px;width:${BOX_W}px;height:${BOX_H}px;display:flex;align-items:center;justify-content:center;overflow:hidden;text-overflow:ellipsis;">${tt(displayLbl, P)}</div>`;
   });
 
   const innerDiagram = `<div style="position:relative;width:${totalW}px;height:${height}px;">
