@@ -145,13 +145,25 @@ const llgIsOffValue = v => v != null && /^(N|NO|OFF|0)$/.test(v);
 // levels exist; returns that count, or null when the value isn't a level count (Y, VY, ...).
 const llgEnableCount = v => { const m = v && v.match(/^[A-Z]?(\d+)$/); return m ? parseInt(m[1]) : null; };
 
+const LLG_ASSERTED_CACHE = new WeakMap();
+function llgAssertedInRecord(P) {
+  let set = LLG_ASSERTED_CACHE.get(P);
+  if (set) return set;
+  set = new Set(P.initialDigitalState || []);
+  (P.digitalTransitions || []).forEach(t => t.changes.forEach(c => { if (c.asserted) set.add(c.label); }));
+  LLG_ASSERTED_CACHE.set(P, set);
+  return set;
+}
+
 function llgDisabledReason(label, P) {
   if (!P || !label) return null;
   let cache = LLG_DISABLED_CACHE.get(P);
   if (!cache) { cache = new Map(); LLG_DISABLED_CACHE.set(P, cache); }
   if (cache.has(label)) return cache.get(label);
   cache.set(label, null); // cycle guard for the SV-equation recursion below
-  const reason = llgComputeDisabledReason(label, P, cache);
+  // Hard evidence beats any settings interpretation: a bit that asserted anywhere in this record
+  // is, by definition, not disabled.
+  const reason = llgAssertedInRecord(P).has(label) ? null : llgComputeDisabledReason(label, P, cache);
   cache.set(label, reason);
   return reason;
 }
@@ -187,8 +199,11 @@ function llgComputeDisabledReason(label, P, cache) {
   // Voltage elements with a terminal letter (SEL-651R style): 27YA1, 27YAB2, 59YN1, 59ZQ1 ...
   if ((m = label.match(/^(27|59)([YZ])(AB|BC|CA|A|B|C|N|Q|V|G)(\d)T?$/))) {
     const [, e, term, kind, lvl] = m;
+    // EVOLT is N / VY / VZ / BOTH on the SEL-651R. Only the explicit single-terminal values turn
+    // the OTHER terminal off — BOTH (or anything unrecognised) leaves both enabled.
     const ev = val('EVOLT');
-    if (ev != null && (llgIsOffValue(ev) || !ev.includes(term))) return `EVOLT := ${ev} (${term}-terminal elements off)`;
+    if (ev != null && llgIsOffValue(ev)) return `EVOLT := ${ev} (all voltage elements off)`;
+    if ((ev === 'VY' && term === 'Z') || (ev === 'VZ' && term === 'Y')) return `EVOLT := ${ev} (${term}-terminal elements off)`;
     const key = /^[ABC]$/.test(kind) ? 'P' : /^(AB|BC|CA)$/.test(kind) ? 'PP' : kind;
     return pickupOff(`${e}${term}${key}${lvl}P`);
   }
