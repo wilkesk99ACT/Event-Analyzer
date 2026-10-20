@@ -12,6 +12,56 @@
 
 const TOUR_SEEN_KEY = 'cevTripAnalyzer.tourSeen.v1';
 
+// The tour's styles travel with the script rather than in styles.css. A browser that serves a
+// cached styles.css beside a fresh copy of this file would otherwise draw the card as bare,
+// unstyled text across the bottom of the page.
+const TOUR_CSS = `
+.tour-backdrop { position: fixed; inset: 0; z-index: 4000; background: transparent; }
+.tour-spotlight {
+  position: fixed; z-index: 4001; pointer-events: none;
+  border: 2px solid var(--accent); border-radius: 10px;
+  box-shadow: 0 0 0 9999px rgba(3, 6, 12, 0.78), 0 0 24px rgba(59, 158, 255, 0.35);
+  transition: top 0.25s ease, left 0.25s ease, width 0.25s ease, height 0.25s ease;
+}
+.tour-spotlight.tour-centered { border-color: transparent; box-shadow: 0 0 0 9999px rgba(3, 6, 12, 0.78); }
+.tour-card {
+  position: fixed; z-index: 4002; box-sizing: border-box;
+  width: min(380px, calc(100vw - 32px));
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 10px;
+  padding: 16px 18px 14px; font-family: var(--sans);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.55);
+  transition: top 0.25s ease, left 0.25s ease;
+}
+.tour-step-count {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--text-muted); margin-bottom: 4px;
+}
+.tour-title { font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+.tour-body { font-size: 12.5px; line-height: 1.6; color: var(--text-dim); }
+.tour-body b { color: var(--text); }
+.tour-body ul { padding-left: 18px; margin: 6px 0 0; }
+.tour-body li { margin-bottom: 4px; }
+.tour-dots { display: flex; gap: 5px; margin-top: 12px; }
+.tour-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--card-border); }
+.tour-dot.on { background: var(--accent); }
+.tour-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.tour-skip {
+  background: none; border: none; cursor: pointer; padding: 0;
+  font-family: var(--sans); font-size: 11.5px; color: var(--text-muted); text-decoration: underline;
+}
+.tour-skip:hover { color: var(--text-dim); }
+.tour-actions .tour-push { margin-left: auto; }
+.btn-ghost { background: transparent; color: var(--text-dim); border-color: var(--card-border); }
+.btn-ghost:hover { background: var(--bg2); color: var(--text); }
+`;
+(function injectTourCss() {
+  const style = document.createElement('style');
+  style.id = 'tourStyles';
+  style.textContent = TOUR_CSS;
+  document.head.appendChild(style);
+})();
+
 let TOUR = null; // { steps, idx, els, onReflow }
 
 function tourSeen() {
