@@ -1,5 +1,63 @@
 
 // ════════════════════════════════════════════════════════════════════════════
+// LEGACY SELOGIC (SEL-351 family)
+// ════════════════════════════════════════════════════════════════════════════
+// The SEL-351 writes its settings in the older SELogic dialect, and nothing in the rest of
+// the tool understood it:
+//
+//   * settings are "NAME = value", not "NAME := value", several to a line in fixed columns
+//     ("CTR     = 240       CTRN    = 240       PTR     = 300.00");
+//   * equations use symbol operators — "+" OR, "*" AND, "!" NOT, "/" rising edge, "\" falling
+//     edge — instead of the AND / OR / NOT / R_TRIG / F_TRIG words every tokenizer here reads;
+//   * a long equation wraps onto indented continuation lines ("TR = 51P1T + ...\n  + OC");
+//   * SELogic variables and latches are unpadded (SV2T, LT5, SET1) where the 651R this tool
+//     was built against pads them (SV02T, LT05, SET01), and several analyzers match \d{2}.
+//
+// On MD SOLAR SUBSTATION record 11140 that meant no CTR, no PTR, no TR, no ER and no SVs were
+// found at all, so the trip-cause trace had nothing to evaluate. Rather than teach every
+// analyzer a second dialect, the settings text is rewritten into the modern form once, here,
+// and the digital labels get the same SV/LT padding so the two always agree.
+function isLegacySelogicDevice(device) {
+  return /SEL-?3[0-9]{2}/i.test(device || '');
+}
+
+function padLegacySelogicNames(s) {
+  return s.replace(/\b(SV|LT|SET|RST)(\d)(?=(?:T|PU|DO)?\b)/g, '$10$2');
+}
+
+function normalizeLegacySelogic(settings) {
+  const out = [];
+  for (const raw of settings.replace(/\r/g, '').split('\n')) {
+    // Indented continuation of the previous equation.
+    if (/^\s{2,}[+*(!/\\A-Za-z0-9]/.test(raw) && out.length && /=/.test(out[out.length - 1])) {
+      out[out.length - 1] += ' ' + raw.trim();
+      continue;
+    }
+    out.push(raw);
+  }
+  const toWords = (v) => {
+    if (!/[+*!/\\]/.test(v) || /^[-\d.\s]+$/.test(v)) return v.trim();
+    return v
+      .replace(/\+/g, ' OR ').replace(/\*/g, ' AND ')
+      .replace(/!/g, ' NOT ').replace(/\//g, ' R_TRIG ').replace(/\\/g, ' F_TRIG ')
+      .replace(/\(\s+/g, '(').replace(/\s+\)/g, ')')
+      .replace(/\s+/g, ' ').trim();
+  };
+  const lines = [];
+  for (const line of out) {
+    // Only rewrite lines that are settings ("NAME = ..."); headings and blanks pass through.
+    if (!/^[A-Za-z0-9_]+\s*=(?!=)/.test(line)) { lines.push(line); continue; }
+    // One setting per line: split at a column gap that is followed by another "NAME =".
+    for (const part of line.split(/\s{2,}(?=[A-Za-z0-9_]+\s*=(?!=))/)) {
+      const m = part.match(/^([A-Za-z0-9_]+)\s*=(.*)$/);
+      if (!m) { lines.push(part); continue; }
+      lines.push(`${m[1]} := ${toWords(m[2])}`);
+    }
+  }
+  return padLegacySelogicNames(lines.join('\n'));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // CEV PARSER
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -41,7 +99,10 @@ function parseCEV(text, fileName) {
     R.fid = line0.split(',')[0] || '';
     R.device = line1.split(',')[0] || '';
     R.serialNumber = '';
+    // Same header layout as the 651R, but legacy SELogic settings — see normalizeLegacySelogic().
+    if (isLegacySelogicDevice(R.device)) R.format = 'sel351';
   }
+  const legacySelogic = R.format === 'sel351';
 
   // ── Find timestamp line (MONTH,DAY,YEAR...) ──
   let tsLineIdx = -1;
@@ -155,6 +216,8 @@ function parseCEV(text, fileName) {
         }
       }
     }
+    // Keep bit names in step with the padded names normalizeLegacySelogic() gives the settings.
+    if (legacySelogic) R.digitalLabels = R.digitalLabels.map(padLegacySelogicNames);
     dataStartLine = dataHdrIdx + 1;
   }
 
@@ -269,6 +332,12 @@ function parseCEV(text, fileName) {
   }
 
   // ── Parse settings section ──
+  // Legacy SELogic is rewritten into the modern dialect first, so every match below (and the
+  // full-text FAULT / reclose searches) reads one syntax. R.raw keeps the file as written.
+  if (legacySelogic) {
+    const at = text.indexOf('"SETTINGS"');
+    if (at >= 0) text = text.substring(0, at) + normalizeLegacySelogic(text.substring(at));
+  }
   // Try "Group 1" first (651R), then "Group Settings" (751), then "Global Settings"
   let settingsStart = text.indexOf('Group 1');
   if (settingsStart < 0) settingsStart = text.indexOf('Group Settings');
@@ -296,6 +365,8 @@ function parseCEV(text, fileName) {
   // Phase rotation. Sequence quantities (I2, V2, V1) depend on it: on an ACB system the
   // Fortescue transform written for ABC returns the positive-sequence magnitude as "I2".
   R.settings.PHROT = (m(/PHROT\s*:=\s*(ABC|ACB)/) || 'ABC').toUpperCase();
+  // PT connection (SEL-351 global setting). With WYE PTs the 351's VNOM is phase-to-neutral.
+  R.settings.PTCONN = (m(/PTCONN\s*:=\s*(\w+)/) || '').toUpperCase() || null;
   R.settings.RID = m(/RID\s*:=([^\r\n]+)/);
   R.settings.TID = m(/TID\s*:=([^\r\n]+)/);
   // The Event Report trigger equation. Every record in a CEV set exists because ONE of this
@@ -464,6 +535,8 @@ function parseCEV(text, fileName) {
   for (let i = 1; i <= 6; i++) {
     R.freqElements[`81D${i}P`] = mf(new RegExp(`81D${i}P\\s*:=\\s*([\\d.]+)`));
     R.freqElements[`81D${i}E`] = mf(new RegExp(`81D${i}E\\s*:=\\s*([\\d.]+)`));
+    // SEL-351 states the delay in cycles as 81DnD rather than seconds as 81DnE.
+    R.freqElements[`81D${i}D`] = mf(new RegExp(`81D${i}D\\s*:=\\s*([\\d.]+)`));
   }
 
   // SV equations
@@ -479,6 +552,24 @@ function parseCEV(text, fileName) {
       dropoutDelay: parseFloat(svM[3]),
       equation: eq,
     });
+  }
+  // SEL-351 lists every SV timer's PU/DO in the group settings and the SV equations much later
+  // under SELogic, so the adjacent-lines pattern above never matches. Pair them up by number.
+  if (!R.svSettings.length) {
+    const puRe = /(?:^|[^A-Z0-9_])SV(\d{2})PU\s*:=\s*([\d.]+)/gm;
+    let pu;
+    while ((pu = puRe.exec(S)) !== null) {
+      const n = pu[1];
+      const eq = m(new RegExp(`(?:^|[^A-Z0-9_])SV${n}\\s*:=([^\\r\\n]+)`, 'm'));
+      if (!eq || eq.trim() === 'NA') continue;
+      R.svSettings.push({
+        num: parseInt(n),
+        label: `SV${n}`,
+        pickupDelay: parseFloat(pu[2]),
+        dropoutDelay: mf(new RegExp(`SV${n}DO\\s*:=\\s*([\\d.]+)`)) || 0,
+        equation: eq.trim(),
+      });
+    }
   }
 
   // ── Latch bits (LT01..LT32) ──
@@ -620,6 +711,8 @@ function elementBitCrossCheck(R, scale) {
     Y: { A: 'VAY', B: 'VBY', C: 'VCY', ptr: R.settings?.PTRY || 1 },
     Z: { A: 'VAZ', B: 'VBZ', C: 'VCZ', ptr: R.settings?.PTRZ || R.settings?.PTRY || 1 },
   };
+  // SEL-351 has one voltage terminal and no terminal letter: pickup 27P1P, bits 27A1/27B1/27C1.
+  if (R.format === 'sel351') TERMS[''] = { A: 'VAY', B: 'VBY', C: 'VCY', ptr: R.settings?.PTRY || 1 };
   const toSec = (raw, ptr) => {
     const primaryKV = isPrimary ? (voltIsKV ? raw : raw / 1000) : (raw * ptr) / 1000;
     return primaryKV * 1000 / ptr;
@@ -805,8 +898,15 @@ function calibrateAnalogBasis(R) {
     { v: Math.SQRT2 * Math.sqrt(3), scale: Math.SQRT2, name: 'RMS-scaled filtered data, VNOM phase-to-phase' },
   ];
 
+  // The SEL-351 defines VNOM as phase-to-neutral for WYE-connected PTs, so the phase-to-phase
+  // variants are not candidates there. Leaving them in let an undervoltage record — bus sagged
+  // well below nominal for the whole capture, MD SOLAR SUBSTATION 11140 — snap its low ratio
+  // to "RMS-scaled, VNOM phase-to-phase", which is wrong on both counts.
+  const vnomKnownLN = R.format === 'sel351' && R.settings?.PTCONN === 'WYE';
+  if (vnomKnownLN) R.vnomIsPhaseToPhase = false;
+  const vCands = vnomKnownLN ? V_CANDIDATES.filter(c => !/phase-to-phase/.test(c.name)) : V_CANDIDATES;
   const iHit = iRatios.length ? snapToCandidate(medianOf(iRatios), CANDIDATES) : null;
-  const vHit = vRatio ? snapToCandidate(vRatio, V_CANDIDATES, 1.10) : null;
+  const vHit = vRatio ? snapToCandidate(vRatio, vCands, 1.10) : null;
   // Record the VNOM L-L/L-N determination independently of which reference ends up chosen for
   // magScale below (e.g. a file with clean event-summary fault currents will let iHit win the
   // magScale decision even though vHit — computed from actual VA/VB/VC samples vs VNOM x PTR —

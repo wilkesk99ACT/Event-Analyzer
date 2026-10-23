@@ -257,7 +257,7 @@ function analyzeCEV(P, prevEvent) {
     const asserted = isUnder ? avgFreq <= p : avgFreq >= p;
     A.freqStatus.push({
       element: `81D${i}`, type: isUnder ? 'Underfrequency' : 'Overfrequency',
-      pickup: `${p} Hz`, timeDelay: `${FE[`81D${i}E`]} sec`,
+      pickup: `${p} Hz`, timeDelay: FE[`81D${i}E`] != null ? `${FE[`81D${i}E`]} sec` : `${FE[`81D${i}D`]} cyc`,
       measured: `${avgFreq.toFixed(2)} Hz`, asserted,
     });
   }
