@@ -219,29 +219,65 @@ function tripMeasurements(P, A) {
 }
 
 // A table of the kept values, for the trip history in either tool. esc is the caller's escaper.
-function tripMeasHTML(m, esc) {
+// How far a value is from normal, as a class: tm-bad (red), tm-warn (amber), tm-ok, or ''
+// (no reference to judge it by). ref: what normal is at the site —
+//   vNomKv  nominal phase-to-neutral voltage, kV primary
+//   iRated  rated phase current, A primary (site AC rating ÷ 3 × vNomKv)
+//   fNom    nominal frequency, Hz
+// Phase voltage: off by 10 % is far, 5 % is off. Zero- and negative-sequence voltage should be
+// near zero: 5 % of nominal is far, 2 % off. Phase current: above 120 % of rated is far, 105 %
+// off (low current is normal: a site at night). Neutral, ground and negative-sequence current:
+// 20 % of rated is far, 10 % off. Frequency: 0.5 Hz is far, 0.2 Hz off.
+function tripMeasTone(k, v, ref) {
+  if (v == null || !isFinite(v) || !ref) return '';
+  const band = (x, warn, bad) => x >= bad ? 'tm-bad' : x >= warn ? 'tm-warn' : 'tm-ok';
+  if (/^V[ABC]$/.test(k)) return ref.vNomKv ? band(Math.abs(v / ref.vNomKv - 1), 0.05, 0.10) : '';
+  if (k === '3V0' || k === 'V2') return ref.vNomKv ? band(v / ref.vNomKv, 0.02, 0.05) : '';
+  if (/^I[ABC]$/.test(k)) return ref.iRated ? band(v / ref.iRated, 1.05, 1.2) : '';
+  if (k === 'IN' || k === 'IG' || k === '3I2') return ref.iRated ? band(v / ref.iRated, 0.10, 0.20) : '';
+  if (k === 'FREQ') return band(Math.abs(v - (ref.fNom || 60)), 0.2, 0.5);
+  return '';
+}
+
+// ref (optional, see tripMeasTone) colours each value by how far it is from normal. Without a
+// nominal voltage, the highest of the three phase voltages in the record stands in for it.
+function tripMeasHTML(m, esc, ref) {
   if (!m || !m.q) return '';
   const f = v => (v == null ? '—' : String(v));
   const t = ms => (ms == null ? '' : ` <span class="tm-when">${ms > 0 ? '+' : ''}${ms} ms</span>`);
+  const R = Object.assign({ fNom: 60 }, ref || {});
+  if (!R.vNomKv) {
+    const vm = ['VA', 'VB', 'VC'].map(k => m.q[k] && m.q[k].max).filter(v => v != null && isFinite(v) && v > 0);
+    if (vm.length) { R.vNomKv = Math.max(...vm); R.vNomGuess = true; }
+  }
+  const cell = (k, v, extra) => `<td class="${tripMeasTone(k, v, R)}">${f(v)}${extra || ''}</td>`;
   const rows = [];
   const unit = k => (k === 'FREQ' ? 'Hz' : /^V|3V0/.test(k) ? 'kV' : 'A');
   for (const [k, r] of Object.entries(m.q)) {
     if (!r) continue;
-    rows.push(`<tr><td>${esc(k)}</td><td>${f(r.trip)}</td><td>${f(r.max)}${t(r.maxMs)}</td>` +
-      `<td>${r.min != null ? f(r.min) + t(r.minMs) : ''}</td><td>${unit(k)}</td></tr>`);
+    rows.push(`<tr><td>${esc(k)}</td>${cell(k, r.trip)}${cell(k, r.max, t(r.maxMs))}` +
+      `${r.min != null ? cell(k, r.min, t(r.minMs)) : '<td></td>'}<td>${unit(k)}</td></tr>`);
   }
   let op = '';
   if (m.op) {
     const o = m.op;
+    // the element's own value: red where it was past its pickup in the tripping direction
+    const past = mult => mult == null ? '' : (o.kind === 'min' ? mult < 1 : mult > 1) ? 'tm-bad' : 'tm-ok';
     op = `<div class="tm-op"><b>${esc(o.element)}</b> on ${esc(o.quantity)}: ` +
-      `${f(o.trip)} ${esc(o.unit)} at the trip${o.multTrip != null ? ` (${o.multTrip}× pickup)` : ''}, ` +
-      `${o.kind === 'min' ? 'lowest' : 'highest'} ${f(o.peak)} ${esc(o.unit)}${o.multPeak != null ? ` (${o.multPeak}×)` : ''}${t(o.peakMs)}. ` +
+      `<span class="${past(o.multTrip)}">${f(o.trip)} ${esc(o.unit)}</span> at the trip${o.multTrip != null ? ` (${o.multTrip}× pickup)` : ''}, ` +
+      `${o.kind === 'min' ? 'lowest' : 'highest'} <span class="${past(o.multPeak)}">${f(o.peak)} ${esc(o.unit)}</span>${o.multPeak != null ? ` (${o.multPeak}×)` : ''}${t(o.peakMs)}. ` +
       `Pickup ${f(o.pickup)} ${esc(o.unit)}.</div>`;
   }
+  const basis = [
+    R.vNomKv ? `${f(tripMeasRound(R.vNomKv))} kV phase to neutral${R.vNomGuess ? ' (the highest phase in this record; no nominal on file)' : ''}` : '',
+    R.iRated ? `${f(tripMeasRound(R.iRated))} A rated` : '',
+    `${R.fNom} Hz`,
+  ].filter(Boolean).join(', ');
   return `${op}<table class="tm-table"><thead><tr><th></th><th>At the trip</th><th>Highest</th><th>Lowest before the trip</th><th></th></tr></thead>` +
     `<tbody>${rows.join('')}</tbody></table>` +
     (m.atTrip ? '' : `<div class="tm-note">No trip instant was found in this record; "at the trip" is the trigger.</div>`) +
-    `<div class="tm-note">Primary values. Times are from the trip.</div>`;
+    `<div class="tm-note">Primary values. Times are from the trip. ` +
+    `<span class="tm-key tm-bad">far from normal</span> <span class="tm-key tm-warn">off normal</span> <span class="tm-key tm-ok">normal</span>, against ${esc(basis)}.</div>`;
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -338,7 +374,7 @@ function mpChartHTML(c, trips, size, legend) {
   const line = key => pts.map((p, i) => ok(p[key]) ? `${i && ok(pts[i - 1][key]) ? 'L' : 'M'}${x(i).toFixed(1)},${y(p[key]).toFixed(1)}` : '').join('');
   const tip = p => `${(p.at || '').slice(0, 16)}${p.cur ? ' — this event' : ''}\nAt the trip: ${mpFmt(p.trip)} ${c.unit}\n${c.ext === MP_LOW ? 'Lowest' : 'Highest'} in record: ${mpFmt(p.ext)} ${c.unit}${p.cause ? '\n' + p.cause : ''}`;
   const dots = (key, cls) => pts.map((p, i) => !ok(p[key]) ? '' :
-    `<circle class="${cls}${p.cur ? ' mp-cur' : ''}" cx="${x(i).toFixed(1)}" cy="${y(p[key]).toFixed(1)}" r="${p.cur ? 3.6 : 2.5}"><title>${mpEsc(tip(p))}</title></circle>`).join('');
+    `<circle class="${cls}${p.cur ? ' mp-cur' : ''}" data-at="${mpEsc(p.at || '')}" cx="${x(i).toFixed(1)}" cy="${y(p[key]).toFixed(1)}" r="${p.cur ? 3.6 : 2.5}"><title>${mpEsc(tip(p))}</title></circle>`).join('');
   const pk = ok(c.pickup)
     ? `<line class="mp-pk" x1="${L}" x2="${W - R}" y1="${y(c.pickup).toFixed(1)}" y2="${y(c.pickup).toFixed(1)}"/>
        <text class="mp-pkt" x="${W - R + 4}" y="${(y(c.pickup) + 3).toFixed(1)}">pickup</text>` : '';
