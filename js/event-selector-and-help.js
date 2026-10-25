@@ -136,6 +136,7 @@ function selectEvent(idx) {
   // re-sync now to the real trip instant (falls back to trigger/end-of-record if this event
   // has no resolved trip transition, e.g. an ER/non-trip record).
   if (typeof refreshProtectionTab === 'function') refreshProtectionTab(null);
+  if (typeof renderSiteNotesBar === 'function') renderSiteNotesBar();
 }
 
 // Filters the Event Timeline (panel-timeline) to only the bits relevant to the resolved trip.

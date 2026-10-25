@@ -177,6 +177,7 @@ function processFiles(files) {
     renderEventSelector();
     selectEvent(0);
     maybeStartTour();
+    if (typeof siteNotesOnEventsLoaded === 'function') siteNotesOnEventsLoaded();
 
     if (errors.length) console.warn('Some files had errors:', errors);
   };
@@ -208,7 +209,9 @@ function processFiles(files) {
           const datBytes = new Uint8Array(await readFileAsArrayBuffer(datFile));
           const hdrText = hdrFile ? await readFileAsText(hdrFile) : null;
           const parsed = parseSel851Bundle(cfgText, datBytes, hdrText, cfgFile.name);
-          results.push({ parsed, fileName: cfgFile.name });
+          // Kept so Site Notes can be sent the event itself (see site-notes-link.js).
+          const source = { kind: 'files', name: cfgFile.name, group: 'files:' + stem, files: [cfgFile, datFile, hdrFile].filter(Boolean) };
+          results.push({ parsed, fileName: cfgFile.name, source });
           return;
         }
 
@@ -245,10 +248,11 @@ function processFiles(files) {
         // handed to the CEV parser, which would read binary sample data as text.
         const sel851Bundles = findSel851Bundle(entries);
         if (sel851Bundles) {
+          const source = { kind: 'evzip', name: file.name, group: 'evzip:' + file.name, bytes: new Uint8Array(buf) };
           for (const b of sel851Bundles) {
             try {
               const parsed = parseSel851Bundle(entryText(b.cfg), b.dat.bytes, b.hdr ? entryText(b.hdr) : null, b.cfg.name);
-              results.push({ parsed, fileName: b.cfg.name });
+              results.push({ parsed, fileName: b.cfg.name, source });
             } catch (err) {
               errors.push(`${file.name} → ${b.cfg.name}: ${err.message}`);
               console.error(`Error processing SEL-851 bundle ${b.cfg.name}:`, err);

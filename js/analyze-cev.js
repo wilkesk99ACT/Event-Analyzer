@@ -1,4 +1,13 @@
 
+// A trip cause name, reworded for an event report: "Undervoltage Trip (A)" → "Undervoltage (A) —
+// no trip", "Trip via SV10T" → "Event report via SV10T — no trip".
+function eventReportCauseText(text) {
+  const t = String(text || '').trim();
+  if (/^Trip via /i.test(t)) return t.replace(/^Trip via /i, 'Event report via ') + ' — no trip';
+  const base = t.replace(/\s*\bTrip\b\s*/i, ' ').replace(/\s+/g, ' ').trim();
+  return `${base || 'Event report'} — no trip`;
+}
+
 function analyzeCEV(P, prevEvent) {
   // prevEvent: optional { parsed, analysis } from the chronologically prior event
   const A = { voltages: {}, currents: {}, protectionStatus: [], voltageStatus: [],
@@ -1555,7 +1564,9 @@ function analyzeCEV(P, prevEvent) {
     if (immediateCause) {
       const classified = classifyImmediateCauseTerm(immediateCause, immediateCauseNegated);
       const { causeChain, family, isNonProtection, negElements } = classified;
-      const causeText = classified.causeText;
+      // The classifier names trips ("Undervoltage Trip", "Trip via SV10T"). Nothing tripped here,
+      // and the headline, the event list and the recurring-cause note all read this text.
+      const causeText = eventReportCauseText(classified.causeText);
       const causeDetail = classified.causeDetail
         + ` — this triggered an event report (${P.erEquationName || 'ER'}), not a trip. No trip bit asserted in this record.`;
 
