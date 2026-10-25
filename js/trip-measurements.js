@@ -243,3 +243,132 @@ function tripMeasHTML(m, esc) {
     (m.atTrip ? '' : `<div class="tm-note">No trip instant was found in this record; "at the trip" is the trigger.</div>`) +
     `<div class="tm-note">Primary values. Times are from the trip.</div>`;
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// TRIP TREND CHARTS — the same element across a site's trips
+// ══════════════════════════════════════════════════════════════════════
+// Small charts of trips' measured values, oldest to newest. Drawn beside the measured value in
+// the analyzer (measured-panel.js) and in the Trip history section of Site Notes. Each page
+// styles the classes (mp-*) to its own theme.
+
+function mpFmt(v) {
+  if (v == null || !isFinite(v)) return '—';
+  const a = Math.abs(v);
+  return a >= 1000 ? v.toFixed(0) : a >= 100 ? v.toFixed(1) : a >= 10 ? v.toFixed(2) : v.toFixed(3);
+}
+function mpEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+// "IN" alone does not say what was measured; spell the short codes out.
+const MP_QTY_NAME = {
+  IN: 'neutral current (IN)', IG: 'ground current (IG)', '3I2': 'negative-sequence current (3I2)',
+  '3V0': 'zero-sequence voltage (3V0)', V2: 'negative-sequence voltage (V2)', V1: 'positive-sequence voltage (V1)',
+  VA: 'phase A voltage', VB: 'phase B voltage', VC: 'phase C voltage',
+  VAB: 'A-B voltage', VBC: 'B-C voltage', VCA: 'C-A voltage',
+};
+function mpQtyName(q) { return MP_QTY_NAME[q] || q || ''; }
+
+// ── Past trips at the site, as small charts ──
+// One chart per quantity, all over the same trips (same element as this one), so a point in one
+// lines up with the point above or beside it in the others:
+//   * the tripping element's own measured value, against its pickup (always first)
+//   * phase voltage and phase current at the trip and at their extreme in the record, unless
+//     the element's own value already is that quantity
+// Voltage and current are primary (kV, A), as Site Notes keeps them; the element's value is in
+// the units of its pickup.
+
+const MP_LOW = 'lowest', MP_HIGH = 'highest';
+
+// What one chart plots from a trip's measured values (t.meas). Returns {trip, ext} or null.
+function mpOpSeries(m) { return m && m.op ? { trip: m.op.trip, ext: m.op.peak } : null; }
+function mpPhaseSeries(keys, useMax) {
+  return m => {
+    const q = m && m.q;
+    if (!q) return null;
+    const ph = keys.map(k => q[k]).filter(Boolean);
+    if (!ph.length) return null;
+    const pick = (arr) => { const a = arr.filter(v => v != null && isFinite(v)); return a.length ? (useMax ? Math.max(...a) : Math.min(...a)) : null; };
+    return { trip: pick(ph.map(p => p.trip)), ext: pick(ph.map(p => useMax ? p.max : (p.min != null ? p.min : p.max))) };
+  };
+}
+
+// Is the element's own value plain phase voltage, or plain phase current?
+function mpOpIsPhaseV(op) { return /^(lowest|highest) phase voltage$|^V[ABC]$/i.test(op.quantity || ''); }
+function mpOpIsPhaseI(op) { return /^(highest phase current|I[ABC]|max phase current)$/i.test(op.quantity || '') || /highest of IA, IB and IC/i.test(op.quantity || ''); }
+
+function mpCharts(op) {
+  const under = op.kind === 'min';
+  const out = [{
+    title: `${op.element} · ${mpQtyName(op.quantity)}`, unit: op.unit, pickup: op.pickup, ext: under ? MP_LOW : MP_HIGH,
+    get: mpOpSeries, main: true,
+  }];
+  // Voltage: the side that matters for this trip. An overvoltage trip looks at the highest phase;
+  // everything else (undervoltage, overcurrent, frequency) at the lowest, where a fault shows.
+  const vHigh = !under && /voltage|^V|3V0|V[12]\b/i.test(op.quantity || '');
+  if (!mpOpIsPhaseV(op))
+    out.push({ title: `${vHigh ? 'Highest' : 'Lowest'} phase voltage`, unit: 'kV pri', ext: vHigh ? MP_HIGH : MP_LOW,
+      get: mpPhaseSeries(['VA', 'VB', 'VC'], vHigh) });
+  if (!mpOpIsPhaseI(op))
+    out.push({ title: 'Highest phase current', unit: 'A pri', ext: MP_HIGH,
+      get: mpPhaseSeries(['IA', 'IB', 'IC'], true) });
+  return out;
+}
+
+// One small chart: title with its unit, value at the trip (solid, filled dots) and the extreme
+// in the record (dashed, open dots), the pickup if it has one, and the event on screen labelled.
+// size: {W, H} of the plot (default 236 × 70). legend: false leaves the per-chart key out, for a
+// row of charts that shares one key (mpLegendHTML).
+function mpChartHTML(c, trips, size, legend) {
+  const pts = trips.map(t => Object.assign({ at: t.at, cur: t.cur, cause: t.cause }, c.get(t.m) || {}));
+  if (pts.filter(p => p.trip != null || p.ext != null).length < 2) return '';
+  const W = (size && size.W) || 236, H = (size && size.H) || 70, L = 32, R = 38, T = 6, B = 6;
+  const vals = [];
+  for (const p of pts) for (const v of [p.trip, p.ext]) if (v != null && isFinite(v)) vals.push(v);
+  if (c.pickup != null && isFinite(c.pickup)) vals.push(c.pickup);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
+  const pad = (hi - lo) * 0.1;
+  lo = vals.every(v => v >= 0) ? Math.max(0, lo - pad) : lo - pad;   // magnitudes never go below zero
+  hi += pad;
+  const n = pts.length;
+  const x = i => n === 1 ? L + (W - L - R) / 2 : L + i * (W - L - R) / (n - 1);
+  const y = v => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
+  const ok = v => v != null && isFinite(v);
+  const line = key => pts.map((p, i) => ok(p[key]) ? `${i && ok(pts[i - 1][key]) ? 'L' : 'M'}${x(i).toFixed(1)},${y(p[key]).toFixed(1)}` : '').join('');
+  const tip = p => `${(p.at || '').slice(0, 16)}${p.cur ? ' — this event' : ''}\nAt the trip: ${mpFmt(p.trip)} ${c.unit}\n${c.ext === MP_LOW ? 'Lowest' : 'Highest'} in record: ${mpFmt(p.ext)} ${c.unit}${p.cause ? '\n' + p.cause : ''}`;
+  const dots = (key, cls) => pts.map((p, i) => !ok(p[key]) ? '' :
+    `<circle class="${cls}${p.cur ? ' mp-cur' : ''}" cx="${x(i).toFixed(1)}" cy="${y(p[key]).toFixed(1)}" r="${p.cur ? 3.6 : 2.5}"><title>${mpEsc(tip(p))}</title></circle>`).join('');
+  const pk = ok(c.pickup)
+    ? `<line class="mp-pk" x1="${L}" x2="${W - R}" y1="${y(c.pickup).toFixed(1)}" y2="${y(c.pickup).toFixed(1)}"/>
+       <text class="mp-pkt" x="${W - R + 4}" y="${(y(c.pickup) + 3).toFixed(1)}">pickup</text>` : '';
+  // the event on screen, labelled with its value at the trip
+  const ci = pts.findIndex(p => p.cur);
+  const curLbl = ci >= 0 && ok(pts[ci].trip)
+    ? `<text class="mp-curt" x="${(x(ci) + 6).toFixed(1)}" y="${(y(pts[ci].trip) + 3).toFixed(1)}">${mpFmt(pts[ci].trip)}</text>` : '';
+  const first = (pts[0].at || '').slice(0, 7), last = (pts[n - 1].at || '').slice(0, 7);
+  return `<figure class="mp-chart${c.main ? ' main' : ''}">
+    <figcaption><b>${mpEsc(c.title)}</b> <span>${mpEsc(c.unit)}</span></figcaption>
+    <svg class="mp-spark" viewBox="0 0 ${W} ${H + 12}" width="${W}" height="${H + 12}" role="img"
+        aria-label="${mpEsc(c.title)} in ${mpEsc(c.unit)}, at the trip and ${c.ext} in the record, over ${n} trips">
+      <text class="mp-ax" x="${L - 4}" y="${T + 7}" text-anchor="end">${mpFmt(hi)}</text>
+      <text class="mp-ax" x="${L - 4}" y="${H - B}" text-anchor="end">${mpFmt(lo)}</text>
+      <line class="mp-base" x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}"/>
+      ${pk}
+      <path class="mp-lpeak" d="${line('ext')}"/>
+      <path class="mp-ltrip" d="${line('trip')}"/>
+      ${dots('ext', 'mp-dpeak')}${dots('trip', 'mp-dtrip')}
+      ${curLbl}
+      <text class="mp-ax" x="${L}" y="${H + 10}">${mpEsc(first)}</text>
+      <text class="mp-ax" x="${W - R}" y="${H + 10}" text-anchor="end">${mpEsc(last)}</text>
+    </svg>
+    ${legend === false ? '' : mpLegendHTML(c.ext, ok(c.pickup), ci >= 0)}
+  </figure>`;
+}
+
+// The key: solid line at the trip, dashed the extreme, the pickup, and the event on screen.
+function mpLegendHTML(ext, pickup, cur) {
+  return `<div class="mp-legend"><i class="mp-lt"></i>at the trip <i class="mp-lp"></i>${ext || 'lowest / highest'} in record` +
+    `${pickup ? ' <i class="mp-lk"></i>pickup' : ''}${cur ? ' <i class="mp-lc"></i>this event' : ''}</div>`;
+}
+

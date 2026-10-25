@@ -55,6 +55,7 @@ function renderSel851Banner() {
       ${P.analogData.length} samples at ${(P.cfg.rates[0]?.sampFreq || 0).toFixed(0)} Hz &nbsp;·&nbsp;
       ${P.digitalLabels.length} named bits
     </div>
+    ${typeof buildMeasuredPanel === 'function' ? `<div style="margin-top:12px;">${buildMeasuredPanel(P, A)}</div>` : ''}
     ${!P._debug.hdrPresent ? `<div style="margin-top:10px;padding:8px 12px;background:var(--yellow-dim);border-radius:6px;font-size:12px;color:var(--yellow);">No .hdr file, so no settings or trip equation: the trip cannot be checked. Waveforms and bit states only.</div>` : ''}
   </div>`;
 }

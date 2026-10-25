@@ -510,7 +510,13 @@ function buildLogicTreeSection(P, A) {
 // the event but the relay's own trip logic never consulted them.
 function buildEvidenceBlock(P, cause) {
   const ev = cause?.evidence;
-  if (!ev || !ev.items?.length) return '';
+  // The measured value of the element that tripped leads the card (measured-panel.js).
+  const mp = typeof buildMeasuredPanel === 'function' && typeof ANALYSIS !== 'undefined' && ANALYSIS
+    ? buildMeasuredPanel(P, ANALYSIS) : '';
+  const head = `<div style="font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Evidence</div>`;
+  if (!ev || !ev.items?.length) {
+    return mp ? `<div style="background:var(--card);border:1px solid var(--card-border);border-radius:8px;padding:12px 16px;margin-bottom:16px;">${head}${mp}</div>` : '';
+  }
   const rows = ev.items.map(it => {
     const timing = it.assertMs != null
       ? (Math.abs(it.assertMs) < 0.5 ? 'asserted at the trip instant' : `asserted ${Math.abs(it.assertMs).toFixed(0)} ms before the trip`)
@@ -534,7 +540,7 @@ function buildEvidenceBlock(P, cause) {
           : `, so ${uvN > 1 ? 'they' : 'it'} did not cause this trip.`}</p>`
     : '';
   return `<div style="background:var(--card);border:1px solid var(--card-border);border-radius:8px;padding:12px 16px;margin-bottom:16px;">
-    <div style="font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Evidence</div>
+    ${head}${mp}
     <ul style="font-size:12px;color:var(--text-dim);line-height:1.6;padding-left:18px;margin:0;">${rows}</ul>
     ${uvNote}
   </div>`;

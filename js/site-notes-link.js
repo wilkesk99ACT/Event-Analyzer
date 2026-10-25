@@ -434,6 +434,8 @@ function renderSiteNotesBar() {
   if (SN.error && SN.supported && !SN.dir) html += `<div class="sn-error">${snEsc(SN.error)}</div>`;
   bar.innerHTML = html;
   bar.style.display = 'flex';
+  // the trend beside the measured value reads the same match
+  if (typeof renderMeasTrend === 'function') renderMeasTrend();
 }
 
 function snBarForEvent() {
