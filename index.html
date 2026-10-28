@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CEV Trip Analyzer</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/styles.css?v=2026-10-25g">
+<link rel="stylesheet" href="css/styles.css?v=2026-10-28a">
 </head>
 <body>
 
@@ -50,6 +50,7 @@
         <div id="topBarVPri" style="font-size:13px;font-weight:700;color:#5ac8fa"></div>
       </div>
       <button class="btn btn-bug" onclick="openBugReport()">🐞 Report a bug</button>
+      <button class="btn" id="settingsBtn" style="display:none" onclick="openRelaySettings()" title="Open the relay settings from this record in a separate window, laid out as in SynchroWAVe">⚙️ Settings</button>
       <button class="btn" onclick="startTour()" title="Walk through how to read an event">Tour</button>
       <button class="btn" onclick="toggleHelp(true)">Help</button>
       <button class="btn" onclick="resetApp()">New Files</button>
@@ -134,6 +135,8 @@
             <li><b>&#128202; Frequency</b> — frequency-element pickups vs. measured.</li>
             <li><b>&#128203; Equations</b> — raw SELogic trip, fault, and reclose equations.</li>
           </ul>
+          <h3>Settings window</h3>
+          <p><b>&#9881;&#65039; Settings</b> in the top bar opens every relay setting in the record in its own window, by class and heading as in SynchroWAVe. Click an equation term to go to its setting.</p>
         </div>
 
         <!-- ── Sequence Components ── -->
@@ -215,44 +218,45 @@
   <div class="content" id="contentArea"></div>
 </div>
 
-<script src="js/tooltips.js?v=2026-10-25g"></script>
-<script src="js/parse-cev.js?v=2026-10-25g"></script>
-<script src="js/ored-aggregates.js?v=2026-10-25g"></script>
-<script src="js/analyze-trip-margin.js?v=2026-10-25g"></script>
-<script src="js/analyze-cev.js?v=2026-10-25g"></script>
-<script src="js/analyze-reclose.js?v=2026-10-25g"></script>
-<script src="js/analyze-custom-close.js?v=2026-10-25g"></script>
-<script src="js/analyze-close-attempt.js?v=2026-10-25g"></script>
-<script src="js/analyze-close-readiness.js?v=2026-10-25g"></script>
-<script src="js/logic-tree-panel.js?v=2026-10-25g"></script>
-<script src="js/banner.js?v=2026-10-25g"></script>
-<script src="js/signal-processing.js?v=2026-10-25g"></script>
-<script src="js/magnitude-charts.js?v=2026-10-25g"></script>
-<script src="js/chart-state-and-playback.js?v=2026-10-25g"></script>
-<script src="js/gif-export-main.js?v=2026-10-25g"></script>
-<script src="js/chart-rendering.js?v=2026-10-25g"></script>
-<script src="js/analog-picker.js?v=2026-10-25g"></script>
-<script src="js/consistency-panel.js?v=2026-10-25g"></script>
-<script src="js/logic-graph-model.js?v=2026-10-25g"></script>
-<script src="js/logic-graph-render.js?v=2026-10-25g"></script>
-<script src="js/app-shell.js?v=2026-10-25g"></script>
-<script src="js/parse-form6.js?v=2026-10-25g"></script>
-<script src="js/form6-ui.js?v=2026-10-25g"></script>
-<script src="js/parse-sel851.js?v=2026-10-25g"></script>
-<script src="js/analyze-sel851.js?v=2026-10-25g"></script>
-<script src="js/sel851-ui.js?v=2026-10-25g"></script>
-<script src="js/file-loading.js?v=2026-10-25g"></script>
-<script src="js/event-selector-and-help.js?v=2026-10-25g"></script>
-<script src="js/logic-graph-svg.js?v=2026-10-25g"></script>
-<script src="js/logic-graph-playback.js?v=2026-10-25g"></script>
-<script src="js/gif-export.js?v=2026-10-25g"></script>
-<script src="js/canvas-export.js?v=2026-10-25g"></script>
-<script src="js/bit-detail-modal.js?v=2026-10-25g"></script>
-<script src="js/bug-report.js?v=2026-10-25g"></script>
-<script src="js/walkthrough.js?v=2026-10-25g"></script>
-<script src="js/trip-measurements.js?v=2026-10-25g"></script>
-<script src="js/measured-panel.js?v=2026-10-25g"></script>
-<script src="js/site-notes-link.js?v=2026-10-25g"></script>
-<script src="js/main.js?v=2026-10-25g"></script>
+<script src="js/tooltips.js?v=2026-10-28a"></script>
+<script src="js/parse-cev.js?v=2026-10-28a"></script>
+<script src="js/ored-aggregates.js?v=2026-10-28a"></script>
+<script src="js/analyze-trip-margin.js?v=2026-10-28a"></script>
+<script src="js/analyze-cev.js?v=2026-10-28a"></script>
+<script src="js/analyze-reclose.js?v=2026-10-28a"></script>
+<script src="js/analyze-custom-close.js?v=2026-10-28a"></script>
+<script src="js/analyze-close-attempt.js?v=2026-10-28a"></script>
+<script src="js/analyze-close-readiness.js?v=2026-10-28a"></script>
+<script src="js/logic-tree-panel.js?v=2026-10-28a"></script>
+<script src="js/banner.js?v=2026-10-28a"></script>
+<script src="js/signal-processing.js?v=2026-10-28a"></script>
+<script src="js/magnitude-charts.js?v=2026-10-28a"></script>
+<script src="js/chart-state-and-playback.js?v=2026-10-28a"></script>
+<script src="js/gif-export-main.js?v=2026-10-28a"></script>
+<script src="js/chart-rendering.js?v=2026-10-28a"></script>
+<script src="js/analog-picker.js?v=2026-10-28a"></script>
+<script src="js/consistency-panel.js?v=2026-10-28a"></script>
+<script src="js/logic-graph-model.js?v=2026-10-28a"></script>
+<script src="js/logic-graph-render.js?v=2026-10-28a"></script>
+<script src="js/app-shell.js?v=2026-10-28a"></script>
+<script src="js/parse-form6.js?v=2026-10-28a"></script>
+<script src="js/form6-ui.js?v=2026-10-28a"></script>
+<script src="js/parse-sel851.js?v=2026-10-28a"></script>
+<script src="js/analyze-sel851.js?v=2026-10-28a"></script>
+<script src="js/sel851-ui.js?v=2026-10-28a"></script>
+<script src="js/file-loading.js?v=2026-10-28a"></script>
+<script src="js/event-selector-and-help.js?v=2026-10-28a"></script>
+<script src="js/logic-graph-svg.js?v=2026-10-28a"></script>
+<script src="js/logic-graph-playback.js?v=2026-10-28a"></script>
+<script src="js/gif-export.js?v=2026-10-28a"></script>
+<script src="js/canvas-export.js?v=2026-10-28a"></script>
+<script src="js/bit-detail-modal.js?v=2026-10-28a"></script>
+<script src="js/bug-report.js?v=2026-10-28a"></script>
+<script src="js/walkthrough.js?v=2026-10-28a"></script>
+<script src="js/trip-measurements.js?v=2026-10-28a"></script>
+<script src="js/measured-panel.js?v=2026-10-28a"></script>
+<script src="js/site-notes-link.js?v=2026-10-28a"></script>
+<script src="js/settings-window.js?v=2026-10-28a"></script>
+<script src="js/main.js?v=2026-10-28a"></script>
 </body>
 </html>

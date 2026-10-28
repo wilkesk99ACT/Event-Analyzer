@@ -137,6 +137,7 @@ function selectEvent(idx) {
   // has no resolved trip transition, e.g. an ER/non-trip record).
   if (typeof refreshProtectionTab === 'function') refreshProtectionTab(null);
   if (typeof renderSiteNotesBar === 'function') renderSiteNotesBar();
+  if (typeof updateSettingsButton === 'function') updateSettingsButton();
 }
 
 // Filters the Event Timeline (panel-timeline) to only the bits relevant to the resolved trip.
