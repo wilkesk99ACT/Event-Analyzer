@@ -86,8 +86,8 @@ function renderMeasTrend() {
     box.innerHTML = `<div class="mp-tnote">No earlier ${mpEsc(el)} trips with measured values at ${mpEsc(site.name)}.</div>`;
     return;
   }
-  // Small, beside the values: they only have to show which way the values are moving.
-  const charts = mpCharts(cur.op).map(c => mpChartHTML(c, trips, { W: 172, H: 46 }, false)).filter(Boolean).join('');
+  // Small, beside the values and stacked: they only have to show which way the values are moving.
+  const charts = mpCharts(cur.op).map(c => mpChartHTML(c, trips, { W: 220, H: 34 }, false)).filter(Boolean).join('');
   box.innerHTML = `<div class="mp-th">Past ${mpEsc(el)} trips at ${mpEsc(site.name)} <span>${past} earlier + this event</span></div>
     <div class="mp-charts">${charts}</div>${mpLegendHTML(null, true, true)}`;
 }

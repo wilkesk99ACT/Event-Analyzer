@@ -1538,7 +1538,8 @@ function buildRecloseSequenceCard() {
 // Compact verdict strip for the top banner — one line, so the "does it come back?" question
 // is answered without leaving the summary view. Silent when the file carries no 79 data at
 // all, so non-recloser relays don't get an empty block.
-function buildRecloseBannerBlock(P, A) {
+// compact: the small side-column card used next to the banner headline.
+function buildRecloseBannerBlock(P, A, compact) {
   const RC = A && A.reclose;
   if (!RC || !RC.available || !RC.verdict || RC.verdict.kind === 'no-data') return '';
   const v = RC.verdict;
@@ -1556,6 +1557,13 @@ function buildRecloseBannerBlock(P, A) {
     else if (next && next.openIntervalSec != null) bits.push(`next in ${formatDuration(next.openIntervalSec)}${next.clock ? ` (~${next.clock})` : ''}`);
   } else if (RC.enabled === true && RC.shots) {
     bits.push(`${RC.shots}-shot scheme, not being run for this event`);
+  }
+  if (compact) {
+    return `<div class="side-note tour-reclose" style="border-left-color:${tone.border};">
+      <div class="side-note-k">${tone.icon} Auto-Reclose</div>
+      <div class="side-note-v" style="color:${tone.color};">${v.headline}</div>
+      <div class="side-note-s">${bits.length ? bits.join(' · ') + ' · ' : ''}<span class="side-note-link" onclick="openRecloseTab()">Details</span></div>
+    </div>`;
   }
   return `<div class="tour-reclose" style="margin-top:14px;background:${tone.bg};border:1px solid ${tone.border};border-radius:8px;padding:12px 14px;">
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">

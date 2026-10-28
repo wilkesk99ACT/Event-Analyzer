@@ -113,8 +113,7 @@ function renderBanner() {
           <p style="color:var(--text-dim);font-size:13px;">${isTrigRecord
             ? 'Taken on demand (TRIG command). Shows relay state at that moment, not a protection operation.'
             : 'No trip transition in this record. See the Protection and SV Logic tabs for element states.'}</p>
-          ${buildRecloseBannerBlock(PARSED, ANALYSIS)}
-        ${typeof buildCloseReadinessBannerBlock === 'function' ? buildCloseReadinessBannerBlock(PARSED, ANALYSIS) : ''}
+          <div style="margin-top:12px;max-width:320px;">${buildBannerSideNotes(PARSED, ANALYSIS)}</div>
         </div>
         ${chartsHTML}
       </div>
@@ -149,10 +148,6 @@ function renderBanner() {
     seqHTML += '</div>';
   }
 
-  // Total time calculation
-  const totalCycles = cause.causeChain.reduce((sum, c) => sum + (c.delay || 0), 0);
-  const totalMs = totalCycles / (PARSED.eventInfo.freq || 60) * 1000;
-
   // Toggle the calmer, non-alarming palette for event-report (no-trip) events — this
   // represents the relay choosing to record a condition, not a fault it acted on.
   el.classList.toggle('event-report', !!cause.isEventReport);
@@ -160,29 +155,31 @@ function renderBanner() {
   el.innerHTML += `
     <div class="trip-banner-layout">
       <div class="trip-banner-main">
-        <div class="trip-banner-header">
-          <div class="trip-banner-icon">${cause.isEventReport ? '📋' : '⚡'}</div>
-          <div>
-            <div class="trip-banner-label">${cause.isEventReport ? (cause.isCloseAttempt ? 'Close Attempt — No Trip' : 'Event Report Triggered — No Trip') : 'Root Cause Identified'}</div>
-            <div class="trip-banner-cause">${cause.causeText}</div>
+        <div class="trip-banner-top">
+          <div class="trip-banner-top-main">
+            <div class="trip-banner-header">
+              <div class="trip-banner-icon">${cause.isEventReport ? '📋' : '⚡'}</div>
+              <div>
+                <div class="trip-banner-label">${cause.isEventReport ? (cause.isCloseAttempt ? 'Close Attempt — No Trip' : 'Event Report Triggered — No Trip') : 'Root Cause Identified'}</div>
+                <div class="trip-banner-cause">${cause.causeText}</div>
+              </div>
+            </div>
+            <div class="trip-compare" id="tripCompare"></div>
+            ${cause.crossEvent ? '<div style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:4px;background:var(--yellow-dim);color:var(--yellow);font-size:11px;font-weight:600;margin-bottom:10px;border:1px solid #5c4506"><span>🔗</span> CROSS-EVENT: Condition started in a prior event record</div>' : ''}
+            <p style="color:${cause.isEventReport ? '#bfdbfe' : '#fecaca'};font-size:13px;margin-bottom:16px;line-height:1.6;">${cause.causeDetail}</p>
           </div>
+          ${buildBannerSideNotes(PARSED, ANALYSIS)}
         </div>
-        <div class="trip-compare" id="tripCompare"></div>
-        ${cause.crossEvent ? '<div style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:4px;background:var(--yellow-dim);color:var(--yellow);font-size:11px;font-weight:600;margin-bottom:10px;border:1px solid #5c4506"><span>🔗</span> CROSS-EVENT: Condition started in a prior event record</div>' : ''}
-        <p style="color:${cause.isEventReport ? '#bfdbfe' : '#fecaca'};font-size:13px;margin-bottom:16px;line-height:1.6;">${cause.causeDetail}</p>
+        ${buildConsistencyWarningBanner(PARSED, ANALYSIS)}
         ${buildPerPhaseNote(cause)}
         ${buildEvidenceBlock(PARSED, cause)}
-        <div id="mainChartedLogicSlot"></div>
-        <div class="trip-timing">
-          <div class="timing-chip"><span class="label">${cause.isEventReport ? 'Timer Delay:' : 'Total Timer Delay:'}</span> <span class="value">${totalCycles} cycles (${totalMs.toFixed(0)} ms)</span></div>
-          <div class="timing-chip"><span class="label">Immediate Cause:</span> <span class="value">${cause.immediateCause || '—'}</span></div>
-          <div class="timing-chip"><span class="label">${cause.isEventReport ? 'Event Report Equation:' : 'Trip Equation:'}</span> <span class="value">${(cause.isEventReport ? (PARSED.erEquationName || 'ER') : (cause.sourceEquationName || PARSED.tripEquationName || 'TR'))}${cause.immediateCause ? ' via ' + cause.immediateCause : ''}</span></div>
-          ${renderChartedBitChipHTML(PARSED, ANALYSIS)}
+        <div class="logic-card">
+          <div class="logic-card-bar">
+            <div class="timing-chip"><span class="label">${cause.isEventReport ? 'Event Report Equation:' : 'Trip Equation:'}</span> <span class="value">${(cause.isEventReport ? (PARSED.erEquationName || 'ER') : (cause.sourceEquationName || PARSED.tripEquationName || 'TR'))}${cause.immediateCause ? ' via ' + cause.immediateCause : ''}</span></div>
+            ${renderChartedBitChipHTML(PARSED, ANALYSIS)}
+          </div>
+          <div id="mainChartedLogicSlot"></div>
         </div>
-        ${buildRecloseBannerBlock(PARSED, ANALYSIS)}
-        ${typeof buildCloseReadinessBannerBlock === 'function' ? buildCloseReadinessBannerBlock(PARSED, ANALYSIS) : ''}
-        ${buildConsistencyWarningBanner(PARSED, ANALYSIS)}
-        ${buildInvestigationPanel(PARSED, ANALYSIS)}
       </div>
       ${chartsHTML}
     </div>
@@ -228,6 +225,18 @@ function renderBanner() {
 // keep using the sliding-window form, so this branches on the file's own declared rate rather
 // than being applied everywhere.
 function isFilteredQuarterCycle(samplesPerCycle) { return samplesPerCycle === 4; }
+
+// The small column beside the headline: reclose verdict, close readiness and investigation
+// flags. Useful context, but secondary to the evidence, logic chart and waveforms, so each is a
+// compact card (the flags stay collapsed to a count). Empty when there is nothing to say.
+function buildBannerSideNotes(P, A) {
+  const notes = [
+    buildRecloseBannerBlock(P, A, true),
+    typeof buildCloseReadinessBannerBlock === 'function' ? buildCloseReadinessBannerBlock(P, A, true) : '',
+    A && A.tripCause ? buildInvestigationPanel(P, A, true) : '',
+  ].filter(Boolean);
+  return notes.length ? `<aside class="trip-side-notes">${notes.join('')}</aside>` : '';
+}
 
 // One sentence under each magnitude chart saying which of the two methods produced it, so the
 // number on screen can always be traced back to how it was derived.

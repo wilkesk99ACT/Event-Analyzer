@@ -161,10 +161,19 @@ function buildCloseAttemptCard(P, A) {
 // Renders A.investigationFlags (computed in analyzeCEV). Deliberately worded as
 // observations, not instructions — no "check X" or "replace Y". Appears only when there's
 // something to say; silent otherwise so it doesn't add noise to a routine, unambiguous trip.
-function buildInvestigationPanel(P, A) {
+// compact: a collapsed side-column card (count only until opened) next to the banner headline.
+function buildInvestigationPanel(P, A, compact) {
   const flags = A?.investigationFlags || [];
   if (!flags.length) return '';
   const sevColor = { high: 'var(--red)', medium: 'var(--yellow)', info: 'var(--accent)' };
+  if (compact) {
+    const worst = flags.some(f => f.severity === 'high') ? 'high' : flags.some(f => f.severity === 'medium') ? 'medium' : 'info';
+    return `<details class="side-note tour-flags" style="border-left-color:${sevColor[worst]};">
+      <summary><span class="side-note-k">🔍 Flagged for investigation</span>
+        <div class="side-note-v" style="color:${sevColor[worst]};display:inline;">${flags.length} item${flags.length === 1 ? '' : 's'}</div></summary>
+      ${flags.map(f => `<div class="side-flag"><b style="color:${sevColor[f.severity] || sevColor.info};">${f.title}</b>${f.detail}</div>`).join('')}
+    </details>`;
+  }
   const sevBg = { high: 'var(--red-dim)', medium: 'var(--yellow-dim)', info: 'var(--accent-dim)' };
   const sevBorder = { high: '#5c1414', medium: '#5c4506', info: '#123a5c' };
   return `<div class="tour-flags" style="margin-top:14px;">

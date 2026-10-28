@@ -145,15 +145,15 @@ function tourSteps(format) {
           Lines that <b>join and merge into one</b> are an OR: any one was enough.</li>
         <li>Hover a box for its equation. Click it for its own logic and history.</li></ul>` },
     { target: '.tour-flags', title: '3. Read the flags',
-      fallbackBody: `<b>Nothing is flagged on this event.</b> When something is, a yellow or red panel appears
-        under the headline. Flags mark the cases where the headline can mislead: a trip from internal logic,
+      fallbackBody: `<b>Nothing is flagged on this event.</b> When something is, a small card appears
+        beside the headline; click it to open the list. Flags mark the cases where the headline can mislead: a trip from internal logic,
         a trip on an open breaker, a failed VT or CT channel, or an overcurrent trip with no fault signature.
         When you see one, read it before trusting the headline.`,
       body: `These mark the cases where the headline can mislead: a trip from internal logic, a trip on an
         open breaker, a failed VT or CT channel, or an overcurrent trip with no fault signature.
         <b>Read these before trusting the headline.</b> They say what deserves a closer look, not what to do.` },
     { target: '.tour-reclose', title: '4. Will it come back by itself?',
-      body: `A one-line answer from the reclose and close logic. <b>Full reclose analysis →</b> opens the
+      body: `A one-line answer from the reclose and close logic. <b>Details</b> opens the
         Reclosing tab with each close path and the condition it waits on.` },
     { target: '.trip-banner-charts', title: '5. Confirm on the waveforms',
       body: `Every chart shares one time axis, so the trip lines up across all of them.

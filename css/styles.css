@@ -399,6 +399,19 @@ body.dragging-file #drop-overlay { display: flex; }
   border: 1px solid var(--card-border);
   border-radius: 8px;
 }
+/* The banner's logic chart card: the equation and charted-bit pickers sit in its top bar, and
+   whatever the slot shows (tree, chain or local graph) fills the rest without a second border. */
+.logic-card {
+  margin: 14px 0;
+  padding: 10px 14px 12px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+}
+.logic-card-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-bottom: 4px; }
+.logic-card-bar .timing-chip { padding: 3px 10px; font-size: 11.5px; background: var(--bg2); }
+.logic-card .logic-tree-block { margin: 0; padding: 0; background: none; border: 0; }
+.logic-card .main-charted-local-graph { margin-top: 4px !important; }
 .logic-tree-other {
   font-size: 10.5px;
   color: var(--text-muted);
@@ -1221,23 +1234,25 @@ body.dragging-file #drop-overlay { display: flex; }
 .mp { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; padding: 12px 14px;
   background: var(--bg2); border: 1px solid var(--card-border); border-left: 3px solid var(--accent); border-radius: 8px; }
 .mp-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.mp-el { font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--text); }
-.mp-q { font-size: 12px; color: var(--text-dim); }
-.mp-body { display: flex; flex-wrap: wrap; gap: 10px 26px; align-items: flex-start; }
-.mp-stat { min-width: 120px; }
-.mp-k { font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); }
-.mp-v { font-family: var(--mono); font-size: 24px; font-weight: 600; color: var(--text); line-height: 1.2; margin-top: 2px; }
-.mp-v small { font-size: 12px; font-weight: 400; color: var(--text-dim); }
-.mp-s { font-size: 11.5px; color: var(--text-dim); margin-top: 2px; }
+.mp-el { font-family: var(--mono); font-size: 17px; font-weight: 700; color: var(--text); }
+.mp-q { font-size: 13.5px; color: var(--text-dim); }
+.mp-body { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: flex-start; }
+.mp-stat { min-width: 110px; }
+.mp-k { font-size: 10px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); }
+.mp-v { font-family: var(--mono); font-size: 19px; font-weight: 600; color: var(--text); line-height: 1.2; margin-top: 2px; }
+.mp-v small { font-size: 11px; font-weight: 400; color: var(--text-dim); }
+.mp-s { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 .mp-beyond .mp-v { color: var(--red); }
 .mp-short .mp-v { color: var(--yellow); }
-.mp-pick .mp-v { font-size: 18px; color: var(--text-dim); margin-top: 6px; }
+.mp-pick .mp-v { font-size: 15px; color: var(--text-dim); margin-top: 4px; }
 .mp-trend { margin-left: auto; padding-left: 16px; border-left: 1px solid var(--card-border); min-width: 0; }
-@media (max-width: 1100px) { .mp-trend { margin-left: 0; padding-left: 0; border-left: 0; flex-basis: 100%; } }
+@media (max-width: 860px) { .mp-trend { margin-left: 0; padding-left: 0; border-left: 0; flex-basis: 100%; } }
 .mp-trend:empty { display: none; }
 .mp-th { font-size: 10.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; }
 .mp-th span { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
 .mp-charts { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+/* beside the measured values: one chart per row, so they read top to bottom */
+.mp-trend .mp-charts { flex-direction: column; flex-wrap: nowrap; gap: 4px; }
 .mp-chart { margin: 0; }
 .mp-chart figcaption { font-size: 10.5px; color: var(--text-dim); margin-bottom: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
 .mp-chart figcaption b { color: var(--text); font-weight: 600; }
@@ -1246,6 +1261,23 @@ body.dragging-file #drop-overlay { display: flex; }
 .mp-pkt { font-size: 9.5px; fill: var(--yellow); }
 .mp-curt { font-family: var(--mono); font-size: 10.5px; font-weight: 600; fill: var(--text); }
 .mp-tnote { font-size: 11.5px; color: var(--text-muted); }
+/* Banner top: headline on the left, low-priority notes (reclose, close readiness, flags) in a
+   small column on the right that wraps underneath on a narrow window. */
+.trip-banner-top { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 24px; }
+.trip-banner-top-main { flex: 1 1 420px; min-width: 0; }
+.trip-side-notes { flex: 0 1 290px; display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+.side-note { background: var(--card); border: 1px solid var(--card-border); border-left: 3px solid var(--card-border); border-radius: 6px; padding: 5px 10px; font-size: 11.5px; color: var(--text-dim); }
+.side-note-k { font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); }
+.side-note-v { font-size: 12px; font-weight: 600; margin-top: 1px; }
+.side-note-s { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+.side-note-link { cursor: pointer; color: var(--text-muted); text-decoration: underline; text-underline-offset: 2px; }
+.side-note-link:hover { color: var(--text); }
+details.side-note summary { cursor: pointer; list-style: none; }
+details.side-note summary::-webkit-details-marker { display: none; }
+details.side-note summary::after { content: ' ▸'; color: var(--text-muted); }
+details.side-note[open] summary::after { content: ' ▾'; }
+.side-flag { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--card-border); line-height: 1.5; }
+.side-flag b { display: block; font-size: 11.5px; }
 /* How this trip compares with the site's earlier trips (renderTripCompare) */
 .trip-compare { display: flex; flex-direction: column; gap: 6px; margin: -4px 0 12px; }
 .trip-compare:empty { display: none; }

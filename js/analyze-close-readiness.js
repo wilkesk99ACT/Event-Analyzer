@@ -601,10 +601,17 @@ function buildCloseReadinessCard(P, A) {
   </div>`;
 }
 
-function buildCloseReadinessBannerBlock(P, A) {
+// compact: the small side-column card used next to the banner headline.
+function buildCloseReadinessBannerBlock(P, A, compact) {
   const R = A && A.closeReadiness;
   if (!R || !R.verdict) return '';
   const c = ctTone(R.verdict.tone);
+  if (compact) {
+    return `<div class="side-note" style="border-left-color:${c};" title="More in the Diagnostics tab">
+      <div class="side-note-k">🔮 If a close were sent now</div>
+      <div class="side-note-v" style="color:${c};">${ctEsc(R.verdict.headline)}</div>
+    </div>`;
+  }
   return `<div style="margin-top:14px;border:1px solid ${c};border-radius:8px;padding:10px 14px;">
     <div style="font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-muted);">🔮 If a close were sent now</div>
     <div style="font-size:13px;font-weight:700;color:${c};margin-top:4px;">${ctEsc(R.verdict.headline)}</div>
