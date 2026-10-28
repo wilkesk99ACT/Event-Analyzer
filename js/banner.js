@@ -167,6 +167,7 @@ function renderBanner() {
             <div class="trip-banner-cause">${cause.causeText}</div>
           </div>
         </div>
+        <div class="trip-compare" id="tripCompare"></div>
         ${cause.crossEvent ? '<div style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:4px;background:var(--yellow-dim);color:var(--yellow);font-size:11px;font-weight:600;margin-bottom:10px;border:1px solid #5c4506"><span>🔗</span> CROSS-EVENT: Condition started in a prior event record</div>' : ''}
         <p style="color:${cause.isEventReport ? '#bfdbfe' : '#fecaca'};font-size:13px;margin-bottom:16px;line-height:1.6;">${cause.causeDetail}</p>
         ${buildPerPhaseNote(cause)}
@@ -189,6 +190,7 @@ function renderBanner() {
   LAST_SEQ_HTML = seqHTML;
   wireChartInteractivity();
   renderChartedLogicSlot();
+  if (typeof renderTripCompare === 'function') renderTripCompare();
 }
 
 // ══════════════════════════════════════════════════════════════════════

@@ -148,7 +148,7 @@ function refreshProtectionTab(idxFull) {
 // groups converge rightward through brace+line connectors (no box of their own — only real
 // signals get boxes), continuing through any nested SV logic, and terminating in the final
 // trip box on the right. This replaces the old stack of disconnected per-step cards.
-let LOGIC_COL_W = 190, LOGIC_ROW_H = 40, LOGIC_BOX_W = 152, LOGIC_BOX_H = 28, LOGIC_MARGIN = 18;
+let LOGIC_COL_W = 164, LOGIC_ROW_H = 40, LOGIC_BOX_W = 112, LOGIC_BOX_H = 28, LOGIC_MARGIN = 18;
 
 // Strip NOT/R_TRIG/F_TRIG wrapper nodes out of the tree shape entirely, folding them into a
 // `.modifiers` label list attached to the real node underneath (VAR/SVNODE/AND/OR). This keeps
@@ -377,7 +377,7 @@ function buildLogicTreeSection(P, A) {
         // The gap between two adjacent boxes is narrow, so the badge shows the percentage only —
         // the shortest string that still reads as "in progress". Elapsed and total ms are on hover,
         // and the fill on the connector itself already carries the fraction visually.
-        const midXp = (cx + x) / 2 - 16;
+        const midXp = (cx + x) / 2;
         boxesHTML += `<div class="logic-timer-label logic-timer-running" style="left:${midXp}px;top:${ny - 16}px;" title="${progTitle}">⏱ ${pct}%</div>`;
         boxesHTML += `<div class="logic-box logic-sv-box logic-timer-box ${node.value ? 'is-true' : ''}" style="left:${x}px;top:${y}px;width:${LOGIC_BOX_W}px;height:${LOGIC_BOX_H}px;">${prefix}${tt(node.label, P)}</div>`;
         renderNode(node.child, node.label);
@@ -385,7 +385,7 @@ function buildLogicTreeSection(P, A) {
       }
 
       linesHTML += titledEdge(cx, cy, x, ny, node.value ? trueColor : falseColor, '2,3', edgeTitle);
-      const midX = (cx + x) / 2 - 16;
+      const midX = (cx + x) / 2;
       const badgeTitle = node.inverseTimeNote
         ? `Run time not in this record: ${node.inverseTimeNote}.`
         : measured

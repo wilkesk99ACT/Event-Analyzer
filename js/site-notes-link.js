@@ -533,58 +533,137 @@ function snStubParsed(site, t) {
   return stub;
 }
 
-function snTreeHTML(site, t) {
-  if (!t.tree || typeof buildLogicTreeSection !== 'function') return '';
-  const P = snStubParsed(site, t);
-  const savedP = PARSED, savedA = ANALYSIS, savedIdx = LLG_VIEW_SAMPLE_IDX;
-  PARSED = null; ANALYSIS = null; LLG_VIEW_SAMPLE_IDX = null;   // no timer playback here
-  try {
-    return buildLogicTreeSection(P, { tripCause: { logicTree: t.tree, finalLabel: t.final || 'TRIP', logicTreeOtherBranchCount: t.treeOther || 0 } });
-  } catch (e) {
-    console.warn(e);
-    return `<div class="sn-error">The logic tree could not be drawn: ${snEsc(e.message)}</div>`;
-  } finally {
-    PARSED = savedP; ANALYSIS = savedA; LLG_VIEW_SAMPLE_IDX = savedIdx;
+// The fingerprint Site Notes keeps of the settings at each trip (settingsSig there; keep in step).
+function snSettingsSig(text) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  let h1 = 0x811c9dc5, h2 = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = (h2 * 31 + c) >>> 0;
   }
+  return h1.toString(36) + h2.toString(36) + s.length.toString(36);
 }
 
-function openSiteTrips() {
+// What normal is at the site, to colour measured values (tripMeasTone). Same as siteMeasRef in
+// Site Notes: nominal phase-to-neutral voltage from VNOM × PTR, rated current from the site's AC
+// rating at that voltage, and the relay's frequency.
+function snSiteMeasRef(site) {
+  const r = site.relay, st = (r && r.settings) || {}, auto = site.auto || {};
+  const vnom = Number(st.VNOM), ptr = Number(st.PTRY) || Number(st.PTRZ);
+  let vNomKv = null;
+  if (vnom && ptr) vNomKv = (vnom * ptr) / (r.vnomIsPhaseToPhase === true ? Math.sqrt(3) : 1) / 1000;
+  const kw = Number(auto.inverter_ac_kw) || (Number(auto.mw_ac) ? Number(auto.mw_ac) * 1000 : 0);
+  return { vNomKv, iRated: vNomKv && kw ? kw / (3 * vNomKv) : null, fNom: Number(r && r.eventInfo && r.eventInfo.freq) || 60 };
+}
+
+// The line under a trip's heading: the element that tripped, its value at the trip, its extreme
+// in the record, and the pickup. Same as the trip cards in Site Notes.
+function snMeasLineHTML(om) {
+  if (!om) return '';
+  const mult = v => v != null && isFinite(v) ? ` <small>(${Number(v).toFixed(2)}×)</small>` : '';
+  return `<div class="sn-meas-line">
+    <span class="tml-q"><b>${snEsc(om.element)}</b> ${snEsc(mpQtyName(om.quantity))}</span>
+    <span class="tml-v"><label>At the trip</label><b>${mpFmt(om.trip)}</b> ${snEsc(om.unit)}${mult(om.multTrip)}</span>
+    <span class="tml-v"><label>${om.kind === 'min' ? 'Lowest' : 'Highest'}</label><b>${mpFmt(om.peak)}</b> ${snEsc(om.unit)}${mult(om.multPeak)}</span>
+    <span class="tml-v tml-pk"><label>Pickup</label>${mpFmt(om.pickup)} ${snEsc(om.unit)}</span></div>`;
+}
+
+// The trip logic, left to right. The chain starts at the tripping element when the chain itself
+// only names SVs (the 27P2 behind SV09 is in the logic tree, not in the chain).
+function snChainHTML(site, t) {
+  const om = t.meas && t.meas.op;
+  const seen = new Set();
+  let steps = (t.chain || []).filter(c => { if (seen.has(c.label)) return false; seen.add(c.label); return true; });
+  if (!steps.length) return '';
+  if (om && !steps.some(c => String(c.label).replace(/[PT]$/, '') === om.element || c.label === om.bit))
+    steps = [{ label: om.bit || om.element, desc: 'The protection element that started it' }].concat(steps);
+  const P = snStubParsed(site, t);
+  const r851 = t.format === 'sel851' && site.relay && site.relay.format === 'sel851' ? site.relay : null;
+  const n851 = c => { const o = r851 && r851.nameMap && r851.nameMap[c.label]; return o && o.length ? ` (SEL-851: ${o.join(', ')})` : ''; };
+  return `<div class="sn-chain">${steps.map((c, i) =>
+    `<span class="sn-step${i === steps.length - 1 ? ' last' : ''}" title="${snEsc((c.desc || '') + n851(c))}">${typeof tt === 'function' ? tt(c.label, P) : snEsc(c.label)}${c.delay ? `<small> ${snEsc(c.delay)} cyc</small>` : ''}</span>`).join('<span class="sn-arrow">→</span>')}</div>`;
+}
+
+// The event analyzer's own SEL-851 check, as Site Notes keeps it with the trip.
+function snCheckHTML(ck) {
+  if (!ck || !ck.headline) return '';
+  const order = { error: 0, check: 1, info: 2, ok: 3 };
+  const items = (ck.findings || []).slice().sort((a, b) => (order[a.level] ?? 9) - (order[b.level] ?? 9))
+    .map(f => `<li><b>${snEsc(f.title)}.</b> ${snEsc(f.detail || '')}</li>`).join('');
+  return `<div class="sn-check ${ck.level === 'error' ? 'error' : ck.level === 'check' ? 'check' : ''}">
+    <b>${snEsc(ck.headline)}</b>${ck.detail ? `<div class="sn-muted">${snEsc(ck.detail)}</div>` : ''}${items ? `<ul>${items}</ul>` : ''}</div>`;
+}
+
+// For each element with two or more measured trips, the same small charts as the Trip history
+// card in Site Notes. A dot opens that trip below.
+function snHistoryChartsHTML(list, ids) {
+  if (typeof mpChartHTML !== 'function') return '';
+  const byEl = new Map();
+  for (const t of list) {
+    const o = t.meas && t.meas.op;
+    if (!o) continue;
+    if (!byEl.has(o.element)) byEl.set(o.element, []);
+    byEl.get(o.element).push(t);
+  }
+  let html = '', charted = false;
+  for (const [name, ts] of [...byEl].sort((a, b) => b[1].length - a[1].length)) {
+    if (ts.length < 2) continue;
+    const latest = ts[0], op = latest.meas.op;
+    const trips = ts.slice().reverse().map(t => ({ at: t.at, ms: t.atMs, m: t.meas, cause: t.cause && t.cause.text, cur: snSameTrip(t, ids) }));
+    const charts = mpCharts(op).map(c => mpChartHTML(c, trips, { W: 230, H: 60 }, false)).filter(Boolean).join('');
+    if (!charts) continue;
+    charted = true;
+    html += `<div class="sn-th-group"><div class="sn-th-head"><b>${snEsc(name)}</b> <span>${snEsc(mpQtyName(op.quantity))}</span>
+      <span class="sn-th-n">${ts.length} trips · last ${snEsc(String(latest.at || '').slice(0, 10))}</span></div>
+      <div class="mp-charts">${charts}</div></div>`;
+  }
+  return charted ? html + mpLegendHTML(null, true, list.some(t => snSameTrip(t, ids))) : '';
+}
+
+// focusAt: the relay stamp of one trip to open and scroll to (a dot clicked in the charts).
+// Without it the event open now is open, or else the newest trip.
+function openSiteTrips(focusAt) {
   const r = SN.results[CURRENT_IDX];
   if (!r || !r.match.site) return;
   const site = r.match.site;
   const list = snTripsFor(site);
   const modal = snEnsureModal();
-  document.getElementById('siteTripsTitle').textContent = `${site.name} — trips in the last ${SN_KEEP_MONTHS} months`;
+  document.getElementById('siteTripsTitle').textContent = `${site.name} — trips`;
 
-  let html = `<p class="sn-muted" style="margin-top:0">From Site Notes, newest first. Times are as the relay stamped them.
-    The event open now is marked. Measured values are kept for trips recorded on or after 2026-10-25.</p>`;
+  let html = `<p class="sn-muted" style="margin-top:0">Trips recorded in Site Notes in the last ${SN_KEEP_MONTHS} months, newest first.
+    A site keeps at most ${SN_KEEP_MAX}. Times are as the relay stamped them. The event open now is marked.</p>`;
 
+  // how often each cause happened
   const groups = new Map();
   for (const t of list) { const g = snCauseGroup(t); groups.set(g, (groups.get(g) || 0) + 1); }
   const curCause = ANALYSIS && ANALYSIS.tripCause && ANALYSIS.tripCause.causeText;
   html += `<div class="sn-chips">${[...groups].sort((a, b) => b[1] - a[1]).map(([g, n]) =>
     `<span class="sn-chip${curCause && snCauseGroup({ cause: { text: curCause } }) === g ? ' same' : ''}">${snEsc(g)} × ${n}</span>`).join('')}</div>`;
 
+  html += `<div id="snTripCharts">${snHistoryChartsHTML(list, r.ids)}</div>`;
+
+  const ref = snSiteMeasRef(site);
   // The event open now, measured the same way, for side-by-side reading.
   const curMeas = typeof tripMeasurements === 'function' ? tripMeasurements(PARSED, ANALYSIS) : null;
   if (curMeas && r.decision.state !== 'catalogued') {
-    html += `<details class="sn-trip current" open><summary><span class="sn-when">${snEsc(r.ids.at)}</span>
-      <span class="sn-what">This event: ${snEsc(curCause || PARSED.eventInfo.eventType || 'Event')}</span></summary>
-      <div class="sn-inner">${tripMeasHTML(curMeas, snEsc)}</div></details>`;
+    html += `<details class="sn-trip current" data-at="${snEsc(r.ids.at || '')}"><summary><span class="sn-when">${snEsc(r.ids.at)}</span>
+      <span class="sn-what"><b>This event:</b> ${snEsc(curCause || PARSED.eventInfo.eventType || 'Event')}</span>
+      <span class="sn-ev">Not in Site Notes yet</span>
+      ${curMeas.op ? `<div class="sn-glance">${snMeasLineHTML(curMeas.op)}</div>` : ''}</summary>
+      <div class="sn-inner"><h4>Measured values</h4><div class="sn-meas">${tripMeasHTML(curMeas, snEsc, ref)}</div></div></details>`;
   }
 
-  list.forEach((t, i) => {
+  const relaySet = site.relay ? snSettingsSig(site.relay.settingsText) : '';
+  for (const t of list) {
     const isCur = snSameTrip(t, r.ids);
     const src = t.src || {};
-    const steps = [];
-    const seen = new Set();
-    for (const c of (t.chain || [])) { if (!seen.has(c.label)) { seen.add(c.label); steps.push(c); } }
-    const P = snStubParsed(site, t);
-    const chain = steps.length ? `<div class="sn-chain">${steps.map(c =>
-      `<span class="sn-step" title="${snEsc(c.desc || '')}">${typeof tt === 'function' ? tt(c.label, P) : snEsc(c.label)}${c.delay ? `<small> ${snEsc(c.delay)} cyc</small>` : ''}</span>`).join('<span class="sn-arrow">→</span>')}</div>` : '';
     const rows = [
-      ['Cause detail', t.cause && t.cause.detail],
-      ['Trip equation', t.cause && t.cause.equation ? t.cause.equation + (t.cause.equationText ? ' := ' + t.cause.equationText : '') : null],
+      ['Relay stamp', t.at],
+      ['Cause detail', t.cause && t.cause.detail, true],
+      ['Trip equation', t.cause && t.cause.equation ? t.cause.equation + (t.cause.equationText ? ' := ' + t.cause.equationText : '') : null, true],
+      ['Immediate cause', t.cause && t.cause.immediate],
       ['Event', t.ev], ['Targets', t.targets], ['Shot', t.shot],
       ['Relay', [t.tid, t.rid].filter(Boolean).join(' / ')], ['File', t.file],
     ].filter(([, v]) => v != null && v !== '');
@@ -593,26 +672,53 @@ function openSiteTrips() {
       const label = `WO ${snEsc(src.workOrder || src.workOrderId)}${src.workOrderCreated ? ` (${snEsc(src.workOrderCreated)})` : ''}`;
       srcHtml = src.workOrderId ? `<a href="${SN_FIIX_WO_URL}${encodeURIComponent(src.workOrderId)}" target="_blank" rel="noopener">${label}</a>` : label;
     } else if (src.from === 'Analyzer') srcHtml = `Sent from the Event Analyzer ${snEsc(String(src.added || '').slice(0, 10))}`;
-    else if (src.from === 'Relay') srcHtml = 'Pulled from the relay';
+    else if (src.from === 'Relay') srcHtml = `Pulled from the relay${src.entry ? ` (${snEsc(src.entry)})` : ''}`;
     else if (src.from === 'Drop') srcHtml = `Dropped on the site ${snEsc(String(src.added || '').slice(0, 10))}`;
-    const meas = t.meas && t.meas.q ? tripMeasHTML(t.meas, snEsc)
-      : isCur && curMeas ? `<div class="sn-muted">Measured from the event open now (not in Site Notes yet).</div>${tripMeasHTML(curMeas, snEsc)}`
+    const meas = t.meas && t.meas.q ? tripMeasHTML(t.meas, snEsc, ref)
+      : isCur && curMeas ? `<div class="sn-muted">Measured from the event open now (not in Site Notes yet).</div>${tripMeasHTML(curMeas, snEsc, ref)}`
       : t.meas && t.meas.none ? `<div class="sn-muted">The event file has no analog data that could be measured.</div>`
       : `<div class="sn-muted">No measured values: recorded before Site Notes kept them.</div>`;
-    const tree = snTreeHTML(site, t);
-    html += `<details class="sn-trip${isCur ? ' current' : ''}"${i === 0 || isCur ? ' open' : ''}>
+    const notes = [];
+    if (t.cause && t.cause.crossEvent) notes.push('The condition was already there when this record began. It may have started in an earlier event.');
+    if (t.borrowedSettings) notes.push('This CEV has no settings section. The cause was traced with the settings saved for this site.');
+    if (t.noSettings) notes.push('This CEV has no settings section and the site has no saved settings, so the cause could not be traced.');
+    if (t.settingsSig && relaySet && t.settingsSig !== relaySet) notes.push('The relay settings at this trip are different from the settings saved for this site. The trip logic above is from the settings at the trip.');
+    if (t.perPhase && !t.perPhase.causeIsPhaseElement) notes.push(`This trip came through ${snEsc(t.perPhase.equation)}. The phase letter comes from where the settings put the logic, not from a faulted phase.`);
+    const ev = [t.ev, t.targets && t.targets !== t.ev ? 'targets ' + t.targets : null,
+      t.tid && site.relay && site.relay.tid && snNorm(t.tid) !== snNorm(site.relay.tid) ? 'TID ' + t.tid : null].filter(Boolean).join(' · ');
+    // Shown before the card is opened: the trip logic and the measured value of the element that tripped.
+    const glance = snChainHTML(site, t) + snMeasLineHTML(t.meas && t.meas.op);
+    html += `<details class="sn-trip${isCur ? ' current' : ''}" data-at="${snEsc(t.at || '')}">
       <summary><span class="sn-when">${snEsc(t.at || 'date not known')}</span>
         <span class="sn-what">${isCur ? '<b>This event:</b> ' : ''}${snEsc((t.cause && t.cause.text) || 'Trip')}</span>
-        <span class="sn-ev">${snEsc([t.ev, t.targets && t.targets !== t.ev ? 'targets ' + t.targets : null].filter(Boolean).join(' · '))}</span></summary>
-      <div class="sn-inner">${chain}
-        <div class="sn-grid">${rows.map(([k, v]) => `<div><label>${snEsc(k)}</label><div>${snEsc(v)}</div></div>`).join('')}
-          ${srcHtml ? `<div><label>Source</label><div>${srcHtml}</div></div>` : ''}</div>
-        <h4>Measured values</h4>${meas}
-        ${tree ? `<h4>Trip logic path</h4><div class="sn-tree">${tree}</div>` : ''}
+        <span class="sn-ev">${snEsc(ev)}</span>
+        ${glance ? `<div class="sn-glance">${glance}</div>` : ''}</summary>
+      <div class="sn-inner">
+        <div class="sn-grid">${rows.map(([k, v, wide]) => `<div${wide ? ' class="wide"' : ''}><label>${snEsc(k)}</label><div${k === 'Cause detail' ? '' : ' class="mono"'}>${snEsc(v)}</div></div>`).join('')}
+          ${srcHtml ? `<div><label>${src.workOrder || src.workOrderId ? 'Fiix work order' : 'Source'}</label><div>${srcHtml}</div></div>` : ''}</div>
+        <h4>Measured values</h4><div class="sn-meas">${meas}</div>
+        ${notes.map(n => `<p class="sn-muted">${n}</p>`).join('')}
+        ${t.check ? `<h4>Event analyzer check (SEL-851)</h4>${snCheckHTML(t.check)}` : ''}
       </div></details>`;
-  });
-  document.getElementById('siteTripsBody').innerHTML = html;
+  }
+  const body = document.getElementById('siteTripsBody');
+  body.innerHTML = html;
+  // a dot in the charts opens that trip
+  const charts = document.getElementById('snTripCharts');
+  if (charts) charts.onclick = e => { const d = e.target.closest('circle[data-at]'); if (d) snFocusTrip(d.dataset.at); };
   modal.style.display = 'flex';
+  const cards = [...body.querySelectorAll('details.sn-trip')];
+  const want = focusAt && cards.find(c => c.dataset.at === focusAt);
+  if (want) snFocusTrip(focusAt);
+  else { const first = cards.find(c => c.classList.contains('current')) || cards[0]; if (first) first.open = true; }
+}
+function snFocusTrip(at) {
+  const card = [...document.querySelectorAll('#siteTripsBody details.sn-trip')].find(c => c.dataset.at === at);
+  if (!card) return;
+  card.open = true;
+  card.classList.add('focus');
+  card.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  setTimeout(() => card.classList.remove('focus'), 1800);
 }
 
 // ── Hooks called by the rest of the page ──

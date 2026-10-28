@@ -478,6 +478,8 @@ body.dragging-file #drop-overlay { display: flex; }
   background: var(--card);
   padding: 0 3px;
   border-radius: 3px;
+  transform: translateX(-50%); /* left is the gap's center */
+  z-index: 1;
 }
 .logic-group-label {
   position: absolute;
@@ -1162,18 +1164,52 @@ body.dragging-file #drop-overlay { display: flex; }
 .sn-chip.same { border-color: var(--yellow); color: var(--yellow); }
 .sn-trip { border: 1px solid var(--card-border); border-radius: 8px; margin-bottom: 8px; background: var(--card); }
 .sn-trip.current { border-color: var(--accent); }
-.sn-trip summary { cursor: pointer; padding: 8px 12px; display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+.sn-trip { overflow: hidden; }
+.sn-trip summary { cursor: pointer; padding: 8px 12px; display: flex; gap: 4px 14px; align-items: baseline; flex-wrap: wrap; }
+.sn-trip[open] > summary { border-bottom: 1px solid var(--card-border); }
+.sn-trip.focus { box-shadow: 0 0 0 2px var(--accent); transition: box-shadow .3s; }
+.sn-when { min-width: 180px; }
+/* what a closed trip card shows: logic chain and the measured value */
+.sn-glance { flex-basis: 100%; display: flex; flex-direction: column; gap: 6px; margin-top: 4px; min-width: 0; }
+.sn-glance .sn-chain { margin: 0; padding: 5px 8px; font-size: 11.5px; align-self: flex-start; max-width: 100%; background: var(--bg2); border-radius: 7px; }
+.sn-meas-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 18px; font-size: 12.5px; color: var(--text-dim); }
+.sn-meas-line .tml-q b { font-family: var(--mono); color: var(--text); margin-right: 3px; }
+.sn-meas-line .tml-v label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); margin-right: 5px; }
+.sn-meas-line .tml-v b { font-family: var(--mono); font-size: 14px; color: var(--text); }
+.sn-meas-line small, .sn-meas-line .tml-pk { color: var(--text-muted); }
+.sn-meas-line .tml-pk { font-family: var(--mono); }
+.sn-meas { overflow-x: auto; }
+.sn-grid .wide { grid-column: 1 / -1; }
+.sn-grid a { color: var(--accent); }
+.sn-grid .mono { font-family: var(--mono); word-break: break-word; }
+.sn-check { border: 1px solid var(--card-border); border-left: 4px solid var(--green); border-radius: 6px; padding: 8px 12px; margin: 8px 0; background: var(--bg2); }
+.sn-check.check { border-left-color: var(--yellow); }
+.sn-check.error { border-left-color: var(--red); }
+.sn-check > b { display: block; margin-bottom: 4px; color: var(--text); }
+.sn-check ul { margin: 6px 0 0 18px; padding: 0; }
+.sn-check li { font-size: 12.5px; color: var(--text-dim); margin-bottom: 4px; }
+/* trip history charts, one row per tripping element */
+.sn-th-group { margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--card-border); }
+.sn-th-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; font-size: 13px; }
+.sn-th-head b { font-family: var(--mono); color: var(--text); }
+.sn-th-head span { color: var(--text-dim); font-size: 12.5px; }
+.sn-th-head .sn-th-n { margin-left: auto; color: var(--text-muted); font-size: 12px; }
+#snTripCharts .mp-chart figcaption { max-width: 240px; }
+#snTripCharts .mp-spark circle { cursor: pointer; }
+#snTripCharts .mp-spark circle:hover { r: 5px; stroke: var(--accent); stroke-width: 2; }
+#snTripCharts:not(:empty) { margin-bottom: 14px; }
 .sn-when { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
 .sn-what { font-weight: 600; }
 .sn-ev { font-size: 12px; color: var(--text-muted); }
 .sn-inner { padding: 4px 12px 12px; }
 .sn-inner h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); }
 .sn-chain { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0 10px; font-family: var(--mono); font-size: 12px; }
-.sn-step { background: var(--bg2); border: 1px solid var(--card-border); border-radius: 4px; padding: 2px 6px; }
+.sn-step { background: var(--bg2); border: 1px solid rgba(52, 211, 153, .45); border-radius: 4px; padding: 2px 6px; }
+.sn-step.last { border-color: rgba(248, 113, 113, .7); }
+.sn-step small { opacity: .7; }
 .sn-arrow { color: var(--text-muted); }
 .sn-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px 16px; font-size: 12px; }
 .sn-grid label { display: block; color: var(--text-muted); font-size: 11px; }
-.sn-tree { overflow-x: auto; }
 .tm-op { font-size: 12px; margin-bottom: 6px; }
 .tm-table { border-collapse: collapse; font-size: 12px; font-family: var(--mono); }
 .tm-table th { text-align: left; font-family: var(--sans); font-weight: 600; color: var(--text-dim); padding: 3px 12px 3px 0; }
@@ -1210,6 +1246,14 @@ body.dragging-file #drop-overlay { display: flex; }
 .mp-pkt { font-size: 9.5px; fill: var(--yellow); }
 .mp-curt { font-family: var(--mono); font-size: 10.5px; font-weight: 600; fill: var(--text); }
 .mp-tnote { font-size: 11.5px; color: var(--text-muted); }
+/* How this trip compares with the site's earlier trips (renderTripCompare) */
+.trip-compare { display: flex; flex-direction: column; gap: 6px; margin: -4px 0 12px; }
+.trip-compare:empty { display: none; }
+.tc-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.tc-pill { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: 700; border: 1px solid var(--card-border); background: var(--bg2); color: var(--text); }
+.tc-d { font-size: 11.5px; color: var(--text-dim); }
+.tc-alert .tc-pill { border-color: var(--red); background: var(--red-dim); color: #fca5a5; }
+.tc-warn .tc-pill { border-color: #5c4506; background: var(--yellow-dim); color: var(--yellow); }
 .mp-spark { display: block; margin-top: 4px; overflow: visible; }
 .mp-ax { font-family: var(--mono); font-size: 9.5px; fill: var(--text-muted); }
 .mp-base { stroke: var(--card-border); stroke-width: 1; }
