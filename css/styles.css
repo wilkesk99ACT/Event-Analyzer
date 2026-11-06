@@ -1258,6 +1258,9 @@ body.dragging-file #drop-overlay { display: flex; }
 .mp-chart figcaption b { color: var(--text); font-weight: 600; }
 .mp-chart figcaption span { font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); margin-left: 4px; }
 .mp-chart.main figcaption b { color: var(--accent); }
+.mp-trend .mp-chart figcaption { white-space: normal; max-width: 230px; }
+.mp-now { font-size: 10px; color: var(--text-muted); margin-top: -2px; }
+.mp-now b { font-family: var(--mono); color: var(--text); font-weight: 600; }
 .mp-pkt { font-size: 9.5px; fill: var(--yellow); }
 .mp-curt { font-family: var(--mono); font-size: 10.5px; font-weight: 600; fill: var(--text); }
 .mp-tnote { font-size: 11.5px; color: var(--text-muted); }

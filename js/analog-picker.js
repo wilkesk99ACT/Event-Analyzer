@@ -188,10 +188,23 @@ function rankedAnalogCatalog(P, A) {
   return ranked;
 }
 
+// Does the voltage chart draw the Z terminal too? Yes when the voltage element behind the trip
+// measures the Z terminal (27ZB1, 59ZN1, …) and the record has Z channels. The chart otherwise
+// shows only the Y terminal, and a Z element's value ("38 V sec = 8.95 kV") would match nothing
+// on it. Not when the file's only voltages are Z: those already fill the default traces.
+function zVoltageOnChart(P, A) {
+  const d = P?.analogData || [];
+  if (!A || !d.some(r => Math.abs(r.VAZ || 0) > 1e-6 || Math.abs(r.VBZ || 0) > 1e-6 || Math.abs(r.VCZ || 0) > 1e-6)) return false;
+  if (detectVoltageLabelSet(P)[0] === 'VAZ') return false;
+  const hit = typeof tripMeasCauseRow === 'function' ? tripMeasCauseRow(A) : null;
+  if (hit && hit.v) return hit.v.term === 'Z';
+  return analogTripKeys(A).has('VAZ');
+}
+
 // What each built-in chart already draws, so the picker can mark those "already shown".
 function defaultAnalogKeys(kind) {
   if (kind === 'current') return ['IA', 'IB', 'IC'];
-  if (kind === 'voltage') return ['VA', 'VB', 'VC'];
+  if (kind === 'voltage') return zVoltageOnChart(PARSED, ANALYSIS) ? ['VA', 'VB', 'VC', 'VAZ', 'VBZ', 'VCZ'] : ['VA', 'VB', 'VC'];
   if (kind === 'relevant') {
     const fam = ANALYSIS?.tripCause?.family;
     return fam === 'groundI' ? ['IN', 'IG'] : (ANALOG_FAMILY_KEYS[fam] || []);

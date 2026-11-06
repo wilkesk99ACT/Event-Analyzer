@@ -305,19 +305,51 @@ const MP_QTY_NAME = {
 };
 function mpQtyName(q) { return MP_QTY_NAME[q] || q || ''; }
 
+// One element on each phase is one family: 27ZA1, 27ZB1 and 27ZC1 are the same undervoltage
+// element (same pickup, same timer) looking at phase A, B or C, and which phase sagged first is
+// chance. Their trips are charted and compared together. 59ZN1, 27P1, 51G stay on their own.
+function mpElementFamily(el) { return String(el || '').replace(/^(\d+[A-Z]?)[ABC](\d+)$/, '$1·$2'); }
+function mpSameFamily(a, b) {
+  return !!(a && b) && mpElementFamily(a.element) === mpElementFamily(b.element) && a.kind === b.kind && a.unit === b.unit;
+}
+// "27ZA1/27ZB1/27ZC1" for the elements actually in the list, and what they measure together.
+function mpFamilyLabel(ops) { return [...new Set(ops.map(o => o.element))].sort().join('/'); }
+function mpFamilyQty(ops) {
+  const q = [...new Set(ops.map(o => o.quantity))];
+  if (q.length === 1) return mpQtyName(q[0]);
+  if (q.every(x => /^V[ABC]$/.test(x))) return 'phase voltage';
+  if (q.every(x => /^I[ABC]$/.test(x))) return 'phase current';
+  return q.map(mpQtyName).join(' / ');
+}
+
+// The element's value in primary units (kV or A), from its own ratio, so it reads in the same
+// units as the voltage and current charts. null when the trip did not keep a ratio.
+function mpToPri(o, v) {
+  if (v == null || !isFinite(v) || !o || !o.ratio || !o.priUnit) return null;
+  return o.priUnit === 'V pri' ? v * o.ratio / 1000 : v * o.ratio;
+}
+
 // ── Past trips at the site, as small charts ──
 // One chart per quantity, all over the same trips (same element as this one), so a point in one
 // lines up with the point above or beside it in the others:
 //   * the tripping element's own measured value, against its pickup (always first)
 //   * phase voltage and phase current at the trip and at their extreme in the record, unless
 //     the element's own value already is that quantity
-// Voltage and current are primary (kV, A), as Site Notes keeps them; the element's value is in
-// the units of its pickup.
+// Everything is primary (kV, A), as Site Notes keeps voltage and current, so the charts read in
+// the same units as each other and as the event's own voltage and current charts. The element's
+// value and its pickup are brought to primary with the trip's ratio; an element whose trips kept
+// no ratio (SEL-851) stays in the units of its pickup.
 
 const MP_LOW = 'lowest', MP_HIGH = 'highest';
 
 // What one chart plots from a trip's measured values (t.meas). Returns {trip, ext} or null.
-function mpOpSeries(m) { return m && m.op ? { trip: m.op.trip, ext: m.op.peak } : null; }
+function mpOpSeries(usePri) {
+  return m => {
+    if (!m || !m.op) return null;
+    if (!usePri) return { trip: m.op.trip, ext: m.op.peak };
+    return { trip: mpToPri(m.op, m.op.trip), ext: mpToPri(m.op, m.op.peak) };
+  };
+}
 function mpPhaseSeries(keys, useMax) {
   return m => {
     const q = m && m.q;
@@ -333,11 +365,17 @@ function mpPhaseSeries(keys, useMax) {
 function mpOpIsPhaseV(op) { return /^(lowest|highest) phase voltage$|^V[ABC]$/i.test(op.quantity || ''); }
 function mpOpIsPhaseI(op) { return /^(highest phase current|I[ABC]|max phase current)$/i.test(op.quantity || '') || /highest of IA, IB and IC/i.test(op.quantity || ''); }
 
-function mpCharts(op) {
+// ops (optional): the elements of all the trips charted, to title a family ("27ZA1/27ZB1/27ZC1 ·
+// phase voltage"). Without it the title is op's own element.
+function mpCharts(op, ops) {
   const under = op.kind === 'min';
+  const usePri = !!(op.ratio && op.priUnit);
+  const fam = ops && ops.length ? ops : [op];
   const out = [{
-    title: `${op.element} · ${mpQtyName(op.quantity)}`, unit: op.unit, pickup: op.pickup, ext: under ? MP_LOW : MP_HIGH,
-    get: mpOpSeries, main: true,
+    title: `${mpFamilyLabel(fam)} · ${mpFamilyQty(fam)}`,
+    unit: usePri ? (op.priUnit === 'V pri' ? 'kV pri' : 'A pri') : op.unit,
+    pickup: usePri ? mpToPri(op, op.pickup) : op.pickup, ext: under ? MP_LOW : MP_HIGH,
+    get: mpOpSeries(usePri), main: true,
   }];
   // Voltage: the side that matters for this trip. An overvoltage trip looks at the highest phase;
   // everything else (undervoltage, overcurrent, frequency) at the lowest, where a fault shows.
@@ -382,6 +420,10 @@ function mpChartHTML(c, trips, size, legend) {
   const ci = pts.findIndex(p => p.cur);
   const curLbl = ci >= 0 && ok(pts[ci].trip)
     ? `<text class="mp-curt" x="${(x(ci) + 6).toFixed(1)}" y="${(y(pts[ci].trip) + 3).toFixed(1)}">${mpFmt(pts[ci].trip)}</text>` : '';
+  // Both of the event's own numbers in words: the label beside the dot is only the value at the
+  // trip, and on a scale set by a past fault the extreme can sit flat on the baseline.
+  const now = ci >= 0 && (ok(pts[ci].trip) || ok(pts[ci].ext))
+    ? `<div class="mp-now">This event: <b>${mpFmt(pts[ci].trip)}</b> at the trip · <b>${mpFmt(pts[ci].ext)}</b> ${c.ext} in record</div>` : '';
   const first = (pts[0].at || '').slice(0, 7), last = (pts[n - 1].at || '').slice(0, 7);
   return `<figure class="mp-chart${c.main ? ' main' : ''}">
     <figcaption><b>${mpEsc(c.title)}</b> <span>${mpEsc(c.unit)}</span></figcaption>
@@ -398,6 +440,7 @@ function mpChartHTML(c, trips, size, legend) {
       <text class="mp-ax" x="${L}" y="${H + 10}">${mpEsc(first)}</text>
       <text class="mp-ax" x="${W - R}" y="${H + 10}" text-anchor="end">${mpEsc(last)}</text>
     </svg>
+    ${now}
     ${legend === false ? '' : mpLegendHTML(c.ext, ok(c.pickup), ci >= 0)}
   </figure>`;
 }

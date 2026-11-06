@@ -66,28 +66,29 @@ function renderMeasTrend() {
   const site = r && r.match && r.match.site;
   renderTripCompare();
   if (!cur) { box.innerHTML = ''; return; }
-  const el = cur.op.element;
   if (!site) {
     box.innerHTML = `<div class="mp-tnote">${typeof SN !== 'undefined' && SN.supported && !SN.dir
       ? 'Connect Site Notes (below) to compare with past trips at this site.' : 'No site matched yet, so there are no past trips to compare.'}</div>`;
     return;
   }
-  // The trips: this element's past trips at the site, plus the event on screen (its own numbers).
+  // The trips: past trips at the site by this element or its other-phase siblings (27ZA1 with
+  // 27ZB1 and 27ZC1), plus the event on screen (its own numbers).
   const trips = [];
   for (const t of (site.trips || [])) {
-    if (!t.meas || !t.meas.op || t.meas.op.element !== el || t.atMs == null) continue;
+    if (!t.meas || !mpSameFamily(t.meas.op, cur.op) || t.atMs == null) continue;
     if (r.ids && t.at === r.ids.at) continue;
     trips.push({ at: t.at, ms: t.atMs, m: t.meas, cause: t.cause && t.cause.text, cur: false });
   }
   const past = trips.length;
   if (r.ids && r.ids.atMs != null) trips.push({ at: r.ids.at, ms: r.ids.atMs, m: cur, cur: true });
   trips.sort((a, b) => a.ms - b.ms);
+  const el = mpFamilyLabel(trips.map(t => t.m.op));
   if (!past) {
     box.innerHTML = `<div class="mp-tnote">No earlier ${mpEsc(el)} trips with measured values at ${mpEsc(site.name)}.</div>`;
     return;
   }
   // Small, beside the values and stacked: they only have to show which way the values are moving.
-  const charts = mpCharts(cur.op).map(c => mpChartHTML(c, trips, { W: 220, H: 34 }, false)).filter(Boolean).join('');
+  const charts = mpCharts(cur.op, trips.map(t => t.m.op)).map(c => mpChartHTML(c, trips, { W: 220, H: 34 }, false)).filter(Boolean).join('');
   box.innerHTML = `<div class="mp-th">Past ${mpEsc(el)} trips at ${mpEsc(site.name)} <span>${past} earlier + this event</span></div>
     <div class="mp-charts">${charts}</div>${mpLegendHTML(null, true, true)}`;
 }
@@ -139,9 +140,10 @@ function renderTripCompare() {
   const sev = o => o ? (o.multPeak != null ? o.multPeak : o.multTrip) : null;
   const cs = cur && sev(cur.op);
   if (cs != null && isFinite(cs)) {
-    const el = cur.op.element, under = cur.op.kind === 'min';
-    const vals = past.filter(t => t.meas && t.meas.op && t.meas.op.element === el)
-      .map(t => sev(t.meas.op)).filter(v => v != null && isFinite(v));
+    const under = cur.op.kind === 'min';
+    const fam = past.filter(t => t.meas && mpSameFamily(t.meas.op, cur.op));
+    const el = mpFamilyLabel(fam.map(t => t.meas.op).concat(cur.op));
+    const vals = fam.map(t => sev(t.meas.op)).filter(v => v != null && isFinite(v));
     if (vals.length) {
       const lo = Math.min(...vals), hi = Math.max(...vals);
       const range = lo === hi ? `${lo.toFixed(2)}×` : `${lo.toFixed(2)}–${hi.toFixed(2)}×`;

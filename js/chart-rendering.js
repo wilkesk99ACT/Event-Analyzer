@@ -214,6 +214,17 @@ function buildVoltageMagChart(P, A, compact, heightOverride) {
     { label: `${labels[1]}.Mag`, color: '#3b82f6', values: vbMag },
     { label: `${labels[2]}.Mag`, color: '#22c55e', values: vcMag },
   ];
+  // A Z-terminal element tripped: draw the Z terminal too, so its value can be found here.
+  const withZ = typeof zVoltageOnChart === 'function' && zVoltageOnChart(P, A);
+  if (withZ) {
+    const zUnit = detectChannelUnit(P, ['VAZ', 'VBZ'], unit);
+    const lab = ch => zUnit !== unit ? `${ch}.Mag (${zUnit})` : `${ch}.Mag`;
+    traces.push(
+      { label: lab('VAZ'), color: '#fca5a5', dash: '6,3', unit: zUnit, values: computeRmsMagnitude(data.map(r => r.VAZ), samplesPerCycle, MAGS) },
+      { label: lab('VBZ'), color: '#93c5fd', dash: '6,3', unit: zUnit, values: computeRmsMagnitude(data.map(r => r.VBZ), samplesPerCycle, MAGS) },
+      { label: lab('VCZ'), color: '#86efac', dash: '6,3', unit: zUnit, values: computeRmsMagnitude(data.map(r => r.VCZ), samplesPerCycle, MAGS) });
+  }
+  const title = withZ ? 'Voltage Magnitude · Y and Z terminals' : 'Voltage Magnitude';
   if (compact) appendExtraAnalogTraces('voltage', traces, unit);
 
   if (compact) {
@@ -225,11 +236,11 @@ function buildVoltageMagChart(P, A, compact, heightOverride) {
       numHGrid: 4, numVGrid: 8, fontSize: 12, msPerSample, yUnit: unit,
       forceZeroBaseline: false, triggerIdx, tripIdx, cursorIdx, markAIdx, markBIdx, compact: true, bg: 'var(--card)', xOffsetMs,
     });
-    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">Voltage Magnitude${zoomHintHTML('voltage')}</div><div class="chart-svg-slot" id="chartSlot-voltage">${svg}</div>${analogPickerHTML('voltage')}</div>`;
+    return `<div class="banner-mini-chart"><div class="banner-mini-chart-title">${title}${zoomHintHTML('voltage')}</div><div class="chart-svg-slot" id="chartSlot-voltage">${svg}</div>${analogPickerHTML('voltage')}</div>`;
   }
 
   const svg = renderMagnitudeChartSVG(traces, { msPerSample, yUnit: unit, forceZeroBaseline: false, triggerIdx: triggerIdxFull, tripIdx: tripIdxFull });
-  return `<div class="card blue-accent"><div class="card-header">🔌 Voltage Magnitude</div>${svg}
+  return `<div class="card blue-accent"><div class="card-header">🔌 ${title}</div>${svg}
     <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">${magMethodNote(P)}</div>
   </div>`;
 }
